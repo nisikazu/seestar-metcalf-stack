@@ -65,15 +65,15 @@ registration, then applies additional per-frame shifts from an ephemeris CSV:
 End-to-end wrapper with practical defaults:
 
 ```cmd
-C:\local\codex\seestar\run-moving-target-pipeline.cmd ^
-  --source-dir "C:\local\codex\seestar\downloads\C2025 R2 (SWAN)_sub"
+C:\local\codex\seestar\seestar-metcalf-stack.cmd ^
+  "C:\local\codex\seestar\downloads\C2025 R2 (SWAN)_sub"
 ```
 
-With only `--source-dir`, the pipeline:
+With only the source folder argument, the pipeline:
 
 - splits subframes into sessions using a 60-minute gap;
 - selects the latest session;
-- creates one run work directory under `siril_work\`;
+- creates one run work directory under `metcalf_output\`;
 - stores generated Horizons CSV, Astrometry upload FITS/JSON/WCS, Siril
   conversion files, final FITS/PNG, shift CSV, and summaries in that work
   directory;
@@ -98,7 +98,7 @@ The default work directory name is built from the FITS `OBJECT` value and the
 run time, for example:
 
 ```text
-C:\local\codex\seestar\siril_work\C2025_R2_SWAN_moving-20260711-100132\
+C:\local\codex\seestar\metcalf_output\C2025_R2_SWAN_mean-20260711-100132\
 ```
 
 Pass `--work-name` to override the object-derived stem; the timestamp is still
@@ -144,8 +144,8 @@ Horizons. This is intentional for accurate nearby-object work, but use
 To reuse an existing Astrometry.net solve and avoid re-uploading the first FITS:
 
 ```cmd
-C:\local\codex\seestar\run-moving-target-pipeline.cmd ^
-  --source-dir "C:\local\codex\seestar\downloads\C2025 R2 (SWAN)_sub" ^
+C:\local\codex\seestar\seestar-metcalf-stack.cmd ^
+  "C:\local\codex\seestar\downloads\C2025 R2 (SWAN)_sub" ^
   --astrometry-json "C:\local\codex\seestar\plate_solve\Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185257_20260711-074708_astrometry.json" ^
   --work-name C2025_R2_SWAN_moving
 ```
@@ -153,8 +153,8 @@ C:\local\codex\seestar\run-moving-target-pipeline.cmd ^
 Legacy explicit-CSV wrapper:
 
 ```cmd
-C:\local\codex\seestar\run-moving-target-pipeline.cmd ^
-  --source-dir "C:\local\codex\seestar\downloads\98943 Torifune_sub" ^
+C:\local\codex\seestar\seestar-metcalf-stack.cmd ^
+  "C:\local\codex\seestar\downloads\98943 Torifune_sub" ^
   --ephemeris-csv "C:\local\codex\seestar\ephemeris\torifune_20260709_linear.csv" ^
   --work-name torifune_20260709_moving
 ```
@@ -164,8 +164,8 @@ the Python `scripts\astrometry_solve.py` helper and downloads the WCS FITS. This
 to Astrometry.net. To avoid an upload and reuse an existing WCS:
 
 ```cmd
-C:\local\codex\seestar\run-moving-target-pipeline.cmd ^
-  --source-dir "C:\local\codex\seestar\downloads\98943 Torifune_sub" ^
+C:\local\codex\seestar\seestar-metcalf-stack.cmd ^
+  "C:\local\codex\seestar\downloads\98943 Torifune_sub" ^
   --ephemeris-csv "C:\local\codex\seestar\ephemeris\torifune_20260709_linear.csv" ^
   --wcs-fits "C:\local\codex\seestar\downloads\98943_Torifune_20260709\wcs_16288301.fits" ^
   --count 20 ^
@@ -184,15 +184,15 @@ python C:\local\codex\seestar\scripts\astrometry_solve.py ^
 Then run the moving-target stack:
 
 ```cmd
-C:\local\codex\seestar\run-moving-target-stack.cmd ^
-  --source-dir "C:\local\codex\seestar\downloads\98943 Torifune_sub" ^
+C:\local\codex\seestar\seestar-metcalf-stack.cmd ^
+  "C:\local\codex\seestar\downloads\98943 Torifune_sub" ^
   --ephemeris-csv "C:\local\codex\seestar\ephemeris\torifune_20260709_linear.csv" ^
   --wcs-fits "C:\local\codex\seestar\downloads\98943_Torifune_20260709\wcs_16288301.fits" ^
   --count 20 ^
   --work-name torifune_20260709_moving
 ```
 
-Outputs are written under `siril_work/<work-name>-YYYYMMDD-HHMMSS/`. Current
+Outputs are written under `metcalf_output/<work-name>-YYYYMMDD-HHMMSS/`. Current
 default filenames use the explicit suffixes `_metcalf_stack.fit`,
 `_metcalf_preview.png`, `_star_stack.fit`, `_star_preview.png`, `_shifts.csv`,
 and `_summary.json`. The summary keeps `outputs.fits` as an alias for the
