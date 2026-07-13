@@ -48,7 +48,7 @@ full path.
 
 The larger Windows convenience asset
 `seestar-metcalf-stack-siril-vX.Y.Z.zip` includes Siril and a
-`metcalf-stack.exe` containing the Python runtime. Choose it if you want the
+`seestar-metcalf-stack.exe` containing the Python runtime. Choose it if you want the
 lowest setup cost. Its Siril files remain covered by GPLv3; see the notices
 included in that package. The convenience package does not require a separate
 Python installation.
@@ -79,7 +79,7 @@ Start by listing the sessions detected in a Seestar subframe folder. Listing is
 local-only: it does not contact Astrometry.net, Horizons, or Siril.
 
 ```bat
-run-metcalf-stack.cmd --source-dir "C:\path\to\98943 Torifune_sub" --list-sessions
+seestar-metcalf-stack.cmd "C:\path\to\98943 Torifune_sub" --list-sessions
 ```
 
 The output shows a 1-based session number, frame count, and local/UTC start and
@@ -89,13 +89,13 @@ greater than 60 minutes. With no selector, the latest session is used.
 Select a listed session by number:
 
 ```bat
-run-metcalf-stack.cmd --source-dir "C:\path\to\frames" --session-index 2
+seestar-metcalf-stack.cmd "C:\path\to\frames" --session-index 2
 ```
 
 Or select the first session starting at or after a local date/time:
 
 ```bat
-run-metcalf-stack.cmd --source-dir "C:\path\to\frames" --session-at 20260709-195000
+seestar-metcalf-stack.cmd "C:\path\to\frames" --session-at 20260709-195000
 ```
 
 `--session-at` accepts `YYYYMMDD` or `YYYYMMDD-hhmmss`. It is interpreted in
@@ -109,10 +109,10 @@ The simplest run uses the latest session, arithmetic mean, and its first frame
 as the reference:
 
 ```bat
-run-metcalf-stack.cmd --source-dir "C:\path\to\C2025 R2 (SWAN)_sub"
+seestar-metcalf-stack.cmd "C:\path\to\C2025 R2 (SWAN)_sub"
 ```
 
-You can also drag the subframe folder onto `run-metcalf-stack-drop.cmd`. The
+You can also drag the subframe folder onto `seestar-metcalf-stack-drop.cmd`. The
 output folder opens after a successful run.
 
 The pipeline automatically obtains a Horizons ephemeris, solves the reference
@@ -142,7 +142,7 @@ Mean is the default and generally provides the best signal-to-noise ratio when
 the input frames are clean:
 
 ```bat
-run-metcalf-stack.cmd --source-dir "C:\path\to\frames" --stack-method mean
+seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean
 ```
 
 Median is more resistant to satellites, airplanes, hot pixels, and other
@@ -152,7 +152,7 @@ temporary disk-backed arrays, and usually has lower statistical efficiency.
 Exact-zero padding is always excluded from the median samples:
 
 ```bat
-run-metcalf-stack.cmd --source-dir "C:\path\to\frames" --stack-method median
+seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median
 ```
 
 Rank-fit sorts the nonzero samples at each pixel, keeps the central percentage,
@@ -160,7 +160,7 @@ fits a fifth-degree polynomial to brightness versus normalized rank, and returns
 the fitted value at the median rank. The default central percentage is 50:
 
 ```bat
-run-metcalf-stack.cmd --source-dir "C:\path\to\frames" --stack-method rankfit --rankfit-fraction 50
+seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method rankfit --rankfit-fraction 50
 ```
 
 `--rankfit-fraction` is an integer from 1 through 100. Output names and run
@@ -178,7 +178,7 @@ reference. For a long session, the frame nearest the temporal midpoint can
 reduce the largest registration and moving-target offsets:
 
 ```bat
-run-metcalf-stack.cmd --source-dir "C:\path\to\frames" --reference-frame middle
+seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
 ```
 
 The selected frame is sent to Astrometry.net and is explicitly set as Siril's
@@ -214,20 +214,20 @@ run. Use `--no-cleanup` to keep them for diagnosis.
 Include Seestar files whose names contain `_failed_`:
 
 ```bat
-run-metcalf-stack.cmd --source-dir "C:\path\to\frames" --include-failed-frames
+seestar-metcalf-stack.cmd "C:\path\to\frames" --include-failed-frames
 ```
 
 Use an existing Horizons CSV or Astrometry.net result:
 
 ```bat
-run-metcalf-stack.cmd --source-dir "C:\path\to\frames" --ephemeris-csv "C:\path\to\ephemeris.csv"
-run-metcalf-stack.cmd --source-dir "C:\path\to\frames" --astrometry-json "C:\path\to\solution.json"
+seestar-metcalf-stack.cmd "C:\path\to\frames" --ephemeris-csv "C:\path\to\ephemeris.csv"
+seestar-metcalf-stack.cmd "C:\path\to\frames" --astrometry-json "C:\path\to\solution.json"
 ```
 
 Use geocentric Horizons coordinates instead of sending the FITS observing site:
 
 ```bat
-run-metcalf-stack.cmd --source-dir "C:\path\to\frames" --horizons-center geocenter
+seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-center geocenter
 ```
 
 When quoting a Windows path for a `.cmd` file, omit the trailing backslash:
