@@ -38,7 +38,14 @@ PRIVACY_FITS_KEYS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Solve first frame and stack Seestar subframes on a moving target")
-    parser.add_argument("--source-dir", required=True, type=Path)
+    parser.add_argument(
+        "source_dir_arg",
+        nargs="?",
+        type=Path,
+        metavar="SOURCE_DIR",
+        help="Directory containing Seestar subframe FITS files",
+    )
+    parser.add_argument("--source-dir", dest="source_dir_option", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--ephemeris-csv",
         type=Path,
@@ -146,6 +153,13 @@ def parse_args() -> argparse.Namespace:
         help="Output filename stem. Defaults to '<OBJECT>_<start>-<end>_<N>frames'.",
     )
     args = parser.parse_args()
+    if args.source_dir_arg and args.source_dir_option:
+        parser.error("specify the source folder either as the first argument or with --source-dir, not both")
+    args.source_dir = args.source_dir_arg or args.source_dir_option
+    if args.source_dir is None:
+        parser.error("source folder is required")
+    delattr(args, "source_dir_arg")
+    delattr(args, "source_dir_option")
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
     return args
@@ -329,9 +343,9 @@ def print_sessions(args: argparse.Namespace) -> None:
         )
     quoted_source = f'"{args.source_dir}"'
     print("\nSelect by number:")
-    print(f"  run-metcalf-stack.cmd --source-dir {quoted_source} --session-index N")
+    print(f"  seestar-metcalf-stack.cmd {quoted_source} --session-index N")
     print("Select the first session starting at or after a local date/time:")
-    print(f"  run-metcalf-stack.cmd --source-dir {quoted_source} --session-at YYYYMMDD-hhmmss")
+    print(f"  seestar-metcalf-stack.cmd {quoted_source} --session-at YYYYMMDD-hhmmss")
 
 
 def resolve_session(args: argparse.Namespace) -> tuple[int, list[Path], dict[str, object]]:
