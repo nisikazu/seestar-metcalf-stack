@@ -10,8 +10,8 @@ Use the Siril-free package contents as the GitHub repository root:
 - `README.md`
 - `README-ja.md`
 - `requirements.txt`
-- `run-metcalf-stack.cmd`
-- `run-metcalf-stack-drop.cmd`
+- `seestar-metcalf-stack.cmd`
+- `seestar-metcalf-stack-drop.cmd`
 - `setup-python-deps.cmd`
 - `set-astrometry-api-key.cmd`
 - `siril-cli.cmd`
@@ -32,15 +32,15 @@ control/reverse-engineering workspace.
 Create both release zips:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\package-metcalf-stack.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\package-metcalf-stack-siril.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\package-seestar-metcalf-stack.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\package-seestar-metcalf-stack-siril.ps1
 ```
 
 Upload both files from `dist/` to the GitHub Release:
 
 - `seestar-metcalf-stack-vX.Y.Z.zip`: standard, Siril-free package
 - `seestar-metcalf-stack-siril-vX.Y.Z.zip`: Windows convenience package with Siril bundled
-  and `metcalf-stack.exe` containing the Python runtime
+  and `seestar-metcalf-stack.exe` containing the Python runtime
 
 The Siril-bundled zip must retain:
 
