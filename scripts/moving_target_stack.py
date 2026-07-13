@@ -33,7 +33,11 @@ import numpy as np
 from PIL import Image
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parents[1]
+)
 DEFAULT_PYTHON = (
     Path.home()
     / ".cache"
@@ -515,9 +519,7 @@ def load_ephemeris(path: Path) -> list[TargetPoint]:
             dec_text = row.get("dec_deg") or row.get("dec")
             if not time_text or not ra_text or not dec_text:
                 raise ValueError("Ephemeris CSV must contain time, ra_deg/ra, dec_deg/dec columns")
-            rows.append(TargetPoint(parse_time(time_text), parse_angle(ra_text, True), parse_angle(dec_text, False)))
-    rows.sort(key=lambda item: item.time)
-    if not rows…6808 tokens truncated…irst DATE-OBS is at or after this local time. "
+            rows.append(TargetPoint(parse_time(time_text), parse_angle(ra_text,…6833 tokens truncated…irst DATE-OBS is at or after this local time. "
             "Format: YYYYMMDD or YYYYMMDD-hhmmss; hh, mm, ss must be two digits when present."
         ),
     )

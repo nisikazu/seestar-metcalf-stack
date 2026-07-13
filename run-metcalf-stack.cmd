@@ -2,6 +2,11 @@
 setlocal
 set "ROOT=%~dp0"
 
+if exist "%ROOT%metcalf-stack.exe" (
+  "%ROOT%metcalf-stack.exe" %*
+  exit /b %ERRORLEVEL%
+)
+
 set "PY=python"
 where python >nul 2>nul
 if errorlevel 1 (

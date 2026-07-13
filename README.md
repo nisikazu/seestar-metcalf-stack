@@ -26,7 +26,8 @@ reliably present in a raw Seestar subframe:
   Horizons-derived moving-target offset and performs the final pixel combine.
 - **Python, NumPy, and Pillow** run the pipeline, calculate shifts and stacks,
   write linear FITS files, and create display previews.
-- **Node.js** runs the small Astrometry.net upload and polling helper.
+- **Python** also handles the Astrometry.net upload, polling, calibration download,
+  and resumable submission checkpoint.
 
 Astrometry.net, Horizons, and Siril are therefore not interchangeable extras:
 they respectively answer *where the image points*, *where the target moved*,
@@ -36,23 +37,25 @@ and *how the background-star field moved*.
 
 - Windows 10 or 11
 - Python 3.10 or newer
-- Node.js 20 or newer
 - Internet access for Astrometry.net and JPL Horizons
 - An Astrometry.net API key
 - Siril 1.4 or newer
 
-The normal GitHub source and `seestar-metcalf-stack-vX.Y.Z.zip` do not bundle
-Siril. Install Siril separately and place `siril-cli.exe` on `PATH`, or set the
-`SIRIL_CLI` environment variable to its full path.
+The normal GitHub source and `seestar-metcalf-stack-vX.Y.Z.zip` require Python
+3.10 or newer and do not bundle Siril. Install Siril separately and place
+`siril-cli.exe` on `PATH`, or set the `SIRIL_CLI` environment variable to its
+full path.
 
 The larger Windows convenience asset
-`seestar-metcalf-stack-siril-vX.Y.Z.zip` includes Siril. Choose it if you want
-the lowest setup cost. Its Siril files remain covered by GPLv3; see the notices
-included in that package.
+`seestar-metcalf-stack-siril-vX.Y.Z.zip` includes Siril and a
+`metcalf-stack.exe` containing the Python runtime. Choose it if you want the
+lowest setup cost. Its Siril files remain covered by GPLv3; see the notices
+included in that package. The convenience package does not require a separate
+Python installation.
 
 ## First-time setup
 
-1. Install Python and Node.js. Install Siril too unless using the bundled build.
+1. Install Python. Install Siril too unless using the bundled build.
 2. Run the Python dependency installer from the extracted package:
 
    ```bat

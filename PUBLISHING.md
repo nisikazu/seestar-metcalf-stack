@@ -1,0 +1,80 @@
+# Publishing Seestar Metcalf Stack
+
+This project should be published as a focused post-processing tool, not as the
+entire local Seestar research workspace.
+
+## Recommended GitHub Repository Contents
+
+Use the Siril-free package contents as the GitHub repository root:
+
+- `README.md`
+- `README-ja.md`
+- `requirements.txt`
+- `run-metcalf-stack.cmd`
+- `run-metcalf-stack-drop.cmd`
+- `setup-python-deps.cmd`
+- `set-astrometry-api-key.cmd`
+- `siril-cli.cmd`
+- `scripts/astrometry_solve.py`
+- `scripts/`
+- `tests/`
+- `.github/workflows/tests.yml`
+- `.gitignore`
+- `THIRD-PARTY-NOTICES.md`
+- `LICENSE` (MIT)
+
+Do not publish local observing data, Seestar PEM files, API keys, logs, packaged
+zips, `downloads/`, `siril_work/`, `metcalf_output/`, `plate_solve/`, or the broader Seestar
+control/reverse-engineering workspace.
+
+## Release Assets
+
+Create both release zips:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\package-metcalf-stack.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\package-metcalf-stack-siril.ps1
+```
+
+Upload both files from `dist/` to the GitHub Release:
+
+- `seestar-metcalf-stack-vX.Y.Z.zip`: standard, Siril-free package
+- `seestar-metcalf-stack-siril-vX.Y.Z.zip`: Windows convenience package with Siril bundled
+  and `metcalf-stack.exe` containing the Python runtime
+
+The Siril-bundled zip must retain:
+
+- `THIRD-PARTY-NOTICES.md`
+- `SIRIL-LICENSE-GPLv3.md`
+- `SIRIL-SOURCE.txt`
+
+## Versioning
+
+Use the same version number for both release assets. The source repository should
+match that release version.
+
+## License
+
+The project code is released under the MIT License, copyright 2026 Nishida
+Kazufumi (@RollerRacers). The Siril-bundled convenience zip remains subject to
+Siril's GPLv3 notices for the bundled Siril component.
+
+## Suggested Release Text
+
+```text
+Seestar Metcalf Stack vX.Y.Z
+
+Post-process Seestar subframe FITS for moving targets such as comets and
+asteroids. Generates a Metcalf/moving-target stack, a star-reference stack, and a
+side-by-side comparison FITS.
+
+Assets:
+- seestar-metcalf-stack-vX.Y.Z.zip: recommended package; install Siril separately.
+- seestar-metcalf-stack-siril-vX.Y.Z.zip: Windows convenience package with Siril bundled.
+
+Requirements:
+- Python 3.10+
+- Siril CLI, unless using the bundled convenience zip
+- Astrometry.net API key
+- Network access to Astrometry.net and JPL Horizons
+```

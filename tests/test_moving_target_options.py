@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import moving_target_stack as stacker
 import moving_target_pipeline as pipeline
+import astrometry_solve
 
 
 class MedianAccumulatorTests(unittest.TestCase):
@@ -151,6 +152,34 @@ class PlateSolveCacheTests(unittest.TestCase):
             checkpoint.write_text('{"subid":15501234}', encoding="utf-8")
 
             self.assertEqual(pipeline.cached_submission_id(result_path), "15501234")
+
+
+class AstrometryHelperTests(unittest.TestCase):
+    def test_scale_hint_uses_fits_camera_metadata(self):
+        hint = astrometry_solve.estimate_scale_hint(
+            {
+                "FOCALLEN": 250.0,
+                "XPIXSZ": 2.9,
+                "YPIXSZ": 2.9,
+                "NAXIS1": 1920,
+                "NAXIS2": 1080,
+            }
+        )
+
+        self.assertIsNotNone(hint)
+        self.assertAlmostEqual(hint["arcsecPerPix"], 2.391, places=2)
+        self.assertAlmostEqual(hint["fovDeg"]["width"], 1.28, places=2)
+
+    def test_multipart_body_contains_json_and_fits_parts(self):
+        body, content_type = astrometry_solve.multipart_body(
+            {"request-json": '{"session":"redacted"}'}, "frame.fit", b"SIMPLE  = T"
+        )
+
+        boundary = content_type.split("boundary=", 1)[1].encode("ascii")
+        self.assertIn(b"request-json", body)
+        self.assertIn(b"frame.fit", body)
+        self.assertIn(b"SIMPLE  = T", body)
+        self.assertIn(boundary, body)
 
 
 if __name__ == "__main__":

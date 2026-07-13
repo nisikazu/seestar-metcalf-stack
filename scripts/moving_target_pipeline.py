@@ -2,7 +2,7 @@
 """End-to-end moving-target stack pipeline.
 
 This wrapper connects:
-1. first-frame plate solve with astrometry_solve.mjs,
+1. first-frame plate solve with astrometry_solve.py,
 2. Siril similarity registration on background stars,
 3. target-motion compensated stacking with moving_target_stack.py.
 """
@@ -22,8 +22,11 @@ from pathlib import Path
 from moving_target_stack import parse_time, processing_method_token, read_fits_header, select_reference_index
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_NODE = "node"
+REPO_ROOT = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parents[1]
+)
 PRIVACY_FITS_KEYS = {
     "SITELONG",
     "SITELAT",
@@ -100,7 +103,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not upload; require a valid explicit or cached Astrometry.net solution.",
     )
-    parser.add_argument("--node", default=DEFAULT_NODE)
     parser.add_argument("--work-dir", type=Path, help="Use this exact run work directory instead of creating one under --work-root")
     parser.add_argument("--work-root", type=Path, default=REPO_ROOT / "metcalf_output")
     parser.add_argument(
@@ -147,6 +149,12 @@ def parse_args() -> argparse.Namespace:
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
     return args
+
+
+def child_command(script_name: str, arguments: list[str]) -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--internal-script", script_name, *arguments]
+    return [sys.executable, str(Path(__file__).resolve().parent / script_name), *arguments]
 
 
 def safe_name(value: str) -> str:
@@ -408,20 +416,21 @@ def ensure_ephemeris(args: argparse.Namespace, first_frame: Path, session_index:
     if args.no_auto_ephemeris:
         raise FileNotFoundError(f"Ephemeris CSV not found: {ephemeris_csv}")
 
-    cmd = [
-        sys.executable,
-        str(REPO_ROOT / "scripts" / "horizons_ephemeris.py"),
-        "--source-dir",
-        str(args.source_dir),
-        "--output",
-        str(ephemeris_csv),
-        "--center",
-        args.horizons_center,
-        "--chunk-size",
-        str(args.horizons_chunk_size),
-        "--retries",
-        str(args.horizons_retries),
-    ]
+    cmd = child_command(
+        "horizons_ephemeris.py",
+        [
+            "--source-dir",
+            str(args.source_dir),
+            "--output",
+            str(ephemeris_csv),
+            "--center",
+            args.horizons_center,
+            "--chunk-size",
+            str(args.horizons_chunk_size),
+            "--retries",
+            str(args.horizons_retries),
+        ],
+    )
     if args.horizons_center == "fits-site":
         cmd.append("--allow-site-upload")
     if args.horizons_object:
@@ -548,13 +557,10 @@ def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path
         first_frame,
         args.work_dir / f"{first_frame.stem}_upload_sanitized.fit",
     )
-    solve_command = [
-        args.node,
-        str(REPO_ROOT / "astrometry_solve.mjs"),
-        str(upload_frame),
-        str(json_path),
-        str(wcs_path),
-    ]
+    solve_command = child_command(
+        "astrometry_solve.py",
+        [str(upload_frame), str(json_path), str(wcs_path)],
+    )
     resume_subid = cached_submission_id(json_path)
     if resume_subid:
         print(f"Resuming cached Astrometry.net submission {resume_subid} for {first_frame.name}.", flush=True)
@@ -583,38 +589,39 @@ def run_stack(
     wcs_fits: Path | None,
     astrometry_json: Path | None,
 ) -> dict[str, object]:
-    cmd = [
-        sys.executable,
-        str(REPO_ROOT / "scripts" / "moving_target_stack.py"),
-        "--source-dir",
-        str(args.source_dir),
-        "--ephemeris-csv",
-        str(ephemeris_csv),
-        "--work-dir",
-        str(args.work_dir),
-        "--registration-transform",
-        args.registration_transform,
-        "--registration-minpairs",
-        str(args.registration_minpairs),
-        "--stack-method",
-        args.stack_method,
-        "--rankfit-fraction",
-        str(args.rankfit_fraction),
-        "--reference-frame",
-        args.reference_frame,
-        "--output-bitpix",
-        args.output_bitpix,
-        "--uint16-scale",
-        args.uint16_scale,
-        "--scale-low-percentile",
-        str(args.scale_low_percentile),
-        "--scale-high-percentile",
-        str(args.scale_high_percentile),
-        "--preview-low-percentile",
-        str(args.preview_low_percentile),
-        "--preview-high-percentile",
-        str(args.preview_high_percentile),
-    ]
+    cmd = child_command(
+        "moving_target_stack.py",
+        [
+            "--source-dir",
+            str(args.source_dir),
+            "--ephemeris-csv",
+            str(ephemeris_csv),
+            "--work-dir",
+            str(args.work_dir),
+            "--registration-transform",
+            args.registration_transform,
+            "--registration-minpairs",
+            str(args.registration_minpairs),
+            "--stack-method",
+            args.stack_method,
+            "--rankfit-fraction",
+            str(args.rankfit_fraction),
+            "--reference-frame",
+            args.reference_frame,
+            "--output-bitpix",
+            args.output_bitpix,
+            "--uint16-scale",
+            args.uint16_scale,
+            "--scale-low-percentile",
+            str(args.scale_low_percentile),
+            "--scale-high-percentile",
+            str(args.scale_high_percentile),
+            "--preview-low-percentile",
+            str(args.preview_low_percentile),
+            "--preview-high-percentile",
+            str(args.preview_high_percentile),
+        ],
+    )
     if args.pattern:
         cmd.extend(["--pattern", args.pattern])
     if args.output_prefix:
@@ -705,6 +712,23 @@ def main() -> int:
     return 0
 
 
+def run_internal_script() -> int:
+    if len(sys.argv) < 3 or sys.argv[1] != "--internal-script":
+        global args
+        args = parse_args()
+        return main()
+    script_name = sys.argv[2]
+    sys.argv = [script_name, *sys.argv[3:]]
+    if script_name == "astrometry_solve.py":
+        from astrometry_solve import main as script_main
+    elif script_name == "horizons_ephemeris.py":
+        from horizons_ephemeris import main as script_main
+    elif script_name == "moving_target_stack.py":
+        from moving_target_stack import main as script_main
+    else:
+        raise SystemExit(f"Unknown internal script: {script_name}")
+    return script_main()
+
+
 if __name__ == "__main__":
-    args = parse_args()
-    raise SystemExit(main())
+    raise SystemExit(run_internal_script())
