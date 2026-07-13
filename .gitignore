@@ -1,0 +1,34 @@
+# Secrets
+.astrometry_api_key
+.env
+*.key
+*.pem
+
+# Python and Node runtime files
+__pycache__/
+*.py[cod]
+node_modules/
+.venv/
+venv/
+
+# Generated processing data
+siril_work/
+metcalf_output/
+downloads/
+plate_solve/
+*.fit
+*.fits
+*.png
+*.log
+*.jsonl
+
+# Local dependencies and release artifacts
+tools/
+dist/
+*.zip
+
+# Windows/editor files
+Thumbs.db
+Desktop.ini
+.vs/
+.vscode/
