@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Pipeline = Join-Path $Root "scripts\moving_target_pipeline.py"
+$BundledExe = Join-Path $Root "seestar-metcalf-stack.exe"
 $LogDir = Join-Path $Root "metcalf_output"
 $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $LogPath = Join-Path $LogDir "metcalf-drop-$Stamp.log"
@@ -78,15 +79,21 @@ if (-not (Test-Path -LiteralPath $ResolvedSource -PathType Container)) {
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-$Python = Find-Python
-$Arguments = @($Pipeline, "--source-dir", $ResolvedSource)
+if (Test-Path -LiteralPath $BundledExe) {
+    $Program = $BundledExe
+    $Arguments = @($ResolvedSource)
+}
+else {
+    $Program = Find-Python
+    $Arguments = @($Pipeline, $ResolvedSource)
+}
 
 Write-Host "Seestar Metcalf Stack"
 Write-Host "Source: $ResolvedSource"
 Write-Host "Log:    $LogPath"
 Write-Host ""
 
-$Result = Invoke-And-Capture -FileName $Python -Arguments $Arguments -WorkingDirectory $Root
+$Result = Invoke-And-Capture -FileName $Program -Arguments $Arguments -WorkingDirectory $Root
 if ($Result.ExitCode -ne 0) {
     Write-Host ""
     Write-Host "Processing failed. See log: $LogPath"
