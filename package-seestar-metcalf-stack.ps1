@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.4.0",
+    [string]$Version = "0.4.1",
     [switch]$NoZip
 )
 
@@ -9,6 +9,11 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PackageName = "seestar-metcalf-stack-v$Version"
 $DistRoot = Join-Path $Root "dist"
 $PackageRoot = Join-Path $DistRoot $PackageName
+$ExeSource = Join-Path $Root "build\seestar-metcalf-stack.exe"
+
+if (-not (Test-Path -LiteralPath $ExeSource)) {
+    throw "Bundled executable was not found: $ExeSource. Run build-seestar-metcalf-stack-exe.ps1 first."
+}
 
 $ResolvedDistRoot = [System.IO.Path]::GetFullPath($DistRoot)
 $ResolvedPackageRoot = [System.IO.Path]::GetFullPath($PackageRoot)
@@ -29,14 +34,14 @@ $Files = @(
     @("scripts\moving_target_pipeline.py", "scripts\moving_target_pipeline.py"),
     @("scripts\moving_target_stack.py", "scripts\moving_target_stack.py"),
     @("scripts\horizons_ephemeris.py", "scripts\horizons_ephemeris.py"),
-    @("scripts\run_metcalf_stack_drop.ps1", "scripts\run_metcalf_stack_drop.ps1"),
+    @("scripts\run_metcalf_stack.ps1", "scripts\run_metcalf_stack.ps1"),
     @("tests\test_moving_target_options.py", "tests\test_moving_target_options.py"),
     @("scripts\astrometry_solve.py", "scripts\astrometry_solve.py"),
     @("README-Seestar-Metcalf-Stack.md", "README.md"),
     @("README-Seestar-Metcalf-Stack.ja.md", "README-ja.md"),
     @("requirements.txt", "requirements.txt"),
     @("seestar-metcalf-stack.cmd", "seestar-metcalf-stack.cmd"),
-    @("seestar-metcalf-stack-drop.cmd", "seestar-metcalf-stack-drop.cmd"),
+    @("build-seestar-metcalf-stack-exe.ps1", "build-seestar-metcalf-stack-exe.ps1"),
     @("setup-python-deps.cmd", "setup-python-deps.cmd"),
     @("set-astrometry-api-key.cmd", "set-astrometry-api-key.cmd"),
     @("siril-cli.cmd", "siril-cli.cmd"),
@@ -55,6 +60,8 @@ foreach ($Pair in $Files) {
     }
     Copy-Item -LiteralPath $Source -Destination $Destination
 }
+
+Copy-Item -LiteralPath $ExeSource -Destination (Join-Path $PackageRoot "seestar-metcalf-stack.exe")
 
 if (-not $NoZip) {
     $ZipPath = Join-Path $DistRoot "$PackageName.zip"

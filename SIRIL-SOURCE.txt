@@ -1,0 +1,12 @@
+This package bundles Siril 1.4.1 for Windows.
+
+Siril is free software licensed under the GNU General Public License version 3.
+The upstream project and source code are available from:
+
+https://siril.org/
+https://gitlab.com/free-astro/siril
+
+If you redistribute this package publicly, make sure the corresponding source
+code for the exact Siril binary you distribute is available as required by the
+GPLv3. The bundled Siril license text is copied to SIRIL-LICENSE-GPLv3.md when
+the package is built.

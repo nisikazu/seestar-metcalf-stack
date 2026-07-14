@@ -519,7 +519,656 @@ def load_ephemeris(path: Path) -> list[TargetPoint]:
             dec_text = row.get("dec_deg") or row.get("dec")
             if not time_text or not ra_text or not dec_text:
                 raise ValueError("Ephemeris CSV must contain time, ra_deg/ra, dec_deg/dec columns")
-            rows.append(TargetPoint(parse_time(time_text), parse_angle(ra_text,…6833 tokens truncated…irst DATE-OBS is at or after this local time. "
+            rows.append(TargetPoint(parse_time(time_text), parse_angle(ra_text, True), parse_angle(dec_text, False)))
+    rows.sort(key=lambda item: item.time)
+    if not rows:
+        raise ValueError(f"No ephemeris rows found in {path}")
+    return rows
+
+
+def interpolate_ephemeris(points: list[TargetPoint], when: datetime) -> TargetPoint:
+    if len(points) == 1:
+        return TargetPoint(when, points[0].ra_deg, points[0].dec_deg)
+    when = when.astimezone(timezone.utc)
+    if when <= points[0].time:
+        lo, hi = points[0], points[1]
+    elif when >= points[-1].time:
+        lo, hi = points[-2], points[-1]
+    else:
+        lo, hi = points[0], points[-1]
+        for i in range(len(points) - 1):
+            if points[i].time <= when <= points[i + 1].time:
+                lo, hi = points[i], points[i + 1]
+                break
+    span = (hi.time - lo.time).total_seconds()
+    frac = 0.0 if span == 0 else (when - lo.time).total_seconds() / span
+    dra = ((hi.ra_deg - lo.ra_deg + 180.0) % 360.0) - 180.0
+    ra = (lo.ra_deg + dra * frac) % 360.0
+    dec = lo.dec_deg + (hi.dec_deg - lo.dec_deg) * frac
+    return TargetPoint(when, ra, dec)
+
+
+def shift_image(data: np.ndarray, dx: float, dy: float) -> tuple[np.ndarray, np.ndarray]:
+    if data.ndim == 2:
+        shifted, mask = shift_plane(data, dx, dy)
+        return shifted, mask
+    planes = []
+    common_mask = None
+    for plane in data:
+        shifted, mask = shift_plane(plane, dx, dy)
+        planes.append(shifted)
+        common_mask = mask if common_mask is None else (common_mask & mask)
+    return np.stack(planes, axis=0), common_mask
+
+
+def shift_plane(data: np.ndarray, dx: float, dy: float) -> tuple[np.ndarray, np.ndarray]:
+    height, width = data.shape
+    if abs(dx) < 1.0e-9 and abs(dy) < 1.0e-9:
+        return data.astype(np.float64, copy=True), np.ones((height, width), dtype=bool)
+    yy, xx = np.indices((height, width), dtype=np.float32)
+    src_x = xx - np.float32(dx)
+    src_y = yy - np.float32(dy)
+    x0 = np.floor(src_x).astype(np.int32)
+    y0 = np.floor(src_y).astype(np.int32)
+    x1 = x0 + 1
+    y1 = y0 + 1
+    valid = (x0 >= 0) & (y0 >= 0) & (x1 < width) & (y1 < height)
+
+    out = np.zeros((height, width), dtype=np.float32)
+    if not np.any(valid):
+        return out, valid
+    wx = src_x[valid] - x0[valid]
+    wy = src_y[valid] - y0[valid]
+    v00 = data[y0[valid], x0[valid]]
+    v10 = data[y0[valid], x1[valid]]
+    v01 = data[y1[valid], x0[valid]]
+    v11 = data[y1[valid], x1[valid]]
+    out[valid] = (
+        (1.0 - wx) * (1.0 - wy) * v00
+        + wx * (1.0 - wy) * v10
+        + (1.0 - wx) * wy * v01
+        + wx * wy * v11
+    )
+    return out, valid
+
+
+def add_to_average(
+    sum_image: np.ndarray | None,
+    count_image: np.ndarray | None,
+    image: np.ndarray,
+    mask2d: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    if sum_image is None:
+        sum_image = np.zeros_like(image, dtype=np.float64)
+        count_shape = image.shape[-2:]
+        count_image = np.zeros(count_shape, dtype=np.uint16)
+    if count_image is None:
+        raise ValueError("count_image must be initialized with sum_image")
+    if image.ndim == 3:
+        sum_image += image * mask2d[np.newaxis, :, :]
+    else:
+        sum_image += image * mask2d
+    count_image += mask2d.astype(np.uint16)
+    return sum_image, count_image
+
+
+def finalize_average(sum_image: np.ndarray | None, count_image: np.ndarray | None) -> np.ndarray:
+    if sum_image is None or count_image is None:
+        raise RuntimeError("No frames were available for stacking")
+    safe_count = np.maximum(count_image, 1).astype(np.float64)
+    if sum_image.ndim == 3:
+        stack = sum_image / safe_count[np.newaxis, :, :]
+        stack[:, count_image == 0] = 0
+    else:
+        stack = sum_image / safe_count
+        stack[count_image == 0] = 0
+    return stack
+
+
+class MedianAccumulator:
+    """Disk-backed per-pixel median accumulator for large Seestar sequences."""
+
+    def __init__(self, path: Path, capacity: int, image_shape: tuple[int, ...]):
+        self.path = path
+        self.capacity = capacity
+        self.image_shape = image_shape
+        self.count = 0
+        self.data = np.lib.format.open_memmap(
+            path,
+            mode="w+",
+            dtype=np.float32,
+            shape=(capacity, *image_shape),
+        )
+
+    def add(self, image: np.ndarray, mask2d: np.ndarray) -> None:
+        if self.count >= self.capacity:
+            raise RuntimeError("Median accumulator capacity exceeded")
+        if image.shape != self.image_shape:
+            raise ValueError(f"Median frame shape changed: {image.shape} != {self.image_shape}")
+        valid = mask2d[np.newaxis, :, :] if image.ndim == 3 else mask2d
+        # Exact-zero samples are registration/shift padding for order-statistic
+        # stacks. Treat them as missing for both median and rank-fit methods.
+        valid = valid & (image != 0.0)
+        self.data[self.count] = np.where(valid, image, np.nan).astype(np.float32, copy=False)
+        self.count += 1
+
+    def finalize(self, row_chunk: int = 64) -> np.ndarray:
+        if self.count == 0:
+            raise RuntimeError("No frames were available for median stacking")
+        self.data.flush()
+        result = np.zeros(self.image_shape, dtype=np.float64)
+        height = self.image_shape[-2]
+        for row_start in range(0, height, row_chunk):
+            row_end = min(row_start + row_chunk, height)
+            source_slice = (slice(0, self.count),) + (slice(None),) * (len(self.image_shape) - 2) + (
+                slice(row_start, row_end),
+                slice(None),
+            )
+            output_slice = (slice(None),) * (len(self.image_shape) - 2) + (
+                slice(row_start, row_end),
+                slice(None),
+            )
+            block = np.asarray(self.data[source_slice])
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                median = np.nanmedian(block, axis=0)
+            result[output_slice] = np.nan_to_num(median, nan=0.0)
+        return result
+
+    def finalize_rankfit(self, fraction_percent: int, degree: int = 5, row_chunk: int = 16) -> np.ndarray:
+        """Fit brightness versus rank in the central sample fraction."""
+        if self.count == 0:
+            raise RuntimeError("No frames were available for rank-fit stacking")
+        if not 1 <= fraction_percent <= 100:
+            raise ValueError("rank-fit fraction must be an integer from 1 to 100")
+        self.data.flush()
+        result = np.zeros(self.image_shape, dtype=np.float64)
+        height = self.image_shape[-2]
+        for row_start in range(0, height, row_chunk):
+            row_end = min(row_start + row_chunk, height)
+            source_slice = (slice(0, self.count),) + (slice(None),) * (len(self.image_shape) - 2) + (
+                slice(row_start, row_end),
+                slice(None),
+            )
+            output_slice = (slice(None),) * (len(self.image_shape) - 2) + (
+                slice(row_start, row_end),
+                slice(None),
+            )
+            block = np.asarray(self.data[source_slice])
+            ordered = np.sort(block, axis=0).reshape(self.count, -1)
+            valid_counts = np.sum(np.isfinite(ordered), axis=0)
+            fitted = np.zeros(ordered.shape[1], dtype=np.float64)
+            for sample_count in np.unique(valid_counts):
+                sample_count = int(sample_count)
+                if sample_count == 0:
+                    continue
+                pixels = valid_counts == sample_count
+                selected_count = max(1, math.ceil(sample_count * fraction_percent / 100.0))
+                if selected_count < degree + 2:
+                    middle = sample_count // 2
+                    if sample_count % 2:
+                        fitted[pixels] = ordered[middle, pixels]
+                    else:
+                        fitted[pixels] = (ordered[middle - 1, pixels] + ordered[middle, pixels]) / 2.0
+                    continue
+                selected_start = (sample_count - selected_count) // 2
+                selected = ordered[selected_start : selected_start + selected_count, pixels]
+                full_rank = np.arange(sample_count, dtype=np.float64) - (sample_count - 1) / 2.0
+                full_rank /= max(np.max(np.abs(full_rank)), 1.0)
+                rank = full_rank[selected_start : selected_start + selected_count]
+                design = np.polynomial.polynomial.polyvander(rank, degree)
+                center_weights = np.linalg.pinv(design)[0]
+                fitted[pixels] = center_weights @ selected
+            result[output_slice] = fitted.reshape(result[output_slice].shape)
+        return result
+
+    def close(self, remove: bool) -> bool:
+        self.data.flush()
+        del self.data
+        if remove and self.path.exists():
+            self.path.unlink()
+            return True
+        return False
+
+
+def export_preview_png(
+    path: Path,
+    data: np.ndarray,
+    flip_vertical: bool = False,
+    low_percentile: float = 5.0,
+    high_percentile: float = 99.95,
+) -> None:
+    # Siril's FITS-to-PNG export keeps the visual orientation expected for
+    # Seestar subframes, so the default preview is not flipped. Use
+    # --preview-flip-vertical only when comparing against a top-left display
+    # coordinate conversion.
+    if data.ndim == 2:
+        planes = [np.flipud(data) if flip_vertical else data]
+    else:
+        planes = [
+            np.flipud(data[i]) if flip_vertical else data[i]
+            for i in range(min(3, data.shape[0]))
+        ]
+    stretched = []
+    for plane in planes:
+        # Registration and sub-pixel shifts create exact-zero borders. They
+        # are display padding, not samples of the sky background, so exclude
+        # them only from the preview percentile calculation.
+        finite = plane[np.isfinite(plane) & (plane != 0.0)]
+        if finite.size == 0:
+            scaled = np.zeros_like(plane, dtype=np.uint8)
+        else:
+            lo, hi = np.percentile(finite, [low_percentile, high_percentile])
+            if hi <= lo:
+                hi = lo + 1.0
+            scaled = np.clip((plane - lo) / (hi - lo), 0.0, 1.0)
+            scaled = (scaled * 255.0 + 0.5).astype(np.uint8)
+        stretched.append(scaled)
+    if len(stretched) == 1:
+        image = Image.fromarray(stretched[0], mode="L")
+    else:
+        while len(stretched) < 3:
+            stretched.append(stretched[-1])
+        image = Image.fromarray(np.stack(stretched[:3], axis=2), mode="RGB")
+    image.save(path)
+
+
+def write_siril_script(
+    path: Path,
+    basename: str,
+    transform: str,
+    minpairs: int | None,
+    reference_index: int,
+) -> None:
+    register = f"register {basename} -prefix=r_ -transf={transform}"
+    if minpairs:
+        register += f" -minpairs={minpairs}"
+    path.write_text(
+        "\n".join(
+            [
+                "requires 1.4.0",
+                f"convert {basename} -debayer",
+                f"setref {basename}_ {reference_index}",
+                register,
+                "",
+            ]
+        ),
+        encoding="ascii",
+    )
+
+
+def safe_name(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text or "target"
+
+
+def processing_method_token(stack_method: str, rankfit_fraction: int) -> str:
+    if stack_method == "rankfit":
+        return f"rankfit5_p{rankfit_fraction}"
+    return stack_method
+
+
+def iso_compact(when: datetime) -> str:
+    return when.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def format_exposure_token(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return safe_name(f"{float(value):.1f}s")
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return safe_name(f"{float(text):.1f}s")
+    return safe_name(text if text.lower().endswith("s") else f"{text}s")
+
+
+def exposure_filter_from_filename(name: str) -> tuple[str | None, str | None]:
+    match = re.search(r"_(\d+(?:\.\d+)?)s_([^_]+)_\d{8}-\d{6}", name)
+    if not match:
+        return None, None
+    return safe_name(f"{match.group(1)}s"), safe_name(match.group(2))
+
+
+def exposure_filter_tokens(first: FitsImage, first_source_name: str) -> tuple[str | None, str | None]:
+    exposure = format_exposure_token(first.header.get("EXPOSURE") or first.header.get("EXPTIME"))
+    filter_name = first.header.get("FILTER")
+    filter_token = safe_name(str(filter_name)) if filter_name else None
+    fallback_exposure, fallback_filter = exposure_filter_from_filename(first_source_name)
+    return exposure or fallback_exposure, filter_token or fallback_filter
+
+
+def default_output_stem(
+    first: FitsImage,
+    first_source_name: str,
+    used_times: list[datetime],
+    used_frames: int,
+) -> str:
+    target = safe_name(str(first.header.get("OBJECT") or "target"))
+    exposure, filter_token = exposure_filter_tokens(first, first_source_name)
+    acquisition = "_".join(part for part in [exposure, filter_token] if part)
+    start = iso_compact(used_times[0])
+    end = iso_compact(used_times[-1])
+    if acquisition:
+        return f"{target}_{acquisition}_{start}-{end}_{used_frames}frames"
+    return f"{target}_{start}-{end}_{used_frames}frames"
+
+
+def select_reference_index(files: list[Path], mode: str) -> int:
+    if not files:
+        raise ValueError("Cannot select a reference from an empty file list")
+    if mode == "first":
+        return 1
+    if mode != "middle":
+        raise ValueError(f"Unknown reference-frame mode: {mode}")
+    dated: list[tuple[datetime, int]] = []
+    for index, path in enumerate(files, start=1):
+        header, _cards, _offset = read_fits_header(path)
+        dated.append((parse_time(header["DATE-OBS"]), index))
+    midpoint = dated[0][0] + (dated[-1][0] - dated[0][0]) / 2
+    return min(dated, key=lambda item: (abs((item[0] - midpoint).total_seconds()), item[0]))[1]
+
+
+def cleanup_intermediate_images(work_dir: Path, basename: str, copied: list[Path], frame_count: int) -> list[str]:
+    candidates = [*copied]
+    for i in range(1, frame_count + 1):
+        candidates.append(work_dir / f"{basename}_{i:05d}.fit")
+        candidates.append(work_dir / f"r_{basename}_{i:05d}.fit")
+    removed: list[str] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if not path.exists() or not path.is_file():
+            continue
+        path.unlink()
+        removed.append(str(path))
+    return removed
+
+
+def parse_siril_registration(seq_path: Path) -> dict[int, SirilRegistration]:
+    if not seq_path.exists():
+        return {}
+    registrations: dict[int, SirilRegistration] = {}
+    sequence_start = 1
+    sequence_index = sequence_start
+    reference_index: int | None = None
+    for raw_line in seq_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if parts[0] == "S" and len(parts) >= 7:
+            try:
+                sequence_start = int(parts[2])
+                reference_index = int(parts[6])
+                sequence_index = sequence_start
+            except ValueError:
+                pass
+            continue
+        if parts[0] == "I" and len(parts) >= 3:
+            try:
+                index = int(parts[1])
+                selected = parts[2] == "1"
+                reg = registrations.setdefault(index, SirilRegistration(index=index))
+                reg.selected = selected
+                reg.reference_index = reference_index
+            except ValueError:
+                pass
+            continue
+        if parts[0].startswith("R") and "H" in parts:
+            index = sequence_index
+            sequence_index += 1
+            h_index = parts.index("H")
+            matrix_values = parts[h_index + 1 : h_index + 10]
+            if len(matrix_values) != 9:
+                continue
+            try:
+                matrix = tuple(float(value) for value in matrix_values)
+                star_pairs = int(float(parts[h_index - 1])) if h_index >= 1 else None
+            except ValueError:
+                continue
+            reg = registrations.setdefault(index, SirilRegistration(index=index))
+            reg.reference_index = reference_index
+            reg.star_pairs = star_pairs
+            reg.matrix = matrix  # type: ignore[assignment]
+    return registrations
+
+
+def write_console_safe(text: str, stream = None) -> None:
+    stream = stream or sys.stdout
+    encoding = stream.encoding or "utf-8"
+    safe = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+    print(safe, end="", file=stream)
+
+
+def run_siril(siril_cmd: Path, work_dir: Path, script_path: Path) -> None:
+    if not siril_cmd.exists():
+        raise FileNotFoundError(f"Siril wrapper not found: {siril_cmd}")
+    cmd = ["cmd.exe", "/c", str(siril_cmd), "-d", str(work_dir), "-s", str(script_path)]
+    completed = subprocess.run(
+        cmd,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    write_console_safe(completed.stdout)
+    if completed.returncode != 0:
+        write_console_safe(completed.stderr, sys.stderr)
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            cmd,
+            output=completed.stdout,
+            stderr=completed.stderr,
+        )
+    for line in completed.stderr.splitlines():
+        if "pyproject.toml" in line and "Failed to install Python module" in line:
+            continue
+        if "Reading sequence failed" in line and "frame.seq" in line:
+            continue
+        write_console_safe(line + "\n", sys.stderr)
+
+
+def make_work_dir(base: Path, name: str) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    work_dir = base / f"{name}-{stamp}"
+    work_dir.mkdir(parents=True, exist_ok=False)
+    return work_dir
+
+
+def prepare_work_dir(work_dir: Path | None, work_root: Path, work_name: str) -> Path:
+    if work_dir is not None:
+        work_dir.mkdir(parents=True, exist_ok=True)
+        return work_dir
+    return make_work_dir(work_root, work_name)
+
+
+def repair_windows_cmd_path(path: Path) -> Path:
+    text = str(path)
+    for quote in ('"', "'"):
+        if quote in text:
+            prefix = text.split(quote, 1)[0]
+            repaired = Path(prefix)
+            if repaired.exists():
+                print(f"Repaired source path: {path} -> {repaired}", file=sys.stderr)
+                return repaired
+    if text.endswith('"') or text.endswith("'"):
+        repaired = Path(text.rstrip("\"'"))
+        if repaired.exists():
+            print(f"Repaired source path: {path} -> {repaired}", file=sys.stderr)
+            return repaired
+    return path
+
+
+def looks_like_stacked_outputs(files: list[Path]) -> bool:
+    fits_files = [path for path in files if path.suffix.lower() in {".fit", ".fits"}]
+    return bool(fits_files) and all(path.name.lower().startswith("stacked_") for path in fits_files)
+
+
+def resolve_source_dir(source_dir: Path, pattern: str) -> Path:
+    source_dir = repair_windows_cmd_path(source_dir)
+    files = sorted(source_dir.glob(pattern), key=lambda p: p.name) if source_dir.exists() else []
+    sub_candidate = source_dir.with_name(f"{source_dir.name}_sub")
+    sub_files = sorted(sub_candidate.glob(pattern), key=lambda p: p.name) if sub_candidate.exists() else []
+    if sub_files and (not files or looks_like_stacked_outputs(files)):
+        print(f"Using subframe directory: {sub_candidate}", file=sys.stderr)
+        return sub_candidate
+    return source_dir
+
+
+def is_failed_frame(path: Path) -> bool:
+    return "_failed_" in path.name.lower()
+
+
+def choose_files(source_dir: Path, pattern: str, count: int | None, include_failed_frames: bool = False) -> list[Path]:
+    source_dir = resolve_source_dir(source_dir, pattern)
+    files = sorted(source_dir.glob(pattern), key=lambda p: p.name)
+    if not include_failed_frames:
+        original_count = len(files)
+        files = [path for path in files if not is_failed_frame(path)]
+        skipped = original_count - len(files)
+        if skipped:
+            print(f"Skipped {skipped} failed frame(s); use --include-failed-frames to keep them.", file=sys.stderr)
+    if count:
+        files = files[:count]
+    if not files:
+        raise FileNotFoundError(f"No non-failed files matching {pattern} in {source_dir}")
+    return files
+
+
+def parse_bounded_pair(text: str, offset: int, minimum: int, maximum: int, default: int) -> int:
+    if len(text) < offset + 2:
+        return default
+    token = text[offset : offset + 2]
+    if not token.isdigit():
+        return default
+    value = int(token)
+    if value < minimum or value > maximum:
+        return default
+    return value
+
+
+def parse_session_at(value: str) -> datetime:
+    text = value.strip()
+    date_part, separator, time_part = text.partition("-")
+    if len(date_part) < 4 or not date_part[:4].isdigit():
+        raise ValueError("--session-at requires at least a four-digit year")
+    year = int(date_part[:4])
+    month = parse_bounded_pair(date_part, 4, 1, 12, 1)
+    max_day = calendar.monthrange(year, month)[1]
+    day = parse_bounded_pair(date_part, 6, 1, max_day, 1)
+    if not separator:
+        time_part = ""
+    hour = parse_bounded_pair(time_part, 0, 0, 23, 0)
+    minute = parse_bounded_pair(time_part, 2, 0, 59, 0)
+    second = parse_bounded_pair(time_part, 4, 0, 59, 0)
+    local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+    return datetime(year, month, day, hour, minute, second, tzinfo=local_tz).astimezone(timezone.utc)
+
+
+def split_sessions_by_gap(dated: list[tuple[datetime, Path]], gap_min: float) -> list[list[tuple[datetime, Path]]]:
+    sessions: list[list[tuple[datetime, Path]]] = []
+    current: list[tuple[datetime, Path]] = []
+    previous_time: datetime | None = None
+    gap_seconds = gap_min * 60.0
+    for item in dated:
+        if previous_time is not None and (item[0] - previous_time).total_seconds() > gap_seconds:
+            if current:
+                sessions.append(current)
+            current = []
+        current.append(item)
+        previous_time = item[0]
+    if current:
+        sessions.append(current)
+    return sessions
+
+
+def choose_session(
+    sessions: list[list[tuple[datetime, Path]]],
+    session_index: int,
+    session_at: str | None,
+) -> list[tuple[datetime, Path]]:
+    if session_at:
+        threshold = parse_session_at(session_at)
+        for session in sessions:
+            if session[0][0] >= threshold:
+                return session
+        raise SystemExit(
+            f"--session-at {session_at} did not match any session; "
+            f"latest session starts at {sessions[-1][0][0].isoformat()}"
+        )
+    if session_index < 1 or session_index > len(sessions):
+        raise SystemExit(f"--session-index {session_index} is out of range; found {len(sessions)} session(s)")
+    return sessions[session_index - 1]
+
+
+def filter_files_by_time(
+    files: list[Path],
+    after: str | None,
+    before: str | None,
+    session_gap_min: float | None,
+    session_index: int,
+    session_at: str | None = None,
+) -> list[Path]:
+    if not after and not before and session_gap_min is None and not session_at:
+        return files
+    dated: list[tuple[datetime, Path]] = []
+    for path in files:
+        header, _cards, _offset = read_fits_header(path)
+        if "DATE-OBS" not in header:
+            continue
+        dated.append((parse_time(header["DATE-OBS"]), path))
+    dated.sort(key=lambda item: item[0])
+    if after:
+        after_time = parse_time(after)
+        dated = [item for item in dated if item[0] >= after_time]
+    if before:
+        before_time = parse_time(before)
+        dated = [item for item in dated if item[0] <= before_time]
+    if session_gap_min is not None:
+        sessions = split_sessions_by_gap(dated, session_gap_min)
+        dated = choose_session(sessions, session_index, session_at)
+    elif session_at:
+        threshold = parse_session_at(session_at)
+        dated = [item for item in dated if item[0] >= threshold]
+    return [path for _when, path in dated]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Stack Seestar frames on a moving target")
+    parser.add_argument("--source-dir", required=True, type=Path)
+    parser.add_argument("--ephemeris-csv", required=True, type=Path)
+    parser.add_argument("--wcs-fits", type=Path)
+    parser.add_argument("--astrometry-json", type=Path)
+    parser.add_argument("--work-dir", type=Path, help="Use this exact work directory instead of creating one under --work-root")
+    parser.add_argument("--work-root", type=Path, default=REPO_ROOT / "metcalf_output")
+    parser.add_argument("--work-name", help="Work directory stem. Defaults to '<OBJECT>_<method>'.")
+    parser.add_argument("--pattern", default="*.fit")
+    parser.add_argument("--count", type=int)
+    parser.add_argument("--after", help="Keep frames at or after this UTC ISO timestamp")
+    parser.add_argument("--before", help="Keep frames at or before this UTC ISO timestamp")
+    parser.add_argument(
+        "--include-failed-frames",
+        action="store_true",
+        help="Include Seestar files whose names contain '_failed_'. They are skipped by default.",
+    )
+    parser.add_argument("--session-gap-min", type=float, help="Split frames into sessions at gaps larger than this many minutes")
+    parser.add_argument("--session-index", type=int, default=1, help="1-based session to use with --session-gap-min")
+    parser.add_argument(
+        "--session-at",
+        help=(
+            "Select the first session whose first DATE-OBS is at or after this local time. "
             "Format: YYYYMMDD or YYYYMMDD-hhmmss; hh, mm, ss must be two digits when present."
         ),
     )

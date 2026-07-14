@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.4.0",
+    [string]$Version = "0.4.1",
     [switch]$NoZip
 )
 
@@ -17,7 +17,9 @@ if (-not (Test-Path $SirilSource)) {
     throw "Bundled Siril was not found: $SirilSource"
 }
 
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "build-seestar-metcalf-stack-exe.ps1")
+if (-not (Test-Path -LiteralPath $ExeSource)) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "build-seestar-metcalf-stack-exe.ps1")
+}
 if (-not (Test-Path $ExeSource)) {
     throw "Bundled Python executable was not found: $ExeSource"
 }
@@ -46,13 +48,13 @@ Copy-Item -LiteralPath (Join-Path $Root "README-Seestar-Metcalf-Stack.md") -Dest
 Copy-Item -LiteralPath (Join-Path $Root "README-Seestar-Metcalf-Stack.ja.md") -Destination (Join-Path $PackageRoot "README-ja.md")
 Copy-Item -LiteralPath (Join-Path $Root "requirements.txt") -Destination (Join-Path $PackageRoot "requirements.txt")
 Copy-Item -LiteralPath (Join-Path $Root "seestar-metcalf-stack.cmd") -Destination (Join-Path $PackageRoot "seestar-metcalf-stack.cmd")
-Copy-Item -LiteralPath (Join-Path $Root "seestar-metcalf-stack-drop.cmd") -Destination (Join-Path $PackageRoot "seestar-metcalf-stack-drop.cmd")
 Copy-Item -LiteralPath (Join-Path $Root "setup-python-deps.cmd") -Destination (Join-Path $PackageRoot "setup-python-deps.cmd")
 Copy-Item -LiteralPath (Join-Path $Root "set-astrometry-api-key.cmd") -Destination (Join-Path $PackageRoot "set-astrometry-api-key.cmd")
 Copy-Item -LiteralPath (Join-Path $Root "siril-cli.cmd") -Destination (Join-Path $PackageRoot "siril-cli.cmd")
 Copy-Item -LiteralPath (Join-Path $Root "THIRD-PARTY-NOTICES-Seestar-Metcalf-Stack.md") -Destination (Join-Path $PackageRoot "THIRD-PARTY-NOTICES.md")
 Copy-Item -LiteralPath (Join-Path $Root "SIRIL-SOURCE-Seestar-Metcalf-Stack.txt") -Destination (Join-Path $PackageRoot "SIRIL-SOURCE.txt")
-Copy-Item -LiteralPath (Join-Path $Root "scripts\run_metcalf_stack_drop.ps1") -Destination (Join-Path $PackageRoot "scripts\run_metcalf_stack_drop.ps1")
+Copy-Item -LiteralPath (Join-Path $Root "scripts\run_metcalf_stack.ps1") -Destination (Join-Path $PackageRoot "scripts\run_metcalf_stack.ps1")
+Copy-Item -LiteralPath (Join-Path $Root "build-seestar-metcalf-stack-exe.ps1") -Destination (Join-Path $PackageRoot "build-seestar-metcalf-stack-exe.ps1")
 Copy-Item -LiteralPath (Join-Path $Root "tests\test_moving_target_options.py") -Destination (Join-Path $PackageRoot "tests\test_moving_target_options.py")
 Copy-Item -LiteralPath (Join-Path $Root "LICENSE") -Destination (Join-Path $PackageRoot "LICENSE")
 Copy-Item -LiteralPath (Join-Path $Root "seestar-metcalf-stack.gitignore") -Destination (Join-Path $PackageRoot ".gitignore")

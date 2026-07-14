@@ -36,15 +36,15 @@ and *how the background-star field moved*.
 ## Requirements and package choices
 
 - Windows 10 or 11
-- Python 3.10 or newer
 - Internet access for Astrometry.net and JPL Horizons
 - An Astrometry.net API key
 - Siril 1.4 or newer
 
-The normal GitHub source and `seestar-metcalf-stack-vX.Y.Z.zip` require Python
-3.10 or newer and do not bundle Siril. Install Siril separately and place
-`siril-cli.exe` on `PATH`, or set the `SIRIL_CLI` environment variable to its
-full path.
+The standard `seestar-metcalf-stack-vX.Y.Z.zip` includes
+`seestar-metcalf-stack.exe`, so normal execution does not require a separate
+Python installation. It does not bundle Siril: install Siril separately and
+place `siril-cli.exe` on `PATH`, or set the `SIRIL_CLI` environment variable to
+its full path.
 
 The larger Windows convenience asset
 `seestar-metcalf-stack-siril-vX.Y.Z.zip` includes Siril and a
@@ -53,10 +53,20 @@ lowest setup cost. Its Siril files remain covered by GPLv3; see the notices
 included in that package. The convenience package does not require a separate
 Python installation.
 
+The source scripts remain included for inspection and development. If you edit
+`scripts/*.py`, remove `seestar-metcalf-stack.exe` or rebuild it before running:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-seestar-metcalf-stack-exe.ps1
+```
+
+The command prefers the EXE when it is present, so leaving an old EXE beside
+modified Python code would run the old code.
+
 ## First-time setup
 
-1. Install Python. Install Siril too unless using the bundled build.
-2. Run the Python dependency installer from the extracted package:
+1. Install Siril and make `siril-cli.exe` available, unless using the Siril-bundled build.
+2. Run the Python dependency installer only if you plan to use or modify the Python fallback:
 
    ```bat
    setup-python-deps.cmd
@@ -112,8 +122,8 @@ as the reference:
 seestar-metcalf-stack.cmd "C:\path\to\C2025 R2 (SWAN)_sub"
 ```
 
-You can also drag the subframe folder onto `seestar-metcalf-stack-drop.cmd`. The
-output folder opens after a successful run.
+You can also drag the subframe folder directly onto `seestar-metcalf-stack.cmd`.
+The output folder opens after a successful run.
 
 The pipeline automatically obtains a Horizons ephemeris, solves the reference
 frame, registers the background stars, and writes all final products under
