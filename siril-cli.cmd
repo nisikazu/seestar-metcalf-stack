@@ -21,12 +21,6 @@ if not errorlevel 1 (
   exit /b %ERRORLEVEL%
 )
 
-where siril-cli >nul 2>nul
-if not errorlevel 1 (
-  siril-cli %*
-  exit /b %ERRORLEVEL%
-)
-
 set "SIRIL=%ProgramFiles%\Siril\bin\siril-cli.exe"
 if exist "%SIRIL%" (
   "%SIRIL%" %*
