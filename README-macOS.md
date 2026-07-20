@@ -2,11 +2,11 @@
 
 [メインREADME](README.md) | [English README](README-en.md)
 
-macOSではPythonソース版を使用します。Windows版と同じPython CLIが処理本体で、
-`seestar-metcalf-stack.sh`は実行環境を選ぶだけの薄いランチャーです。
+macOSではPythonソース版を使用します。Windows版と共通のPython プログラムで処理を行い、
+`seestar-metcalf-stack.sh`は実行環境を判定するランチャーです。
 セットアップ後は、Finderでサブフレームフォルダを
-`Seestar Metcalf Stack.app`へドロップして実行できます。処理中はTerminalを表示し、
-Windows版と同じセッション一覧、処理段階、Siril出力、枚数進捗を確認できます。
+`Seestar Metcalf Stack.app`へドロップしてスタックを実行できます。処理中はTerminalでログを表示し、
+Windows版と同様にセッション一覧、処理段階、Siril出力、枚数進捗を確認できます。
 
 ## 必要なもの
 
