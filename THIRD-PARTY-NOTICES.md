@@ -6,8 +6,8 @@ notices describe separately licensed dependencies and bundled components.
 ## Siril
 
 The standard Seestar Metcalf Stack package does not bundle Siril. Users install
-Siril separately and the launcher finds `siril-cli.exe` through `SIRIL_CLI`,
-`PATH`, or common Windows install locations.
+Siril separately and the launcher finds its CLI through `SIRIL_CLI`, `PATH`, or
+common Windows and macOS installation locations.
 
 The Windows convenience release asset named `seestar-metcalf-stack-siril-...zip`
 bundles Siril 1.4.1 so that the registration step can run without a separate
@@ -24,10 +24,12 @@ Upstream:
 
 ## Python Packages
 
-`numpy` and `Pillow` are installed separately by `setup-python-deps.cmd` from
-`requirements.txt`; they are not bundled in this zip.
+`numpy` and `Pillow` are installed from `requirements.txt` when the Python
+source setup is used. They are also embedded in the Windows executable built by
+PyInstaller. Their own licenses continue to apply to those embedded copies.
 
-## Node.js
+## Python and PyInstaller
 
-Node.js is not bundled. It is used only for Astrometry.net upload/solve support
-through `astrometry_solve.mjs`.
+The Windows executable contains the Python runtime and is assembled with
+PyInstaller. Python and PyInstaller remain subject to their respective upstream
+licenses. Node.js is not required or bundled by this project.
