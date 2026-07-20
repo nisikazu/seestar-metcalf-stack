@@ -175,12 +175,13 @@ class ReferenceSelectionTests(unittest.TestCase):
 class PlateSolveCacheTests(unittest.TestCase):
     def test_cache_paths_use_reference_stem_in_source_directory(self):
         args = type("Args", (), {"solve_dir": None, "solve_name": None})()
-        reference = Path(r"C:\frames\Light_Comet_20.0s.fit")
+        with tempfile.TemporaryDirectory() as temporary:
+            reference = Path(temporary) / "frames" / "Light_Comet_20.0s.fit"
 
-        json_path, wcs_path = pipeline.solve_cache_paths(args, reference)
+            json_path, wcs_path = pipeline.solve_cache_paths(args, reference)
 
-        self.assertEqual(json_path, reference.parent / "Light_Comet_20.0s_astrometry.json")
-        self.assertEqual(wcs_path, reference.parent / "Light_Comet_20.0s_wcs.fits")
+            self.assertEqual(json_path, reference.parent / "Light_Comet_20.0s_astrometry.json")
+            self.assertEqual(wcs_path, reference.parent / "Light_Comet_20.0s_wcs.fits")
 
     def test_valid_cached_json_is_reused_without_upload(self):
         with tempfile.TemporaryDirectory() as temporary:
