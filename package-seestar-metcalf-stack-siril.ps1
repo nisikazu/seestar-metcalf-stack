@@ -37,6 +37,7 @@ if (Test-Path $PackageRoot) {
 New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "scripts") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "tests") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "macos") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot ".github\workflows") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "tools\siril-1.4.1") | Out-Null
 
@@ -46,14 +47,19 @@ Copy-Item -LiteralPath (Join-Path $Root "scripts\horizons_ephemeris.py") -Destin
 Copy-Item -LiteralPath (Join-Path $Root "scripts\astrometry_solve.py") -Destination (Join-Path $PackageRoot "scripts\astrometry_solve.py")
 Copy-Item -LiteralPath (Join-Path $Root "README.md") -Destination (Join-Path $PackageRoot "README.md")
 Copy-Item -LiteralPath (Join-Path $Root "README-en.md") -Destination (Join-Path $PackageRoot "README-en.md")
+Copy-Item -LiteralPath (Join-Path $Root "README-macOS.md") -Destination (Join-Path $PackageRoot "README-macOS.md")
 Copy-Item -LiteralPath (Join-Path $Root "requirements.txt") -Destination (Join-Path $PackageRoot "requirements.txt")
 Copy-Item -LiteralPath (Join-Path $Root "seestar-metcalf-stack.cmd") -Destination (Join-Path $PackageRoot "seestar-metcalf-stack.cmd")
+Copy-Item -LiteralPath (Join-Path $Root "seestar-metcalf-stack.sh") -Destination (Join-Path $PackageRoot "seestar-metcalf-stack.sh")
 Copy-Item -LiteralPath (Join-Path $Root "setup-python-deps.cmd") -Destination (Join-Path $PackageRoot "setup-python-deps.cmd")
+Copy-Item -LiteralPath (Join-Path $Root "setup-macos.sh") -Destination (Join-Path $PackageRoot "setup-macos.sh")
 Copy-Item -LiteralPath (Join-Path $Root "set-astrometry-api-key.cmd") -Destination (Join-Path $PackageRoot "set-astrometry-api-key.cmd")
+Copy-Item -LiteralPath (Join-Path $Root "set-astrometry-api-key.sh") -Destination (Join-Path $PackageRoot "set-astrometry-api-key.sh")
+Copy-Item -LiteralPath (Join-Path $Root "macos\SeestarMetcalfStackLauncher.applescript") -Destination (Join-Path $PackageRoot "macos\SeestarMetcalfStackLauncher.applescript")
+Copy-Item -LiteralPath (Join-Path $Root "macos\build-droplet.sh") -Destination (Join-Path $PackageRoot "macos\build-droplet.sh")
 Copy-Item -LiteralPath (Join-Path $Root "siril-cli.cmd") -Destination (Join-Path $PackageRoot "siril-cli.cmd")
 Copy-Item -LiteralPath (Join-Path $Root "THIRD-PARTY-NOTICES.md") -Destination (Join-Path $PackageRoot "THIRD-PARTY-NOTICES.md")
 Copy-Item -LiteralPath (Join-Path $Root "SIRIL-SOURCE.txt") -Destination (Join-Path $PackageRoot "SIRIL-SOURCE.txt")
-Copy-Item -LiteralPath (Join-Path $Root "scripts\run_metcalf_stack.ps1") -Destination (Join-Path $PackageRoot "scripts\run_metcalf_stack.ps1")
 Copy-Item -LiteralPath (Join-Path $Root "build-seestar-metcalf-stack-exe.ps1") -Destination (Join-Path $PackageRoot "build-seestar-metcalf-stack-exe.ps1")
 Copy-Item -LiteralPath (Join-Path $Root "tests\test_moving_target_options.py") -Destination (Join-Path $PackageRoot "tests\test_moving_target_options.py")
 Copy-Item -LiteralPath (Join-Path $Root "LICENSE") -Destination (Join-Path $PackageRoot "LICENSE")

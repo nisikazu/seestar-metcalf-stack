@@ -1,28 +1,22 @@
 @echo off
-setlocal EnableExtensions DisableDelayedExpansion
+setlocal EnableExtensions
 set "ROOT=%~dp0"
 
-if "%~1"=="" goto run_without_source
+if exist "%ROOT%seestar-metcalf-stack.exe" (
+  "%ROOT%seestar-metcalf-stack.exe" %*
+  exit /b %ERRORLEVEL%
+)
 
-set "FIRST=%~1"
-if "%FIRST:~0,1%"=="-" goto run_without_source
+if exist "%ROOT%.venv\Scripts\python.exe" (
+  "%ROOT%.venv\Scripts\python.exe" "%ROOT%scripts\moving_target_pipeline.py" %*
+  exit /b %ERRORLEVEL%
+)
 
-rem Pass the source through the environment so a trailing backslash cannot
-rem escape PowerShell's closing quote. Re-quote the remaining option values.
-set "SEESTAR_METCALF_SOURCE=%~1"
-shift
-set "FORWARD_ARGS="
+where python >nul 2>nul
+if errorlevel 1 (
+  echo Python was not found. Run setup-python-deps.cmd first.
+  exit /b 1
+)
 
-:collect_arguments
-if "%~1"=="" goto run_with_source
-set "FORWARD_ARGS=%FORWARD_ARGS% "%~1""
-shift
-goto collect_arguments
-
-:run_with_source
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\run_metcalf_stack.ps1" %FORWARD_ARGS%
-exit /b %ERRORLEVEL%
-
-:run_without_source
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\run_metcalf_stack.ps1" %*
+python "%ROOT%scripts\moving_target_pipeline.py" %*
 exit /b %ERRORLEVEL%

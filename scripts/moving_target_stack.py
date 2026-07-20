@@ -966,10 +966,59 @@ def siril_failure_reason(output: str) -> str | None:
     return "; ".join(matches) if matches else None
 
 
-def run_siril(siril_cmd: Path, work_dir: Path, script_path: Path, verbose: bool = False) -> None:
-    if not siril_cmd.exists():
-        raise FileNotFoundError(f"Siril wrapper not found: {siril_cmd}")
-    cmd = ["cmd.exe", "/c", str(siril_cmd), "-d", str(work_dir), "-s", str(script_path)]
+def resolve_siril_command(explicit: Path | None = None) -> Path:
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(explicit.expanduser())
+    env_command = os.environ.get("SIRIL_CLI", "").strip()
+    if env_command:
+        candidates.append(Path(env_command).expanduser())
+    if os.name == "nt":
+        candidates.append(REPO_ROOT / "siril-cli.cmd")
+        for name in ("siril-cli.exe", "siril-cli"):
+            found = shutil.which(name)
+            if found:
+                candidates.append(Path(found))
+    else:
+        found = shutil.which("siril-cli")
+        if found:
+            candidates.append(Path(found))
+        if sys.platform == "darwin":
+            candidates.extend(
+                [
+                    Path("/Applications/Siril.app/Contents/MacOS/siril-cli"),
+                    Path("/Applications/SiriL.app/Contents/MacOS/siril-cli"),
+                    Path("/Applications/Siril.app/Contents/MacOS/siril"),
+                    Path("/Applications/SiriL.app/Contents/MacOS/siril"),
+                ]
+            )
+
+    checked: list[str] = []
+    for candidate in candidates:
+        if not candidate.is_absolute() and candidate.parent == Path("."):
+            found = shutil.which(str(candidate))
+            if found:
+                return Path(found)
+        checked.append(str(candidate))
+        if candidate.is_file():
+            return candidate.resolve()
+    details = ", ".join(checked) if checked else "no candidates"
+    raise FileNotFoundError(
+        "Siril CLI was not found. Install Siril, put siril-cli on PATH, "
+        f"set SIRIL_CLI, or pass --siril. Checked: {details}"
+    )
+
+
+def build_siril_command(siril_cmd: Path, work_dir: Path, script_path: Path) -> list[str]:
+    arguments = ["-d", str(work_dir), "-s", str(script_path)]
+    if os.name == "nt" and siril_cmd.suffix.lower() in {".cmd", ".bat"}:
+        return ["cmd.exe", "/c", str(siril_cmd), *arguments]
+    return [str(siril_cmd), *arguments]
+
+
+def run_siril(siril_cmd: Path | None, work_dir: Path, script_path: Path, verbose: bool = True) -> None:
+    resolved_siril = resolve_siril_command(siril_cmd)
+    cmd = build_siril_command(resolved_siril, work_dir, script_path)
     if verbose:
         process = subprocess.Popen(
             cmd,
@@ -1005,13 +1054,14 @@ def run_siril(siril_cmd: Path, work_dir: Path, script_path: Path, verbose: bool 
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    write_console_safe(completed.stdout)
     combined_output = completed.stdout + "\n" + completed.stderr
     failure = siril_failure_reason(combined_output)
     if failure:
+        write_console_safe(completed.stdout, sys.stderr)
         write_console_safe(completed.stderr, sys.stderr)
         raise RuntimeError(f"Siril registration failed: {failure}")
     if completed.returncode != 0:
+        write_console_safe(completed.stdout, sys.stderr)
         write_console_safe(completed.stderr, sys.stderr)
         raise subprocess.CalledProcessError(
             completed.returncode,
@@ -1219,7 +1269,7 @@ def main() -> int:
             "Format: YYYYMMDD or YYYYMMDD-hhmmss; hh, mm, ss must be two digits when present."
         ),
     )
-    parser.add_argument("--siril", type=Path, default=REPO_ROOT / "siril-cli.cmd")
+    parser.add_argument("--siril", type=Path, help="Siril CLI path. Defaults to SIRIL_CLI, PATH, or an OS-standard location.")
     parser.add_argument("--basename", default="frame")
     parser.add_argument("--registration-transform", default="similarity")
     parser.add_argument("--registration-minpairs", type=int, default=6)
@@ -1257,7 +1307,9 @@ def main() -> int:
         action="store_true",
         help="Keep intermediate image FITS files generated for Siril registration.",
     )
-    parser.add_argument("-v", "--verbose", action="store_true", help="Show registration and per-frame stack progress.")
+    parser.set_defaults(verbose=True)
+    parser.add_argument("-v", "--verbose", dest="verbose", action="store_true", help="Show registration and per-frame stack progress (default).")
+    parser.add_argument("--no-verbose", dest="verbose", action="store_false", help="Hide detailed registration and per-frame progress.")
     args = parser.parse_args()
 
     if not 1 <= args.rankfit_fraction <= 100:

@@ -28,22 +28,28 @@ if (Test-Path $PackageRoot) {
 New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "scripts") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "tests") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "macos") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot ".github\workflows") | Out-Null
 
 $Files = @(
     @("scripts\moving_target_pipeline.py", "scripts\moving_target_pipeline.py"),
     @("scripts\moving_target_stack.py", "scripts\moving_target_stack.py"),
     @("scripts\horizons_ephemeris.py", "scripts\horizons_ephemeris.py"),
-    @("scripts\run_metcalf_stack.ps1", "scripts\run_metcalf_stack.ps1"),
     @("tests\test_moving_target_options.py", "tests\test_moving_target_options.py"),
     @("scripts\astrometry_solve.py", "scripts\astrometry_solve.py"),
     @("README.md", "README.md"),
     @("README-en.md", "README-en.md"),
+    @("README-macOS.md", "README-macOS.md"),
     @("requirements.txt", "requirements.txt"),
     @("seestar-metcalf-stack.cmd", "seestar-metcalf-stack.cmd"),
+    @("seestar-metcalf-stack.sh", "seestar-metcalf-stack.sh"),
     @("build-seestar-metcalf-stack-exe.ps1", "build-seestar-metcalf-stack-exe.ps1"),
     @("setup-python-deps.cmd", "setup-python-deps.cmd"),
+    @("setup-macos.sh", "setup-macos.sh"),
     @("set-astrometry-api-key.cmd", "set-astrometry-api-key.cmd"),
+    @("set-astrometry-api-key.sh", "set-astrometry-api-key.sh"),
+    @("macos\SeestarMetcalfStackLauncher.applescript", "macos\SeestarMetcalfStackLauncher.applescript"),
+    @("macos\build-droplet.sh", "macos\build-droplet.sh"),
     @("siril-cli.cmd", "siril-cli.cmd"),
     @("THIRD-PARTY-NOTICES.md", "THIRD-PARTY-NOTICES.md"),
     @("LICENSE", "LICENSE"),
