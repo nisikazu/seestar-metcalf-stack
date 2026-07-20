@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.4.1",
+    [string]$Version = "0.4.5",
     [switch]$NoZip
 )
 
@@ -44,21 +44,21 @@ Copy-Item -LiteralPath (Join-Path $Root "scripts\moving_target_pipeline.py") -De
 Copy-Item -LiteralPath (Join-Path $Root "scripts\moving_target_stack.py") -Destination (Join-Path $PackageRoot "scripts\moving_target_stack.py")
 Copy-Item -LiteralPath (Join-Path $Root "scripts\horizons_ephemeris.py") -Destination (Join-Path $PackageRoot "scripts\horizons_ephemeris.py")
 Copy-Item -LiteralPath (Join-Path $Root "scripts\astrometry_solve.py") -Destination (Join-Path $PackageRoot "scripts\astrometry_solve.py")
-Copy-Item -LiteralPath (Join-Path $Root "README-Seestar-Metcalf-Stack.md") -Destination (Join-Path $PackageRoot "README.md")
-Copy-Item -LiteralPath (Join-Path $Root "README-Seestar-Metcalf-Stack.ja.md") -Destination (Join-Path $PackageRoot "README-ja.md")
+Copy-Item -LiteralPath (Join-Path $Root "README.md") -Destination (Join-Path $PackageRoot "README.md")
+Copy-Item -LiteralPath (Join-Path $Root "README-en.md") -Destination (Join-Path $PackageRoot "README-en.md")
 Copy-Item -LiteralPath (Join-Path $Root "requirements.txt") -Destination (Join-Path $PackageRoot "requirements.txt")
 Copy-Item -LiteralPath (Join-Path $Root "seestar-metcalf-stack.cmd") -Destination (Join-Path $PackageRoot "seestar-metcalf-stack.cmd")
 Copy-Item -LiteralPath (Join-Path $Root "setup-python-deps.cmd") -Destination (Join-Path $PackageRoot "setup-python-deps.cmd")
 Copy-Item -LiteralPath (Join-Path $Root "set-astrometry-api-key.cmd") -Destination (Join-Path $PackageRoot "set-astrometry-api-key.cmd")
 Copy-Item -LiteralPath (Join-Path $Root "siril-cli.cmd") -Destination (Join-Path $PackageRoot "siril-cli.cmd")
-Copy-Item -LiteralPath (Join-Path $Root "THIRD-PARTY-NOTICES-Seestar-Metcalf-Stack.md") -Destination (Join-Path $PackageRoot "THIRD-PARTY-NOTICES.md")
-Copy-Item -LiteralPath (Join-Path $Root "SIRIL-SOURCE-Seestar-Metcalf-Stack.txt") -Destination (Join-Path $PackageRoot "SIRIL-SOURCE.txt")
+Copy-Item -LiteralPath (Join-Path $Root "THIRD-PARTY-NOTICES.md") -Destination (Join-Path $PackageRoot "THIRD-PARTY-NOTICES.md")
+Copy-Item -LiteralPath (Join-Path $Root "SIRIL-SOURCE.txt") -Destination (Join-Path $PackageRoot "SIRIL-SOURCE.txt")
 Copy-Item -LiteralPath (Join-Path $Root "scripts\run_metcalf_stack.ps1") -Destination (Join-Path $PackageRoot "scripts\run_metcalf_stack.ps1")
 Copy-Item -LiteralPath (Join-Path $Root "build-seestar-metcalf-stack-exe.ps1") -Destination (Join-Path $PackageRoot "build-seestar-metcalf-stack-exe.ps1")
 Copy-Item -LiteralPath (Join-Path $Root "tests\test_moving_target_options.py") -Destination (Join-Path $PackageRoot "tests\test_moving_target_options.py")
 Copy-Item -LiteralPath (Join-Path $Root "LICENSE") -Destination (Join-Path $PackageRoot "LICENSE")
-Copy-Item -LiteralPath (Join-Path $Root "seestar-metcalf-stack.gitignore") -Destination (Join-Path $PackageRoot ".gitignore")
-Copy-Item -LiteralPath (Join-Path $Root "github-workflow-metcalf-tests.yml") -Destination (Join-Path $PackageRoot ".github\workflows\tests.yml")
+Copy-Item -LiteralPath (Join-Path $Root ".gitignore") -Destination (Join-Path $PackageRoot ".gitignore")
+Copy-Item -LiteralPath (Join-Path $Root ".github\workflows\tests.yml") -Destination (Join-Path $PackageRoot ".github\workflows\tests.yml")
 Copy-Item -LiteralPath $ExeSource -Destination (Join-Path $PackageRoot "seestar-metcalf-stack.exe")
 
 Copy-Item -LiteralPath $SirilSource -Destination $SirilTarget -Recurse

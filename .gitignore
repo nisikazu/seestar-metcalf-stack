@@ -25,6 +25,8 @@ plate_solve/
 # Local dependencies and release artifacts
 tools/
 dist/
+build/
+.build/
 *.zip
 
 # Windows/editor files

@@ -152,6 +152,7 @@ def parse_args() -> argparse.Namespace:
         "--output-prefix",
         help="Output filename stem. Defaults to '<OBJECT>_<start>-<end>_<N>frames'.",
     )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show pipeline and per-frame progress.")
     args = parser.parse_args()
     if args.source_dir_arg and args.source_dir_option:
         parser.error("specify the source folder either as the first argument or with --source-dir, not both")
@@ -324,28 +325,43 @@ def load_sessions(args: argparse.Namespace) -> list[list[tuple[datetime, Path]]]
     return split_sessions_by_gap(dated, args.session_gap_min)
 
 
-def print_sessions(args: argparse.Namespace) -> None:
-    sessions = load_sessions(args)
-    if not sessions:
-        raise FileNotFoundError("No files remain after time filtering")
+def print_session_table(
+    args: argparse.Namespace,
+    sessions: list[list[tuple[datetime, Path]]],
+    selected_index: int | None = None,
+    include_guidance: bool = True,
+) -> None:
     local_tz = datetime.now().astimezone().tzinfo or timezone.utc
     print(f"Source: {args.source_dir}")
     print(f"Session gap: {args.session_gap_min:g} minutes")
     print("Index  Frames  Local start           Local end             UTC start")
     for index, session in enumerate(sessions, start=1):
         start, end = session[0][0], session[-1][0]
-        marker = "  <- default (latest)" if index == len(sessions) else ""
+        if selected_index is not None:
+            marker = "  <- selected" if index == selected_index else ""
+        else:
+            marker = "  <- default (latest)" if index == len(sessions) else ""
         print(
             f"{index:>5}  {len(session):>6}  "
             f"{start.astimezone(local_tz):%Y-%m-%d %H:%M:%S}  "
             f"{end.astimezone(local_tz):%Y-%m-%d %H:%M:%S}  "
             f"{start:%Y-%m-%d %H:%M:%S}Z{marker}"
         )
+    if not include_guidance:
+        print(flush=True)
+        return
     quoted_source = f'"{args.source_dir}"'
     print("\nSelect by number:")
     print(f"  seestar-metcalf-stack.cmd {quoted_source} --session-index N")
     print("Select the first session starting at or after a local date/time:")
     print(f"  seestar-metcalf-stack.cmd {quoted_source} --session-at YYYYMMDD-hhmmss")
+
+
+def print_sessions(args: argparse.Namespace) -> None:
+    sessions = load_sessions(args)
+    if not sessions:
+        raise FileNotFoundError("No files remain after time filtering")
+    print_session_table(args, sessions)
 
 
 def resolve_session(args: argparse.Namespace) -> tuple[int, list[Path], dict[str, object]]:
@@ -355,6 +371,8 @@ def resolve_session(args: argparse.Namespace) -> tuple[int, list[Path], dict[str
     session_index, session_at_time = choose_session_index(sessions, args.session_index, args.session_at)
     if session_index < 1 or session_index > len(sessions):
         raise SystemExit(f"--session-index {session_index} is out of range; found {len(sessions)} session(s)")
+    if args.verbose:
+        print_session_table(args, sessions, selected_index=session_index, include_guidance=False)
     selected = sessions[session_index - 1]
     files = [path for _when, path in selected]
     if args.count is not None:
@@ -447,6 +465,8 @@ def ensure_ephemeris(args: argparse.Namespace, first_frame: Path, session_index:
     )
     if args.horizons_center == "fits-site":
         cmd.append("--allow-site-upload")
+    if args.verbose:
+        cmd.append("--verbose")
     if args.horizons_object:
         cmd.extend(["--object", args.horizons_object])
     if args.horizons_command:
@@ -476,7 +496,23 @@ def run(cmd: list[str], cwd: Path) -> None:
 def write_console_safe(text: str) -> None:
     encoding = sys.stdout.encoding or "utf-8"
     safe = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
-    print(safe, end="")
+    print(safe, end="", flush=True)
+
+
+def verbose(args: argparse.Namespace, message: str) -> None:
+    if args.verbose:
+        print(f"[pipeline] {message}", flush=True)
+
+
+def parse_stack_summary(output: str) -> dict[str, object]:
+    for match in reversed(list(re.finditer(r"(?m)^\{", output))):
+        try:
+            parsed = json.loads(output[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    raise RuntimeError("moving_target_stack.py did not print JSON summary")
 
 
 def sanitize_fits_for_upload(source: Path, destination: Path) -> Path:
@@ -658,29 +694,35 @@ def run_stack(
         cmd.append("--no-cleanup")
     if args.include_failed_frames:
         cmd.append("--include-failed-frames")
-    completed = subprocess.run(
+    if args.verbose:
+        cmd.append("--verbose")
+    verbose(args, f"Starting {args.stack_method} stack worker")
+    process = subprocess.Popen(
         cmd,
         cwd=REPO_ROOT,
-        check=False,
         text=True,
         encoding="utf-8",
         errors="replace",
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
     )
-    write_console_safe(completed.stdout)
-    if completed.returncode != 0:
-        write_console_safe(completed.stderr)
+    output_lines: list[str] = []
+    if process.stdout is None:
+        raise RuntimeError("moving_target_stack.py stdout pipe was not created")
+    for line in iter(process.stdout.readline, ""):
+        output_lines.append(line)
+        write_console_safe(line)
+    process.stdout.close()
+    returncode = process.wait()
+    output = "".join(output_lines)
+    if returncode != 0:
         raise subprocess.CalledProcessError(
-            completed.returncode,
+            returncode,
             cmd,
-            output=completed.stdout,
-            stderr=completed.stderr,
+            output=output,
         )
-    start = completed.stdout.find("{")
-    if start < 0:
-        raise RuntimeError("moving_target_stack.py did not print JSON summary")
-    return json.loads(completed.stdout[start:])
+    return parse_stack_summary(output)
 
 
 def main() -> int:
@@ -691,9 +733,18 @@ def main() -> int:
     args.session_index = session_index
     reference_index = select_reference_index(files, args.reference_frame)
     reference_frame = files[reference_index - 1]
+    verbose(
+        args,
+        f"Selected session {session_index}: {len(files)} frames; reference {reference_index}/{len(files)} "
+        f"({reference_frame.name})",
+    )
     args.work_dir = prepare_work_dir(args, reference_frame)
+    verbose(args, f"Work directory: {args.work_dir}")
+    verbose(args, "Stage 1/3: obtaining target ephemeris")
     ephemeris_csv = ensure_ephemeris(args, reference_frame, session_index)
+    verbose(args, "Stage 2/3: resolving reference-frame sky coordinates")
     wcs_fits, astrometry_json = solve_first_frame(args, reference_frame)
+    verbose(args, f"Stage 3/3: registering and stacking with method={args.stack_method}")
     stack_summary = run_stack(args, ephemeris_csv, wcs_fits, astrometry_json)
 
     pipeline_summary = {

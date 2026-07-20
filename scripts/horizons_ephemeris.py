@@ -27,6 +27,7 @@ from typing import Iterable
 
 
 API_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
+SBDB_API_URL = "https://ssd-api.jpl.nasa.gov/sbdb.api"
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
@@ -38,6 +39,24 @@ class FitsFrame:
     site_long_deg: float | None
     site_lat_deg: float | None
     site_elevation_m: float | None
+    ra_deg: float | None
+    dec_deg: float | None
+
+
+@dataclass(frozen=True)
+class ObjectCandidate:
+    command: str
+    label: str
+    source: str
+    confidence: str
+
+
+class HorizonsIdentificationError(RuntimeError):
+    """The target command did not identify a usable Horizons object."""
+
+
+class HorizonsResponseError(RuntimeError):
+    """Horizons returned a response that could not be parsed as ephemeris."""
 
 
 @dataclass
@@ -80,6 +99,7 @@ def parse_args() -> argparse.Namespace:
         help="Include Seestar files whose names contain '_failed_'. They are skipped by default.",
     )
     parser.add_argument("--meta-output", type=Path, help="Optional JSON metadata output path")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show each Horizons HTTP attempt immediately")
     return parser.parse_args()
 
 
@@ -170,6 +190,8 @@ def load_frames(source_dir: Path, limit: int | None = None) -> list[FitsFrame]:
                 site_long_deg=as_float(header.get("SITELONG")),
                 site_lat_deg=as_float(header.get("SITELAT")),
                 site_elevation_m=as_float(header.get("SITEELEV") or header.get("ELEVATIO") or header.get("ELEVATION")),
+                ra_deg=as_float(header.get("RA") or header.get("OBJCTRA")),
+                dec_deg=as_float(header.get("DEC") or header.get("OBJCTDEC")),
             )
         )
     frames.sort(key=lambda frame: frame.date_obs)
@@ -213,25 +235,74 @@ def filter_frames(args: argparse.Namespace, frames: list[FitsFrame]) -> list[Fit
     return frames
 
 
-def normalize_command(object_name: str) -> str:
-    text = object_name.strip()
-    if text.upper().startswith("DES=") or text.upper().startswith("COMNAM="):
-        return text
+def _add_candidate(candidates: list[ObjectCandidate], command: str, label: str, source: str, confidence: str) -> None:
+    command = command.strip()
+    if not command or any(item.command.upper() == command.upper() for item in candidates):
+        return
+    candidates.append(ObjectCandidate(command, label, source, confidence))
 
-    comet = re.search(r"\b([CPDXA])\s*/?\s*(\d{4})\s+([A-Z]\d+)\b", text, flags=re.IGNORECASE)
+
+def generate_object_candidates(object_name: str) -> list[ObjectCandidate]:
+    """Create safe Horizons commands from common Seestar/MPC naming forms."""
+    text = re.sub(r"\s+", " ", object_name.strip().strip("'\""))
+    candidates: list[ObjectCandidate] = []
+    if not text:
+        return candidates
+    if text.upper().startswith(("DES=", "COMNAM=")):
+        _add_candidate(candidates, text, text, "explicit-horizons-command", "high")
+        return candidates
+
+    comet = re.match(
+        r"^(?P<prefix>[PCDXA])\s*/?\s*(?P<year>\d{4})\s*(?P<half>[A-Z]\d+)"
+        r"(?:\s*\((?P<name>[^)]+)\))?$",
+        text,
+        flags=re.IGNORECASE,
+    )
     if comet:
-        prefix, year, half_month = comet.groups()
-        return f"DES={prefix.upper()}/{year} {half_month.upper()};CAP;NOFRAG"
+        prefix = comet.group("prefix").upper()
+        designation = f"{prefix}/{comet.group('year')} {comet.group('half').upper()}"
+        _add_candidate(candidates, f"DES={designation};CAP;NOFRAG", designation, "comet-designation", "high")
+        if comet.group("name"):
+            _add_candidate(candidates, f"NAME={comet.group('name').strip()};", comet.group("name").strip(), "comet-name", "medium")
 
-    numbered = re.search(r"\((\d+)\)", text)
+    compact_periodic = re.match(r"^(?P<number>\d{1,4})(?P<prefix>[PCDXA])(?P<name>[A-Za-z][A-Za-z0-9 ._-]*)$", text)
+    if compact_periodic:
+        designation = f"{compact_periodic.group('number')}{compact_periodic.group('prefix').upper()}"
+        _add_candidate(candidates, f"DES={designation};CAP;NOFRAG", designation, "compact-periodic-comet", "high")
+        name = compact_periodic.group("name").strip(" _-")
+        if name:
+            _add_candidate(candidates, f"NAME={name};", name, "compact-comet-name", "medium")
+
+    spaced_periodic = re.match(r"^(?P<number>\d{1,4})\s*(?P<prefix>[PCDXA])\s+(?P<name>.+)$", text, flags=re.IGNORECASE)
+    if spaced_periodic:
+        designation = f"{spaced_periodic.group('number')}{spaced_periodic.group('prefix').upper()}"
+        _add_candidate(candidates, f"DES={designation};CAP;NOFRAG", designation, "spaced-periodic-comet", "high")
+        _add_candidate(candidates, f"NAME={spaced_periodic.group('name').strip()};", spaced_periodic.group("name").strip(), "spaced-comet-name", "medium")
+
+    numbered = re.match(r"^\(?(?P<number>\d{1,7})\)?(?:\s+(?P<name>.+))?$", text)
     if numbered:
-        return f"{numbered.group(1)};"
+        _add_candidate(candidates, f"{numbered.group('number')};", numbered.group("number"), "numbered-asteroid", "high")
+        if numbered.group("name"):
+            _add_candidate(candidates, f"NAME={numbered.group('name').strip()};", numbered.group("name").strip(), "asteroid-name", "medium")
 
-    leading_number = re.match(r"^(\d+)(?:\s+|$)", text)
-    if leading_number:
-        return f"{leading_number.group(1)};"
+    provisional = re.match(r"^(\d{4}\s+[A-Z]{1,2}\d{0,2})$", text, flags=re.IGNORECASE)
+    if provisional:
+        designation = re.sub(r"\s+", " ", provisional.group(1).upper())
+        _add_candidate(candidates, f"DES={designation};", designation, "provisional-designation", "high")
 
-    return text
+    packed = re.match(r"^[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d?$", text, flags=re.IGNORECASE)
+    if packed:
+        designation = text.upper()
+        _add_candidate(candidates, f"DES={designation};", designation, "packed-mpc-designation", "high")
+
+    _add_candidate(candidates, f"NAME={text};", text, "name-fallback", "low")
+    _add_candidate(candidates, text, text, "raw-fallback", "low")
+    return candidates
+
+
+def normalize_command(object_name: str) -> str:
+    candidates = generate_object_candidates(object_name)
+    return candidates[0].command if candidates else object_name.strip()
 
 
 def horizons_time(when: datetime) -> str:
@@ -291,9 +362,11 @@ def build_query(
     return API_URL + "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
 
 
-def fetch_result(url: str, retries: int, retry_delay_sec: float) -> str:
+def fetch_result(url: str, retries: int, retry_delay_sec: float, verbose: bool = False) -> str:
     last_error: Exception | None = None
     for attempt in range(1, max(1, retries) + 1):
+        if verbose:
+            print(f"Horizons HTTP attempt {attempt}/{max(1, retries)} (timeout 60s)", file=sys.stderr, flush=True)
         try:
             with urllib.request.urlopen(url, timeout=60) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -319,7 +392,11 @@ def fetch_result(url: str, retries: int, retry_delay_sec: float) -> str:
 def parse_horizons_result(result: str, expected_times: list[datetime]) -> list[EphemerisRow]:
     if "$$SOE" not in result or "$$EOE" not in result:
         snippet = "\n".join(line.rstrip() for line in result.splitlines()[:40])
-        raise RuntimeError(
+        lowered = result.lower()
+        error_type = HorizonsIdentificationError if any(
+            marker in lowered for marker in ("no matches found", "multiple matches", "small-body index search results", "ambiguous")
+        ) else HorizonsResponseError
+        raise error_type(
             "Horizons response did not contain $$SOE/$$EOE ephemeris markers. "
             "The target command may not have resolved to a unique ephemeris object. "
             f"Response begins:\n{snippet}"
@@ -329,7 +406,7 @@ def parse_horizons_result(result: str, expected_times: list[datetime]) -> list[E
     for line, expected_time in zip((line for line in body.splitlines() if line.strip()), expected_times):
         fields = next(csv.reader([line], skipinitialspace=True))
         if len(fields) < 5:
-            raise RuntimeError(f"Could not parse Horizons CSV row: {line}")
+            raise HorizonsResponseError(f"Could not parse Horizons CSV row: {line}")
         rows.append(
             EphemerisRow(
                 time=expected_time,
@@ -339,6 +416,46 @@ def parse_horizons_result(result: str, expected_times: list[datetime]) -> list[E
             )
         )
     return rows
+
+
+def sbdb_lookup_terms(object_name: str) -> list[str]:
+    """Return conservative lookup strings for JPL SBDB fallback search."""
+    text = re.sub(r"\s+", " ", object_name.strip().strip("'\""))
+    terms = [text]
+    compact = re.match(r"^(\d{1,4})([PCDXA])([A-Za-z].*)$", text, flags=re.IGNORECASE)
+    if compact:
+        terms.extend([f"{compact.group(1)}{compact.group(2).upper()}", compact.group(3).strip(" _-")])
+    spaced = re.match(r"^(\d{1,4})([PCDXA])\s+(.+)$", text, flags=re.IGNORECASE)
+    if spaced:
+        terms.extend([f"{spaced.group(1)}{spaced.group(2).upper()}", spaced.group(3).strip()])
+    comet = re.match(r"^[PCDXA]\s*/?\s*(\d{4})\s*([A-Z]\d+)(?:\s*\(([^)]+)\))?$", text, flags=re.IGNORECASE)
+    if comet:
+        terms.append(f"{comet.group(1)} {comet.group(2).upper()}")
+        if comet.group(3):
+            terms.append(comet.group(3).strip())
+    return list(dict.fromkeys(term for term in terms if term))
+
+
+def fetch_sbdb_candidates(object_name: str, retries: int, retry_delay_sec: float) -> list[ObjectCandidate]:
+    """Ask SBDB only after direct Horizons commands fail; no site data is sent."""
+    found: list[ObjectCandidate] = []
+    for term in sbdb_lookup_terms(object_name):
+        query = urllib.parse.urlencode({"sstr": term, "full-prec": "true"})
+        url = f"{SBDB_API_URL}?{query}"
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            print(f"SBDB lookup failed for {term!r}: {exc}", file=sys.stderr)
+            continue
+        obj = payload.get("object")
+        if not isinstance(obj, dict):
+            continue
+        designation = str(obj.get("des") or "").strip()
+        fullname = str(obj.get("fullname") or "").strip()
+        if designation:
+            _add_candidate(found, f"DES={designation};CAP;NOFRAG", fullname or designation, "SBDB-designation", "high")
+    return found
 
 
 def write_csv(path: Path, rows: list[EphemerisRow], meta: dict[str, object]) -> None:
@@ -377,7 +494,69 @@ def write_csv(path: Path, rows: list[EphemerisRow], meta: dict[str, object]) -> 
             )
 
 
+def query_group(
+    command: str,
+    group: list[datetime],
+    args: argparse.Namespace,
+    site_long: float | None,
+    site_lat: float | None,
+    site_elev_km: float | None,
+) -> list[EphemerisRow]:
+    url = build_query(command, group, args.center, site_long, site_lat, site_elev_km)
+    result = fetch_result(url, args.retries, args.retry_delay_sec, args.verbose)
+    return parse_horizons_result(result, group)
+
+
+def resolve_object_command(
+    object_name: str,
+    args: argparse.Namespace,
+    first_group: list[datetime],
+    site_long: float | None,
+    site_lat: float | None,
+    site_elev_km: float | None,
+) -> tuple[ObjectCandidate, list[EphemerisRow], list[ObjectCandidate]]:
+    """Resolve a FITS OBJECT using direct forms, then SBDB canonicalization."""
+    candidates = generate_object_candidates(object_name)
+    attempted: list[ObjectCandidate] = []
+    for candidate in candidates:
+        attempted.append(candidate)
+        print(
+            f"Trying Horizons target: {candidate.command} "
+            f"(source={candidate.source}, confidence={candidate.confidence})",
+            file=sys.stderr,
+        )
+        try:
+            rows = query_group(candidate.command, first_group, args, site_long, site_lat, site_elev_km)
+        except HorizonsIdentificationError as exc:
+            print(f"Target candidate did not resolve: {candidate.command}: {exc}", file=sys.stderr)
+            continue
+        return candidate, rows, attempted
+
+    sbdb_candidates = fetch_sbdb_candidates(object_name, args.retries, args.retry_delay_sec)
+    for candidate in sbdb_candidates:
+        if any(item.command.upper() == candidate.command.upper() for item in attempted):
+            continue
+        attempted.append(candidate)
+        print(f"Trying SBDB-derived Horizons target: {candidate.command}", file=sys.stderr)
+        try:
+            rows = query_group(candidate.command, first_group, args, site_long, site_lat, site_elev_km)
+        except HorizonsIdentificationError as exc:
+            print(f"SBDB candidate did not resolve: {candidate.command}: {exc}", file=sys.stderr)
+            continue
+        return candidate, rows, attempted
+
+    attempted_text = ", ".join(item.command for item in attempted) or "(none)"
+    raise SystemExit(
+        f"Could not identify target {object_name!r} in JPL Horizons. "
+        f"Tried: {attempted_text}. Use --command with an explicit Horizons COMMAND value."
+    )
+
+
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(line_buffering=True, write_through=True)
     args = parse_args()
     frames = filter_frames(args, load_frames(args.source_dir, args.limit))
     if not frames:
@@ -386,8 +565,6 @@ def main() -> int:
     object_name = args.object or frames[0].object_name
     if not object_name and not args.command:
         raise SystemExit("Target object was not provided and FITS OBJECT header is missing")
-    command = args.command or normalize_command(object_name or "")
-
     site_long = frames[0].site_long_deg
     site_lat = frames[0].site_lat_deg
     site_elev_km = args.elevation_km
@@ -400,18 +577,45 @@ def main() -> int:
             "Re-run with --allow-site-upload only when that privacy tradeoff is intentional."
         )
 
-    all_rows: list[EphemerisRow] = []
     times = [frame.date_obs for frame in frames]
     groups = list(chunked(times, max(1, args.chunk_size)))
-    for index, group in enumerate(groups, start=1):
+    if args.command:
+        selected = ObjectCandidate(args.command, args.command, "explicit-command", "explicit")
+        first_rows = query_group(args.command, groups[0], args, site_long, site_lat, site_elev_km)
+        attempted = [selected]
+    else:
+        selected, first_rows, attempted = resolve_object_command(
+            object_name or "", args, groups[0], site_long, site_lat, site_elev_km
+        )
+
+    all_rows: list[EphemerisRow] = list(first_rows)
+    for index, group in enumerate(groups[1:], start=2):
         print(f"Horizons request {index}/{len(groups)}: {iso_z(group[0])} .. {iso_z(group[-1])}", file=sys.stderr)
-        url = build_query(command, group, args.center, site_long, site_lat, site_elev_km)
-        result = fetch_result(url, args.retries, args.retry_delay_sec)
-        all_rows.extend(parse_horizons_result(result, group))
+        all_rows.extend(query_group(selected.command, group, args, site_long, site_lat, site_elev_km))
+
+    header_ra = frames[0].ra_deg
+    header_dec = frames[0].dec_deg
+    header_offset_arcsec: float | None = None
+    if header_ra is not None and header_dec is not None and first_rows:
+        import math
+
+        delta_ra = (first_rows[0].ra_deg - header_ra + 180.0) % 360.0 - 180.0
+        mean_dec_rad = math.radians((first_rows[0].dec_deg + header_dec) / 2.0)
+        header_offset_arcsec = math.hypot(delta_ra * math.cos(mean_dec_rad), first_rows[0].dec_deg - header_dec) * 3600.0
+        if header_offset_arcsec > 300.0:
+            print(
+                f"Warning: Horizons position differs from FITS RA/DEC by {header_offset_arcsec / 60.0:.2f} arcmin; "
+                "this is a warning, not an automatic rejection.",
+                file=sys.stderr,
+            )
 
     meta: dict[str, object] = {
         "object": object_name or command,
-        "command": command,
+        "command": selected.command,
+        "object_raw": object_name,
+        "object_normalized": selected.label,
+        "resolution_method": selected.source,
+        "attempted_commands": [item.command for item in attempted],
         "center": args.center,
         "frame_count": len(frames),
         "include_failed_frames": args.include_failed_frames,
@@ -421,6 +625,9 @@ def main() -> int:
         "site_lat_deg": site_lat if args.center == "fits-site" else None,
         "site_elevation_km": site_elev_km if args.center == "fits-site" else None,
         "source": "JPL Horizons API",
+        "fits_header_ra_deg": header_ra,
+        "fits_header_dec_deg": header_dec,
+        "header_offset_arcsec": header_offset_arcsec,
     }
     write_csv(args.output, all_rows, meta)
 
@@ -430,7 +637,7 @@ def main() -> int:
 
     print(f"Wrote {len(all_rows)} Horizons ephemeris rows: {args.output}")
     print(f"Wrote metadata: {meta_path}")
-    print(f"Object: {meta['object']}  COMMAND={command}  center={args.center}")
+    print(f"Object: {meta['object']}  COMMAND={selected.command}  resolution={selected.source}  center={args.center}")
     print(f"Range: {meta['first_time']} .. {meta['last_time']}")
     return 0
 

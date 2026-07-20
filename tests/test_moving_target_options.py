@@ -1,5 +1,8 @@
+import io
 import tempfile
 import unittest
+from argparse import Namespace
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +16,73 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import moving_target_stack as stacker
 import moving_target_pipeline as pipeline
 import astrometry_solve
+import horizons_ephemeris as horizons
+
+
+class HorizonsObjectResolutionTests(unittest.TestCase):
+    def test_compact_periodic_comet_prefers_designation(self):
+        candidates = horizons.generate_object_candidates("24PSchaumasse")
+
+        self.assertEqual(candidates[0].command, "DES=24P;CAP;NOFRAG")
+        self.assertEqual(candidates[0].source, "compact-periodic-comet")
+
+    def test_named_comet_without_spaces_is_normalized(self):
+        candidates = horizons.generate_object_candidates("C2025A6 (Lemmon)")
+
+        self.assertEqual(candidates[0].command, "DES=C/2025 A6;CAP;NOFRAG")
+
+    def test_numbered_asteroid_keeps_name_as_fallback(self):
+        candidates = horizons.generate_object_candidates("98943 Torifune")
+        commands = [candidate.command for candidate in candidates]
+
+        self.assertEqual(commands[0], "98943;")
+        self.assertIn("NAME=Torifune;", commands)
+
+    def test_explicit_horizons_command_is_not_rewritten(self):
+        candidates = horizons.generate_object_candidates("DES=C/2025 A6;CAP;NOFRAG")
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].command, "DES=C/2025 A6;CAP;NOFRAG")
+
+    def test_missing_ephemeris_markers_classifies_no_match(self):
+        with self.assertRaises(horizons.HorizonsIdentificationError):
+            horizons.parse_horizons_result(
+                "Small-body Index Search Results\nNo matches found.",
+                [datetime(2025, 1, 1, tzinfo=timezone.utc)],
+            )
+
+
+class SessionListTests(unittest.TestCase):
+    def test_verbose_session_resolution_prints_all_sessions_and_selection(self):
+        sessions = [
+            [
+                (datetime(2026, 7, 20, 1, 0, tzinfo=timezone.utc), Path("first.fit")),
+                (datetime(2026, 7, 20, 1, 1, tzinfo=timezone.utc), Path("second.fit")),
+            ],
+            [(datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc), Path("third.fit"))],
+        ]
+        args = Namespace(
+            source_dir=Path("frames"),
+            session_gap_min=60.0,
+            session_index=1,
+            session_at=None,
+            count=None,
+            include_failed_frames=False,
+            verbose=True,
+        )
+        output = io.StringIO()
+
+        with patch.object(pipeline, "load_sessions", return_value=sessions), redirect_stdout(output):
+            selected_index, files, session_info = pipeline.resolve_session(args)
+
+        rendered = output.getvalue()
+        self.assertIn("Index  Frames", rendered)
+        self.assertIn("    1       2", rendered)
+        self.assertIn("<- selected", rendered)
+        self.assertIn("    2       1", rendered)
+        self.assertEqual(selected_index, 1)
+        self.assertEqual(files, [Path("first.fit"), Path("second.fit")])
+        self.assertEqual(session_info["session_count"], 2)
 
 
 class MedianAccumulatorTests(unittest.TestCase):
@@ -180,6 +250,33 @@ class AstrometryHelperTests(unittest.TestCase):
         self.assertIn(b"frame.fit", body)
         self.assertIn(b"SIMPLE  = T", body)
         self.assertIn(boundary, body)
+
+
+class VerboseOutputTests(unittest.TestCase):
+    def test_stack_summary_parser_ignores_braces_in_verbose_output(self):
+        output = 'Siril message {not json}\n[stack:mean] frame 2/2\n{"used_frames": 2, "work_dir": "C:/work"}\n'
+
+        summary = pipeline.parse_stack_summary(output)
+
+        self.assertEqual(summary["used_frames"], 2)
+
+    def test_siril_disk_space_failure_is_detected_even_with_zero_exit_status(self):
+        output = "\n".join(
+            [
+                "log: Not enough free disk space to perform this operation: 9.3 GiB available for 11.3 GiB needed",
+                "log: Registration aborted.",
+                "log: Script execution failed.",
+            ]
+        )
+
+        reason = stacker.siril_failure_reason(output)
+
+        self.assertIsNotNone(reason)
+        self.assertIn("Not enough free disk space", reason)
+        self.assertIn("Registration aborted", reason)
+
+    def test_siril_success_output_has_no_failure_reason(self):
+        self.assertIsNone(stacker.siril_failure_reason("log: Registration finished.\nprogress: 100%"))
 
 
 if __name__ == "__main__":

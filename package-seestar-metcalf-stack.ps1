@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.4.1",
+    [string]$Version = "0.4.5",
     [switch]$NoZip
 )
 
@@ -37,18 +37,18 @@ $Files = @(
     @("scripts\run_metcalf_stack.ps1", "scripts\run_metcalf_stack.ps1"),
     @("tests\test_moving_target_options.py", "tests\test_moving_target_options.py"),
     @("scripts\astrometry_solve.py", "scripts\astrometry_solve.py"),
-    @("README-Seestar-Metcalf-Stack.md", "README.md"),
-    @("README-Seestar-Metcalf-Stack.ja.md", "README-ja.md"),
+    @("README.md", "README.md"),
+    @("README-en.md", "README-en.md"),
     @("requirements.txt", "requirements.txt"),
     @("seestar-metcalf-stack.cmd", "seestar-metcalf-stack.cmd"),
     @("build-seestar-metcalf-stack-exe.ps1", "build-seestar-metcalf-stack-exe.ps1"),
     @("setup-python-deps.cmd", "setup-python-deps.cmd"),
     @("set-astrometry-api-key.cmd", "set-astrometry-api-key.cmd"),
     @("siril-cli.cmd", "siril-cli.cmd"),
-    @("THIRD-PARTY-NOTICES-Seestar-Metcalf-Stack.md", "THIRD-PARTY-NOTICES.md"),
+    @("THIRD-PARTY-NOTICES.md", "THIRD-PARTY-NOTICES.md"),
     @("LICENSE", "LICENSE"),
-    @("seestar-metcalf-stack.gitignore", ".gitignore"),
-    @("github-workflow-metcalf-tests.yml", ".github\workflows\tests.yml")
+    @(".gitignore", ".gitignore"),
+    @(".github\workflows\tests.yml", ".github\workflows\tests.yml")
 )
 
 foreach ($Pair in $Files) {

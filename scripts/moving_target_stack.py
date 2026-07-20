@@ -947,13 +947,55 @@ def write_console_safe(text: str, stream = None) -> None:
     stream = stream or sys.stdout
     encoding = stream.encoding or "utf-8"
     safe = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
-    print(safe, end="", file=stream)
+    print(safe, end="", file=stream, flush=True)
 
 
-def run_siril(siril_cmd: Path, work_dir: Path, script_path: Path) -> None:
+def siril_failure_reason(output: str) -> str | None:
+    markers = (
+        "not enough free disk space",
+        "not enough space to save the output images",
+        "registration aborted",
+        "finalizing sequence processing failed",
+        "script execution failed",
+    )
+    matches: list[str] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line and any(marker in line.lower() for marker in markers) and line not in matches:
+            matches.append(line)
+    return "; ".join(matches) if matches else None
+
+
+def run_siril(siril_cmd: Path, work_dir: Path, script_path: Path, verbose: bool = False) -> None:
     if not siril_cmd.exists():
         raise FileNotFoundError(f"Siril wrapper not found: {siril_cmd}")
     cmd = ["cmd.exe", "/c", str(siril_cmd), "-d", str(work_dir), "-s", str(script_path)]
+    if verbose:
+        process = subprocess.Popen(
+            cmd,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+        )
+        output_lines: list[str] = []
+        if process.stdout is None:
+            raise RuntimeError("Siril stdout pipe was not created")
+        for line in iter(process.stdout.readline, ""):
+            output_lines.append(line)
+            write_console_safe(line)
+        process.stdout.close()
+        returncode = process.wait()
+        output = "".join(output_lines)
+        failure = siril_failure_reason(output)
+        if failure:
+            raise RuntimeError(f"Siril registration failed: {failure}")
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, cmd, output=output)
+        return
+
     completed = subprocess.run(
         cmd,
         check=False,
@@ -964,6 +1006,11 @@ def run_siril(siril_cmd: Path, work_dir: Path, script_path: Path) -> None:
         stderr=subprocess.PIPE,
     )
     write_console_safe(completed.stdout)
+    combined_output = completed.stdout + "\n" + completed.stderr
+    failure = siril_failure_reason(combined_output)
+    if failure:
+        write_console_safe(completed.stderr, sys.stderr)
+        raise RuntimeError(f"Siril registration failed: {failure}")
     if completed.returncode != 0:
         write_console_safe(completed.stderr, sys.stderr)
         raise subprocess.CalledProcessError(
@@ -1210,6 +1257,7 @@ def main() -> int:
         action="store_true",
         help="Keep intermediate image FITS files generated for Siril registration.",
     )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show registration and per-frame stack progress.")
     args = parser.parse_args()
 
     if not 1 <= args.rankfit_fraction <= 100:
@@ -1244,7 +1292,11 @@ def main() -> int:
 
     copied: list[Path] = []
     try:
+        if args.verbose:
+            print(f"[prepare] Copying {len(files)} source frames for Siril registration", flush=True)
         for i, source in enumerate(files, start=1):
+            if args.verbose:
+                print(f"[prepare] frame {i}/{len(files)}: {source.name}", flush=True)
             destination = registration_dir / f"{args.basename}_src_{i:05d}.fit"
             copied.append(destination)
             shutil.copy2(source, destination)
@@ -1262,10 +1314,21 @@ def main() -> int:
         reference_index,
     )
     try:
-        run_siril(args.siril, registration_dir, siril_script)
+        if args.verbose:
+            print(f"[registration] Siril background-star registration: {len(copied)} frames", flush=True)
+        run_siril(args.siril, registration_dir, siril_script, args.verbose)
+        registered_count = sum(
+            (registration_dir / f"r_{args.basename}_{i:05d}.fit").exists()
+            for i in range(1, len(copied) + 1)
+        )
+        if registered_count == 0:
+            raise RuntimeError("Siril registration produced no registered FITS frames")
+        if args.verbose:
+            print(f"[registration] Registered {registered_count}/{len(copied)} frames", flush=True)
     except Exception:
         if not args.no_cleanup:
-            cleanup_intermediate_images(registration_dir, args.basename, copied, len(copied))
+            removed = cleanup_intermediate_images(registration_dir, args.basename, copied, len(copied))
+            print(f"[cleanup] Removed {len(removed)} intermediate FITS files after registration failure", flush=True)
         raise
     registration_seq = registration_dir / f"{args.basename}_.seq"
     star_registrations = parse_siril_registration(registration_seq)
@@ -1293,6 +1356,11 @@ def main() -> int:
     used = 0
 
     for i, source in enumerate(copied, start=1):
+        if args.verbose:
+            print(
+                f"[stack:{args.stack_method}] frame {i}/{len(copied)}: {files[i - 1].name}",
+                flush=True,
+            )
         registered = registration_dir / f"r_{args.basename}_{i:05d}.fit"
         star_reg = star_registrations.get(i, SirilRegistration(index=i))
         if not registered.exists():
@@ -1375,6 +1443,11 @@ def main() -> int:
         raise RuntimeError("No registered frames were available for moving-target stacking")
 
     median_temp_removed: list[str] = []
+    if args.verbose:
+        print(
+            f"[stack:{args.stack_method}] finalizing {used}/{len(copied)} accepted frames",
+            flush=True,
+        )
     if args.stack_method == "mean":
         stack = finalize_average(sum_image, count_image)
         star_stack = finalize_average(star_sum_image, star_count_image)
@@ -1397,6 +1470,8 @@ def main() -> int:
         if median_star_stack.close(remove=not args.no_cleanup):
             median_temp_removed.append(str(median_star_stack.path))
     comparison_stack = concatenate_side_by_side(star_stack, stack)
+    if args.verbose:
+        print("[output] Writing Metcalf, star-aligned, comparison FITS, and previews", flush=True)
     base_output_stem = args.output_prefix or default_output_stem(
         reference,
         reference_source.name,

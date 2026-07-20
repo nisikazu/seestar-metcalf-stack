@@ -1,262 +1,206 @@
 # Seestar Metcalf Stack
 
-[日本語](README-ja.md)
+[English](README-en.md)
 
-Seestar Metcalf Stack turns Seestar subframe FITS files into a stack that
-follows a moving comet or asteroid. It also creates a star-aligned stack from
-the same frames, plus a side-by-side comparison FITS.
+Seestar のサブフレームFITSから、彗星や小惑星を追跡したメトカーフスタックを作るWindows向けツールです。同じフレームから背景星固定スタックと、両者を左右に並べた比較FITSも作成します。
 
-This is a post-processing tool. It does not control a Seestar and does not need
-the Seestar PEM/private communication key.
+これは撮影後の画像処理専用ツールです。Seestar本体は制御せず、Seestar通信用のPEMや秘密キーも必要ありません。
 
-## What the dependencies do
+## このソフトを使う流れ
 
-The setup has several parts because each one supplies information that is not
-reliably present in a raw Seestar subframe:
+このツールは、Seestarで撮影したサブフレームを後から処理するソフトです。まず彗星や小惑星をSeestarで観測し、元の1枚ごとの画像を保存しておきます。
 
-- **Astrometry.net** plate-solves one reference frame. The solve establishes the
-  exact sky coordinates, image scale, and orientation, so an ephemeris position
-  can be converted into an image-pixel position. An Astrometry.net account and
-  API key are required. `set-astrometry-api-key.cmd` saves the key for the tool.
-- **JPL Horizons** supplies the target's RA/Dec at every exposure time. Those
-  positions determine how far the comet or asteroid moved between frames. No
-  JPL API key is required.
-- **Siril** detects background stars and estimates each frame's translation,
-  rotation, and scale relative to the reference frame. This tool then adds the
-  Horizons-derived moving-target offset and performs the final pixel combine.
-- **Python, NumPy, and Pillow** run the pipeline, calculate shifts and stacks,
-  write linear FITS files, and create display previews.
-- **Python** also handles the Astrometry.net upload, polling, calibration download,
-  and resumable submission checkpoint.
+1. Seestarアプリで彗星または小惑星を選び、観測を開始します。
+2. 撮影設定で**サブフレーム保存をON**にします。保存されていないスタック済み画像だけでは、このツールでフレームごとの移動を計算できません。
+3. 観測終了後、サブフレームのフォルダをPCへコピーします。USB経由で本体のファイルを取得する方法、またはSeestarをSTAモードにしてネットワークファイル共有経由で取得する方法があります。フォルダ名は通常 `*_sub` で、内部に `.fit` または `.fits` ファイルが入ります。
+4. PCで `seestar-metcalf-stack.cmd` にサブフレームフォルダをドラッグ&ドロップするか、コマンドで処理します。
 
-Astrometry.net, Horizons, and Siril are therefore not interchangeable extras:
-they respectively answer *where the image points*, *where the target moved*,
-and *how the background-star field moved*.
+## 必要な外部ツール一覧
 
-## Requirements and package choices
+サブフレームを用意しただけでは、画像が空のどこを向いているか、撮影中に天体がどこへ動いたか、背景星をどう重ねるかが分かりません。次のツールがそれぞれ別の役割を担います。
 
-- Windows 10 or 11
-- Internet access for Astrometry.net and JPL Horizons
-- An Astrometry.net API key
-- Siril 1.4 or newer
+- **Astrometry.net** は基準フレームをプレートソルブし、その画像が空のどこを、どの画角と向きで撮影したかを確定します。これにより天体の赤経・赤緯を画像上の画素位置へ変換できます。アカウントとAPIキーが必要ですが、同梱の `set-astrometry-api-key.cmd` で設定できます。
+- **JPL Horizons** は各露光時刻における対象天体の赤経・赤緯を返します。この固有運動から、フレームごとに追加すべき移動量を求めます。JPLのAPIキーは不要です。
+- **Siril** は背景星を検出し、各フレームの平行移動・回転・倍率を基準フレームに対して推定します。本ツールはその結果にHorizons由来の天体移動量を加え、最後の画素スタックを行います。
+- **Python、NumPy、Pillow** はソースコードを実行・改造する場合に必要です。配布版の `seestar-metcalf-stack.exe` には実行に必要なPythonランタイムが含まれているため、通常の利用者はPythonやライブラリを別途インストールする必要はありません。
 
-The standard `seestar-metcalf-stack-vX.Y.Z.zip` includes
-`seestar-metcalf-stack.exe`, so normal execution does not require a separate
-Python installation. It does not bundle Siril: install Siril separately and
-place `siril-cli.exe` on `PATH`, or set the `SIRIL_CLI` environment variable to
-its full path.
+処理の分担は、Astrometry.netが「画像がどこを向いているか」、Horizonsが「対象がどう動いたか」、Sirilが「背景星の写り方がフレーム間でどうずれたか」を決めます。Sirilは背景星の検出とフレーム間の平行移動・回転・倍率の推定を担当します。最終的なメトカーフスタック、星固定スタック、線形FITSの書き出しはPython側で行います。
 
-The larger Windows convenience asset
-`seestar-metcalf-stack-siril-vX.Y.Z.zip` includes Siril and a
-`seestar-metcalf-stack.exe` containing the Python runtime. Choose it if you want the
-lowest setup cost. Its Siril files remain covered by GPLv3; see the notices
-included in that package. The convenience package does not require a separate
-Python installation.
+## 必要なものと配布版の違い
 
-The source scripts remain included for inspection and development. If you edit
-`scripts/*.py`, remove `seestar-metcalf-stack.exe` or rebuild it before running:
+- Windows 10/11
+- Astrometry.netとJPL Horizonsへ接続できるネットワーク
+- Astrometry.net APIキー
+- Siril 1.4以降
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build-seestar-metcalf-stack-exe.ps1
-```
+Sirilをまだインストールしていない利用者には、容量の大きい `seestar-metcalf-stack-siril-vX.Y.Z.zip` を標準版として推奨します。Sirilと実行用EXEを含むため、PythonやSirilを別途インストールする必要がありません。同梱されるSiril部分にはGPLv3が適用されます。
 
-The command prefers the EXE when it is present, so leaving an old EXE beside
-modified Python code would run the old code.
+すでにSirilをインストール済みの場合や、配布サイズを小さくしたい場合は `seestar-metcalf-stack-vX.Y.Z.zip` を使います。この版も `seestar-metcalf-stack.exe` を含むため、通常の実行にPythonの別途インストールは不要です。Sirilは別途インストールし、`siril-cli.exe` にPATHを通すか、環境変数 `SIRIL_CLI` にフルパスを設定します。
 
-## First-time setup
+バージョンアップ時は、Sirilなし版を展開して新しいファイルへ更新できます。旧版から次のものを新しいフォルダへコピーすると、SirilやAPIキー、過去の出力を引き継げます。
 
-1. Install Siril and make `siril-cli.exe` available, unless using the Siril-bundled build.
-2. Run the Python dependency installer only if you plan to use or modify the Python fallback:
+- `tools` フォルダ（Siril同梱版を使っていた場合）
+- `.astrometry_api_key`
+- `metcalf_output` フォルダ
+
+Siril同梱版から更新する場合も、同じ3つを新しいSirilなし版へ移せます。Sirilを別途インストールしていない場合は、引き続きSiril同梱版を使用してください。
+
+Pythonコードを改造した場合は、古いEXEが優先実行されないよう `seestar-metcalf-stack.exe` を削除するか、`build-seestar-metcalf-stack-exe.ps1` でEXEを再生成してください。
+
+## 初回セットアップ
+
+1. Siril未導入なら、Siril同梱版を展開します。通常のEXE実行だけなら、これでPython依存パッケージのインストールは不要です。
+2. Sirilを別途利用する場合は、Sirilをインストールし、`siril-cli.exe` をPATHへ追加するか `SIRIL_CLI` を設定します。Sirilなし版を使う場合も同じです。
+3. Pythonコードを実行・改造する場合だけ、展開したフォルダで依存パッケージを準備します。
 
    ```bat
    setup-python-deps.cmd
    ```
 
-3. Sign in to [Astrometry.net](https://nova.astrometry.net/), open its
-   [API help page](https://nova.astrometry.net/api_help), and copy your API key.
-4. Save the key with the included assistant command:
+4. [Astrometry.net](https://nova.astrometry.net/) にログインし、[API help](https://nova.astrometry.net/api_help) からAPIキーを取得します。
+5. 同梱コマンドでAPIキーを保存します。
 
    ```bat
    set-astrometry-api-key.cmd YOUR_API_KEY
    ```
 
-The key is stored in `.astrometry_api_key` beside the scripts. That file is
-ignored by Git and must not be published.
+キーはツールと同じフォルダの `.astrometry_api_key` に保存されます。このファイルはGit管理や配布に含めないでください。
 
-## Choose an observing session
+## 最初にセッションを確認する
 
-Start by listing the sessions detected in a Seestar subframe folder. Listing is
-local-only: it does not contact Astrometry.net, Horizons, or Siril.
+まずサブフレームフォルダ内の撮影セッションを一覧表示できます。この操作はローカルだけで完結し、Astrometry.net、Horizons、Sirilを呼びません。
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\98943 Torifune_sub" --list-sessions
 ```
 
-The output shows a 1-based session number, frame count, and local/UTC start and
-end times. Sessions are separated when the gap between consecutive frames is
-greater than 60 minutes. With no selector, the latest session is used.
+一覧には1から始まるセッション番号、フレーム数、ローカル時刻とUTCの開始・終了時刻が表示されます。連続するFITSの間隔が60分を超えたところで別セッションになります。何も指定しなければ最新セッションを処理します。
 
-Select a listed session by number:
+一覧の番号で選ぶ場合:
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --session-index 2
 ```
 
-Or select the first session starting at or after a local date/time:
+指定したローカル日時以後に開始する最初のセッションを選ぶ場合:
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --session-at 20260709-195000
 ```
 
-`--session-at` accepts `YYYYMMDD` or `YYYYMMDD-hhmmss`. It is interpreted in
-the PC's local time zone. Missing time fields become `00`; hour, minute, and
-second fields must be two digits. Invalid time fields become `00`, and invalid
-month/day fields become `01`.
+`--session-at` は `YYYYMMDD` または `YYYYMMDD-hhmmss` 形式です。時刻はPCのローカル時刻として解釈されます。省略した時刻桁は `00`、時分秒の1桁指定や範囲外値も `00`、範囲外の月日は `01` として扱います。
 
-## Run a stack
+## スタックを実行する
 
-The simplest run uses the latest session, arithmetic mean, and its first frame
-as the reference:
+最新セッションを平均処理し、先頭フレームを基準にする基本実行:
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\C2025 R2 (SWAN)_sub"
 ```
 
-You can also drag the subframe folder directly onto `seestar-metcalf-stack.cmd`.
-The output folder opens after a successful run.
+サブフレームフォルダは `seestar-metcalf-stack.cmd` に直接ドラッグ&ドロップして実行できます。成功すると出力フォルダが開きます。
 
-The pipeline automatically obtains a Horizons ephemeris, solves the reference
-frame, registers the background stars, and writes all final products under
-`metcalf_output\<target>_<method>-YYYYMMDD-HHMMSS`.
+処理はHorizons座標取得、基準フレームのプレートソルブ、Sirilによる背景星位置合わせ、最終スタックまで自動で進みます。出力先は `metcalf_output\<target>_<処理方式>-YYYYMMDD-HHMMSS` です。方式部分は `mean`、`median`、または `rankfit5_p50` のようになります。
 
-### Plate-solve cache
+`seestar-metcalf-stack.cmd` から起動すると詳細表示が自動的に有効になります。最初に全セッションと選択されたセッションを表示し、その後は処理段階、Sirilの出力、スタック方式、`現在枚数/総枚数`を表示します。同じ内容が実行中から `metcalf_output\metcalf-YYYYMMDD-HHMMSS.log` へ追記されます。正常終了時には成果物の出力フォルダをエクスプローラーで開きます。EXEやPythonを直接起動する場合は `-v` または `--verbose` を指定してください。
 
-The first successful solve is cached beside the source subframes using the
-reference FITS filename:
+### 大規模セッションの空き容量
 
-- `<reference-stem>_astrometry.json`
-- `<reference-stem>_wcs.fits`
-- `<reference-stem>_astrometry_submission.json` while/resuming a submission
+Sirilの背景星位置合わせでは、デベイヤ済み画像と登録済み画像を一時的に保存します。数百枚のセッションでは、元FITSの合計より大きな空き容量が必要です。Sirilが `Not enough free disk space` を表示した場合は、空き容量を増やす、`--work-root D:\metcalf_output` のように別ドライブを使う、または `--count 400` のように処理枚数を減らしてください。登録失敗時の中間FITSはデフォルトで自動削除されます。`--no-cleanup`を指定した場合は残ります。
 
-Later runs using the same reference frame validate and reuse the cached WCS or
-JSON calibration without uploading the FITS again. If a previous run uploaded
-successfully but was interrupted while waiting for the result, the saved
-submission ID is resumed instead of making another upload. A different
-`--reference-frame` may select a different FITS and therefore has its own cache.
-Use `--solve-dir` only when you want the persistent cache somewhere other than
-the source folder.
+### プレートソルブ結果のキャッシュ
 
-### Mean, median, or rank-fit
+最初に解決した結果は、サブフレームのソースフォルダへ基準FITS名を使って保存します。
 
-Mean is the default and generally provides the best signal-to-noise ratio when
-the input frames are clean:
+- `<基準FITSのstem>_astrometry.json`
+- `<基準FITSのstem>_wcs.fits`
+- 送信途中または再開用の `<基準FITSのstem>_astrometry_submission.json`
+
+次回以降はWCSまたはJSON calibrationの内容を検証し、正常ならFITSをAstrometry.netへ再送せず利用します。アップロード後の結果待ち中に処理が中断した場合も、保存されたsubmission IDから既存ジョブを再開します。`--reference-frame`によって別の基準FITSが選ばれれば、そのFITS専用の別キャッシュになります。ソースフォルダ以外へ永続キャッシュを置きたい場合だけ `--solve-dir` を指定します。
+
+### 平均、メジアン、ランクフィット
+
+デフォルトの平均は、入力が良好なら一般に最も高いS/Nを得やすい方式です。
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean
 ```
 
-Median is more resistant to satellites, airplanes, hot pixels, and other
-one-frame outliers. In a Metcalf stack, it reduces star trails and is intended
-to improve the accuracy of comet photometry. However, it is slower, uses large
-temporary disk-backed arrays, and usually has lower statistical efficiency.
-Exact-zero padding is always excluded from the median samples:
+画素ごとのメジアンは、人工衛星、飛行機、ホットピクセルなど少数フレームだけに現れる外れ値に強い方式です。メジアンはメトカーフスタッキング像において星の軌跡を低減し、彗星光度の精度向上を図ります。一方で平均より遅く、大きなディスク上の一時配列を使い、統計的な効率も通常は平均より低くなります。メジアンでは登録・シフト境界の完全な0を常に母集団から除外します。
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median
 ```
 
-Rank-fit sorts the nonzero samples at each pixel, keeps the central percentage,
-fits a fifth-degree polynomial to brightness versus normalized rank, and returns
-the fitted value at the median rank. The default central percentage is 50:
+ランクフィットは、各画素の非0サンプルを明るさ順に並べ、中央の指定割合を採用し、正規化順位に対する明るさを5次多項式でフィットして中央値順位での関数値を返します。既定の採用率は50%です。
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method rankfit --rankfit-fraction 50
 ```
 
-`--rankfit-fraction` is an integer from 1 through 100. Output names and run
-folders record it as `rankfit5_p50`. If fewer than seven central samples are
-available, that pixel falls back to the nonzero median.
+`--rankfit-fraction` は1〜100の整数です。出力名と実行フォルダには `rankfit5_p50` のように採用率を記録します。中央候補が7点未満の画素は非0メジアンへフォールバックします。
 
-Output names always contain `_mean_`, `_median_`, or `_rankfit5_pNN_`. FITS
-headers record the method in `STKMODE`, and rank-fit products also record
-`RFFRAC` and `RFDEG`.
+出力名には `_mean_`、`_median_`、または `_rankfit5_pNN_` が入り、FITSヘッダーの `STKMODE` に方式を記録します。ランクフィットでは `RFFRAC` と `RFDEG` に採用率と次数も記録します。
 
-### First or midpoint reference frame
+### 先頭または時刻中間の基準フレーム
 
-The first frame is the default registration, WCS, timestamp, and coordinate
-reference. For a long session, the frame nearest the temporal midpoint can
-reduce the largest registration and moving-target offsets:
+デフォルトは先頭フレームです。長時間セッションでは、撮影開始と終了の時刻中間に最も近いフレームを基準にすると、最大の位置合わせ量や天体シフト量を抑えられます。
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
 ```
 
-The selected frame is sent to Astrometry.net and is explicitly set as Siril's
-registration reference. Its `DATE-OBS` and WCS are written to the final FITS.
-The FITS headers also contain `REFMODE`, `REFINDEX`, `MTREFRA`, and `MTREFDEC`.
+選ばれたフレームがAstrometry.netへ送られ、Sirilの位置合わせ基準にも明示設定されます。最終FITSの `DATE-OBS` とWCS座標はこの基準フレームを反映します。`REFMODE`、`REFINDEX`、`MTREFRA`、`MTREFDEC` にも基準情報を残します。
 
-## Outputs
+## 出力
 
-Output names contain target, exposure, filter, UTC time range, used frame count,
-and combine method, for example:
+ファイル名には対象、露光時間、フィルター、UTCの開始・終了時刻、使用枚数、平均/メジアン方式が入ります。
 
-`C2025_R2_SWAN_20.0s_IRCUT_20251103T095234Z-20251103T105620Z_90frames_median_metcalf_stack.fit`
+例: `C2025_R2_SWAN_20.0s_IRCUT_20251103T095234Z-20251103T105620Z_90frames_median_metcalf_stack.fit`
 
-- `*_metcalf_stack.fit`: linear moving-target stack
-- `*_star_stack.fit`: linear background-star stack from the same accepted frames
-- `*_star_left_metcalf_right.fit`: both stacks side by side; WCS applies to the
-  star-aligned left half
-- `*_metcalf_preview.png`, `*_star_preview.png`: stretched display previews,
-  not photometry products
-- `*_shifts.csv`: per-frame star registration and target-motion offsets
-- `*_summary.json`, `moving_target_pipeline_summary.json`: reproducibility data
+- `*_metcalf_stack.fit`: 移動天体固定の線形FITS
+- `*_star_stack.fit`: 同じ採用フレームによる背景星固定の線形FITS
+- `*_star_left_metcalf_right.fit`: 左に星固定、右に移動天体固定を並べたFITS。WCSは左半分に有効
+- `*_metcalf_preview.png`、`*_star_preview.png`: 表示用ストレッチ画像。測光には使用しません
+- `*_shifts.csv`: 各フレームの星位置合わせ量と天体移動量
+- `*_summary.json`、`moving_target_pipeline_summary.json`: 再現用の処理記録
 
-Final FITS values remain linear ADU data. Intermediate calculations use floating
-point. The default unsigned 16-bit output uses no rescaling; use
-`--output-bitpix float32` when you want to preserve fractional interpolation
-values directly.
+最終FITSは線形ADU値を保ち、中間計算は浮動小数点で行います。デフォルトのunsigned 16-bit出力は再スケールしません。補間後の小数値も直接残したい場合は `--output-bitpix float32` を使います。
 
-Large Siril and median temporary image arrays are removed after a successful
-run. Use `--no-cleanup` to keep them for diagnosis.
+Siril登録画像とメジアン用一時配列は成功後に削除します。調査のため残す場合は `--no-cleanup` を指定します。
 
-## Other useful options
+## その他のオプション
 
-Include Seestar files whose names contain `_failed_`:
+ファイル名に `_failed_` を含むSeestarフレームも使う:
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --include-failed-frames
 ```
 
-Use an existing Horizons CSV or Astrometry.net result:
+既存のHorizons CSVまたはAstrometry.net解を再利用する:
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --ephemeris-csv "C:\path\to\ephemeris.csv"
 seestar-metcalf-stack.cmd "C:\path\to\frames" --astrometry-json "C:\path\to\solution.json"
 ```
 
-Use geocentric Horizons coordinates instead of sending the FITS observing site:
+観測地をHorizonsへ送らず地心座標を使う:
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-center geocenter
 ```
 
-When quoting a Windows path for a `.cmd` file, omit the trailing backslash:
-use `"C:\path\to\frames"`, not `"C:\path\to\frames\"`.
+Windowsの `.cmd` に引用符付きパスを渡す場合、閉じ引用符直前の末尾バックスラッシュは付けないでください。`"C:\path\to\frames"` は正しく、`"C:\path\to\frames\"` は避けます。
 
-## Privacy
+## プライバシー
 
-Astrometry.net receives one sanitized reference FITS. Site-location FITS cards
-are removed before upload. By default, JPL Horizons receives the observing site
-from the FITS header to calculate topocentric coordinates. Use
-`--horizons-center geocenter` or your own `--ephemeris-csv` if you do not want to
-send that site information.
+Astrometry.netへは基準FITSを1枚送ります。送信前に観測地を表すFITSカードを削除します。デフォルトではtopocentric座標を得るため、JPL HorizonsへFITSの観測地を送ります。送りたくない場合は `--horizons-center geocenter` または自分で用意した `--ephemeris-csv` を使ってください。
 
-## License and author
+## ライセンスと作者
 
-Seestar Metcalf Stack is released under the MIT License.
+Seestar Metcalf StackはMIT Licenseで公開します。
 
 Copyright (c) 2026 **Nishida Kazufumi**
-([@RollerRacers](https://twitter.com/RollerRacers)).
+([@RollerRacers](https://twitter.com/RollerRacers))
 
-Siril is GPLv3 software and is not part of the MIT-licensed project code. See
-`THIRD-PARTY-NOTICES.md` for details.
+SirilはGPLv3ソフトウェアであり、本プロジェクトのMITライセンス部分とは別です。詳細は `THIRD-PARTY-NOTICES.md` を参照してください。
