@@ -12,7 +12,12 @@ if (-not (Test-Path -LiteralPath $Python)) {
     throw "Python executable was not found: $Python"
 }
 if (-not (Test-Path -LiteralPath $PyInstallerPath)) {
-    throw "PyInstaller build environment was not found: $PyInstallerPath"
+    Write-Host "Installing PyInstaller build dependencies into $PyInstallerPath"
+    New-Item -ItemType Directory -Force -Path $PyInstallerPath | Out-Null
+    & $Python -m pip install --target $PyInstallerPath pyinstaller
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installing PyInstaller failed with exit code $LASTEXITCODE"
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $BuildRoot, $DistRoot | Out-Null

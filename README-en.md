@@ -1,6 +1,6 @@
 # Seestar Metcalf Stack
 
-[日本語](README.md)
+[日本語](README.md) | [macOS setup (Japanese)](README-macOS.md)
 
 Seestar Metcalf Stack turns Seestar subframe FITS files into a stack that
 follows a moving comet or asteroid. It also creates a star-aligned stack from
@@ -54,7 +54,7 @@ the final Metcalf stack, star-fixed stack, linear FITS writing, and previews.
 
 ## Requirements and package choices
 
-- Windows 10 or 11
+- Windows 10/11, or macOS 13 or newer when running the Python source
 - Internet access for Astrometry.net and JPL Horizons
 - An Astrometry.net API key
 - Siril 1.4 or newer
@@ -96,7 +96,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-seestar-metcalf-stac
 ```
 
 The command prefers the EXE when it is present, so leaving an old EXE beside
-modified Python code would run the old code.
+modified Python code would run the old code. On its first run, the build script
+installs PyInstaller into `.build`, which requires network access.
 
 ## First-time setup
 
@@ -168,13 +169,17 @@ The pipeline automatically obtains a Horizons ephemeris, solves the reference
 frame, registers the background stars, and writes all final products under
 `metcalf_output\<target>_<method>-YYYYMMDD-HHMMSS`.
 
-Launching through `seestar-metcalf-stack.cmd` enables verbose output
-automatically. The console first shows every detected session and marks the
+Verbose output is enabled by default for the CMD, shell launcher, EXE, and
+Python entry point. The console first shows every detected session and marks the
 selected one, then shows each pipeline stage, Siril output, stack method, and
 `current/total` frame progress. The same output is appended while the process
 runs to `metcalf_output\metcalf-YYYYMMDD-HHMMSS.log`. On successful completion,
 the output folder opens in Explorer. When invoking the EXE or Python entry
-point directly, add `-v` or `--verbose`.
+point directly. Add `--no-verbose` to suppress detailed progress. Use
+`--no-open-output` to keep Explorer or Finder from opening after success.
+
+For Python installation, Siril discovery, Terminal use, and Finder drag and
+drop on macOS, see [the macOS setup guide](README-macOS.md).
 
 ### Free space for large sessions
 

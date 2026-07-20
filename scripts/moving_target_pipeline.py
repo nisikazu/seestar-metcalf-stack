@@ -11,13 +11,18 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import contextlib
 import json
+import os
+import shlex
 import shutil
 import subprocess
 import sys
 import re
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TextIO
 
 from moving_target_stack import parse_time, processing_method_token, read_fits_header, select_reference_index
 
@@ -34,6 +39,27 @@ PRIVACY_FITS_KEYS = {
     "ELEVATIO",
     "ELEVATION",
 }
+
+
+class TeeTextIO:
+    def __init__(self, *streams: TextIO):
+        self.streams = streams
+
+    @property
+    def encoding(self) -> str:
+        return self.streams[0].encoding or "utf-8"
+
+    def write(self, text: str) -> int:
+        for stream in self.streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+    def isatty(self) -> bool:
+        return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
 
 
 def parse_args() -> argparse.Namespace:
@@ -118,6 +144,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--registration-transform", default="similarity")
     parser.add_argument("--registration-minpairs", type=int, default=6)
+    parser.add_argument("--siril", type=Path, help="Siril CLI path. Defaults to SIRIL_CLI, PATH, or an OS-standard location.")
     parser.add_argument(
         "--stack-method",
         choices=("mean", "median", "rankfit"),
@@ -152,7 +179,12 @@ def parse_args() -> argparse.Namespace:
         "--output-prefix",
         help="Output filename stem. Defaults to '<OBJECT>_<start>-<end>_<N>frames'.",
     )
-    parser.add_argument("-v", "--verbose", action="store_true", help="Show pipeline and per-frame progress.")
+    parser.add_argument("--log-file", type=Path, help="Write the complete console log to this file.")
+    parser.set_defaults(verbose=True, open_output=True)
+    parser.add_argument("-v", "--verbose", dest="verbose", action="store_true", help="Show pipeline and per-frame progress (default).")
+    parser.add_argument("--no-verbose", dest="verbose", action="store_false", help="Hide detailed pipeline and per-frame progress.")
+    parser.add_argument("--open-output", dest="open_output", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-open-output", dest="open_output", action="store_false", help="Do not open the output directory after success.")
     args = parser.parse_args()
     if args.source_dir_arg and args.source_dir_option:
         parser.error("specify the source folder either as the first argument or with --source-dir, not both")
@@ -351,10 +383,16 @@ def print_session_table(
         print(flush=True)
         return
     quoted_source = f'"{args.source_dir}"'
+    if os.name == "nt":
+        launcher = "seestar-metcalf-stack.cmd"
+    elif sys.platform == "darwin":
+        launcher = "./seestar-metcalf-stack.sh"
+    else:
+        launcher = "./seestar-metcalf-stack.sh"
     print("\nSelect by number:")
-    print(f"  seestar-metcalf-stack.cmd {quoted_source} --session-index N")
+    print(f"  {launcher} {quoted_source} --session-index N")
     print("Select the first session starting at or after a local date/time:")
-    print(f"  seestar-metcalf-stack.cmd {quoted_source} --session-at YYYYMMDD-hhmmss")
+    print(f"  {launcher} {quoted_source} --session-at YYYYMMDD-hhmmss")
 
 
 def print_sessions(args: argparse.Namespace) -> None:
@@ -694,8 +732,9 @@ def run_stack(
         cmd.append("--no-cleanup")
     if args.include_failed_frames:
         cmd.append("--include-failed-frames")
-    if args.verbose:
-        cmd.append("--verbose")
+    if args.siril:
+        cmd.extend(["--siril", str(args.siril)])
+    cmd.append("--verbose" if args.verbose else "--no-verbose")
     verbose(args, f"Starting {args.stack_method} stack worker")
     process = subprocess.Popen(
         cmd,
@@ -725,10 +764,10 @@ def run_stack(
     return parse_stack_summary(output)
 
 
-def main() -> int:
+def main(args: argparse.Namespace) -> Path | None:
     if args.list_sessions:
         print_sessions(args)
-        return 0
+        return None
     session_index, files, session_info = resolve_session(args)
     args.session_index = session_index
     reference_index = select_reference_index(files, args.reference_frame)
@@ -774,14 +813,67 @@ def main() -> int:
         flush=True,
     )
     print(f"Wrote pipeline summary: {summary_path}")
-    return 0
+    return summary_path
+
+
+def open_output_directory(path: Path) -> None:
+    resolved = path.resolve()
+    if os.name == "nt":
+        os.startfile(resolved)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(resolved)])
+    else:
+        opener = shutil.which("xdg-open")
+        if not opener:
+            raise FileNotFoundError("xdg-open was not found")
+        subprocess.Popen([opener, str(resolved)])
+
+
+def default_log_path(args: argparse.Namespace) -> Path:
+    if args.log_file:
+        return args.log_file.expanduser().resolve()
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return (args.work_root / f"metcalf-{stamp}.log").expanduser().resolve()
+
+
+def run_cli(args: argparse.Namespace) -> int:
+    log_path = default_log_path(args)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8", buffering=1) as log_handle:
+        stdout = TeeTextIO(sys.stdout, log_handle)
+        stderr = TeeTextIO(sys.stderr, log_handle)
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            runtime = f"EXE: {sys.executable}" if getattr(sys, "frozen", False) else f"Python: {sys.executable}"
+            print("Seestar Metcalf Stack")
+            print(f"Runtime: {runtime}")
+            print(f"Verbose: {'enabled' if args.verbose else 'disabled'}")
+            print(f"Command:  {shlex.join(sys.argv)}")
+            print(f"Log:      {log_path}")
+            print("")
+            try:
+                summary_path = main(args)
+                if summary_path and args.open_output:
+                    output_dir = summary_path.parent
+                    print(f"Opening output folder: {output_dir}")
+                    try:
+                        open_output_directory(output_dir)
+                    except Exception as exc:
+                        print(f"Warning: could not open output folder: {exc}", file=sys.stderr)
+                print("Processing complete.")
+                return 0
+            except KeyboardInterrupt:
+                print("\nProcessing cancelled.", file=sys.stderr)
+                return 130
+            except Exception:
+                traceback.print_exc()
+                print(f"\nProcessing failed. See log: {log_path}", file=sys.stderr)
+                return 1
 
 
 def run_internal_script() -> int:
     if len(sys.argv) < 3 or sys.argv[1] != "--internal-script":
-        global args
         args = parse_args()
-        return main()
+        return run_cli(args)
     script_name = sys.argv[2]
     sys.argv = [script_name, *sys.argv[3:]]
     if script_name == "astrometry_solve.py":

@@ -175,12 +175,13 @@ class ReferenceSelectionTests(unittest.TestCase):
 class PlateSolveCacheTests(unittest.TestCase):
     def test_cache_paths_use_reference_stem_in_source_directory(self):
         args = type("Args", (), {"solve_dir": None, "solve_name": None})()
-        reference = Path(r"C:\frames\Light_Comet_20.0s.fit")
+        with tempfile.TemporaryDirectory() as temporary:
+            reference = Path(temporary) / "frames" / "Light_Comet_20.0s.fit"
 
-        json_path, wcs_path = pipeline.solve_cache_paths(args, reference)
+            json_path, wcs_path = pipeline.solve_cache_paths(args, reference)
 
-        self.assertEqual(json_path, reference.parent / "Light_Comet_20.0s_astrometry.json")
-        self.assertEqual(wcs_path, reference.parent / "Light_Comet_20.0s_wcs.fits")
+            self.assertEqual(json_path, reference.parent / "Light_Comet_20.0s_astrometry.json")
+            self.assertEqual(wcs_path, reference.parent / "Light_Comet_20.0s_wcs.fits")
 
     def test_valid_cached_json_is_reused_without_upload(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -277,6 +278,64 @@ class VerboseOutputTests(unittest.TestCase):
 
     def test_siril_success_output_has_no_failure_reason(self):
         self.assertIsNone(stacker.siril_failure_reason("log: Registration finished.\nprogress: 100%"))
+
+
+class CrossPlatformCliTests(unittest.TestCase):
+    def test_pipeline_verbose_and_open_output_are_enabled_by_default(self):
+        with patch.object(sys, "argv", ["seestar-metcalf-stack", "frames"]):
+            args = pipeline.parse_args()
+
+        self.assertTrue(args.verbose)
+        self.assertTrue(args.open_output)
+
+    def test_pipeline_no_verbose_and_no_open_output_disable_defaults(self):
+        with patch.object(
+            sys,
+            "argv",
+            ["seestar-metcalf-stack", "frames", "--no-verbose", "--no-open-output"],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertFalse(args.verbose)
+        self.assertFalse(args.open_output)
+
+    def test_windows_cmd_siril_launcher_uses_cmd_exe(self):
+        siril = Path("tool") / "siril-cli.cmd"
+        work_dir = Path("work")
+        script = work_dir / "register.ssf"
+        with patch.object(stacker.os, "name", "nt"):
+            command = stacker.build_siril_command(siril, work_dir, script)
+
+        self.assertEqual(command[:3], ["cmd.exe", "/c", str(siril)])
+        self.assertEqual(command[-4:], ["-d", str(work_dir), "-s", str(script)])
+
+    def test_posix_siril_launcher_runs_executable_directly(self):
+        with patch.object(stacker.os, "name", "posix"):
+            command = stacker.build_siril_command(
+                Path("/opt/homebrew/bin/siril-cli"),
+                Path("/tmp/work"),
+                Path("/tmp/work/register.ssf"),
+            )
+
+        self.assertEqual(
+            command,
+            [
+                "/opt/homebrew/bin/siril-cli",
+                "-d",
+                "/tmp/work",
+                "-s",
+                "/tmp/work/register.ssf",
+            ],
+        )
+
+    def test_explicit_siril_file_is_resolved(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "siril-cli"
+            executable.write_text("test", encoding="utf-8")
+
+            resolved = stacker.resolve_siril_command(executable)
+
+        self.assertEqual(resolved, executable.resolve())
 
 
 if __name__ == "__main__":

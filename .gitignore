@@ -27,6 +27,7 @@ tools/
 dist/
 build/
 .build/
+*.app/
 *.zip
 
 # Windows/editor files
