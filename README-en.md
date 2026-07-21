@@ -338,6 +338,10 @@ If you generated a timestamp/RA/Dec CSV separately, bypass target lookup and use
 seestar-metcalf-stack.cmd "C:\path\to\frames" --ephemeris-csv "C:\path\to\horizons.csv"
 ```
 
+The CSV does not need a coordinate row at every subframe timestamp. For each FITS observation time, the tool linearly interpolates RA and Dec between the surrounding CSV rows. Frames before or after the CSV time range are linearly extrapolated from the first or last two rows.
+
+Except during a close approach, the apparent motion is usually close to uniform and linear over an observing session of a few hours. Provide at least two coordinate rows that bracket the complete session: one at or before the first exposure and one at or after the last exposure. This keeps every frame within the interpolation range and avoids errors from extrapolation. Add more points within the session when curvature during a close approach or other nonlinear motion is significant.
+
 The priority order is an existing `--ephemeris-csv`, `--horizons-command`, `--horizons-object`, then the FITS `OBJECT` value.
 
 ### Please report names that fail automatic identification
