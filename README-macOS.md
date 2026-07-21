@@ -71,6 +71,11 @@ sh setup-macos.sh
 詳細な進行表示は標準で有効です。抑制するときは`--no-verbose`、正常終了時に
 Finderを開かないときは`--no-open-output`を追加します。
 
+FITSの天体名をJPL Horizonsで特定できない場合は、メインREADMEの
+[「Horizonsで天体を特定できない場合」](README.md#horizonsで天体を特定できない場合)
+を参照してください。macOSでは例の`seestar-metcalf-stack.cmd`を
+`./seestar-metcalf-stack.sh`へ読み替えて、同じオプションを指定できます。
+
 ## Sirilを見つけられない場合
 
 CLIはPATHと標準的な`/Applications/Siril.app`または

@@ -169,6 +169,77 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
 
 Siril登録画像とメジアン用一時配列は成功後に削除します。調査のため残す場合は `--no-cleanup` を指定します。
 
+## Horizonsで天体を特定できない場合
+
+通常はFITSヘッダーの `OBJECT` を読み取り、Seestarで使われる名称からJPL Horizons用の検索候補を自動生成します。彗星・小惑星の名称表記がHorizonsの登録名と一致しない場合や、同じ彗星に複数の回帰軌道・分裂片が登録されている場合は、自動特定できないことがあります。
+
+ログに次のような表示があれば、Horizonsの天体特定で停止しています。
+
+```text
+Target candidate did not resolve: ...
+No matches found.
+Horizons response did not contain $$SOE/$$EOE ephemeris markers
+Could not identify target '...' in JPL Horizons.
+```
+
+複数候補の一覧が返る場合も、対象や軌道解を一意に選べていません。次の順番で復旧してください。
+
+### 1. 正式名称・符号で上書きする
+
+[JPL Horizons](https://ssd.jpl.nasa.gov/horizons/)または[Horizons Lookup API](https://ssd-api.jpl.nasa.gov/doc/horizons_lookup.html)で正式名称、彗星符号、小惑星番号を確認し、`--horizons-object`でFITSの `OBJECT` を上書きします。この指定でも名称の正規化と複数候補の検索を行います。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-object "C/2025 R2 (SWAN)"
+```
+
+### 2. HorizonsのCOMMANDを直接指定する
+
+Horizonsで使える検索式やIDが分かっている場合は、`--horizons-command`でその値をそのまま渡します。これは名称の自動変換を行わないため、より確実です。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "DES=24P;CAP;NOFRAG"
+```
+
+- `DES=24P`: 正式符号24Pを検索
+- `CAP`: 複数の回帰軌道から適切な近日点回帰の解を選択
+- `NOFRAG`: `73P-A`のような分裂片を除外し、親彗星を選択
+
+番号付き小惑星は、番号と末尾のセミコロンを指定できます。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "98943;"
+```
+
+検索結果に複数の軌道解が表示された場合は、目的のEpochに対応する `Record #` を直接指定できます。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "90001033;"
+```
+
+HorizonsのRecord番号は将来変わる可能性があります。通常は正式符号と `CAP` / `NOFRAG`を優先し、古い観測などで特定の歴史的軌道解が必要な場合だけRecord番号を使います。PowerShellではセミコロンがコマンド区切りになるため、COMMAND全体を必ず引用符で囲んでください。
+
+### 3. 作成済みの座標CSVを使う
+
+Horizonsで別途作成した時刻・赤経・赤緯のCSVがある場合は、検索処理を行わずそのファイルを使用できます。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --ephemeris-csv "C:\path\to\horizons.csv"
+```
+
+指定の優先順位は、実在する `--ephemeris-csv`、`--horizons-command`、`--horizons-object`、FITSの `OBJECT` の順です。
+
+### 解決できなかった天体名をお知らせください
+
+自動検索で解決できなかった名称は、今後の名称変換ロジック改善に利用できます。[GitHub Issues](https://github.com/nisikazu/seestar-metcalf-stack/issues)または [@RollerRacers](https://twitter.com/RollerRacers) へ、次の情報をお知らせください。
+
+- Seestar Metcalf Stackのバージョン
+- FITSの `OBJECT` に記録されていた文字列
+- 本来意図していた天体の正式名称・符号
+- ログの `Trying Horizons target:` から最終エラーまで
+- 成功した `--horizons-object`、`--horizons-command`、またはCSVがあればその指定内容
+
+Astrometry.net APIキー、観測地点、個人情報、FITS本体を公開する必要はありません。ログを掲載する前に、それらが含まれていないことを確認してください。
+
 ## その他のオプション
 
 ファイル名に `_failed_` を含むSeestarフレームも使う:
@@ -177,10 +248,9 @@ Siril登録画像とメジアン用一時配列は成功後に削除します。
 seestar-metcalf-stack.cmd "C:\path\to\frames" --include-failed-frames
 ```
 
-既存のHorizons CSVまたはAstrometry.net解を再利用する:
+既存のAstrometry.net解を再利用する:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --ephemeris-csv "C:\path\to\ephemeris.csv"
 seestar-metcalf-stack.cmd "C:\path\to\frames" --astrometry-json "C:\path\to\solution.json"
 ```
 

@@ -281,6 +281,77 @@ values directly.
 Large Siril and median temporary image arrays are removed after a successful
 run. Use `--no-cleanup` to keep them for diagnosis.
 
+## When Horizons cannot identify the target
+
+By default, the pipeline reads the FITS `OBJECT` value and generates JPL Horizons search candidates from common Seestar naming forms. Automatic identification can fail when the Seestar label differs from the registered Horizons designation, or when a comet has multiple apparition solutions or fragments.
+
+The following log messages indicate that target identification stopped in Horizons:
+
+```text
+Target candidate did not resolve: ...
+No matches found.
+Horizons response did not contain $$SOE/$$EOE ephemeris markers
+Could not identify target '...' in JPL Horizons.
+```
+
+A returned list of multiple matches also means that the target and orbit solution were not unique. Recover using the following steps.
+
+### 1. Override the target with its official designation
+
+Find the official name, comet designation, or asteroid number with [JPL Horizons](https://ssd.jpl.nasa.gov/horizons/) or the [Horizons Lookup API](https://ssd-api.jpl.nasa.gov/doc/horizons_lookup.html), then override the FITS `OBJECT` value with `--horizons-object`. This option still applies name normalization and candidate fallback searches.
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-object "C/2025 R2 (SWAN)"
+```
+
+### 2. Pass a raw Horizons COMMAND
+
+If you know a working Horizons search expression or ID, pass it unchanged with `--horizons-command`. This bypasses automatic name conversion and is therefore more deterministic.
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "DES=24P;CAP;NOFRAG"
+```
+
+- `DES=24P`: search for the official designation 24P
+- `CAP`: choose the appropriate closest-apparition solution
+- `NOFRAG`: exclude fragments such as `73P-A` and select the parent comet
+
+For a numbered asteroid, use its number followed by a semicolon:
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "98943;"
+```
+
+When Horizons lists several orbit solutions, you can select the `Record #` corresponding to the required epoch:
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "90001033;"
+```
+
+Horizons record numbers can change. Prefer an official designation with `CAP` / `NOFRAG` for normal use, and use a record number when processing historical observations that require a specific orbit solution. In PowerShell, quote the entire COMMAND because an unquoted semicolon separates commands.
+
+### 3. Use an existing ephemeris CSV
+
+If you generated a timestamp/RA/Dec CSV separately, bypass target lookup and use that file directly:
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --ephemeris-csv "C:\path\to\horizons.csv"
+```
+
+The priority order is an existing `--ephemeris-csv`, `--horizons-command`, `--horizons-object`, then the FITS `OBJECT` value.
+
+### Please report names that fail automatic identification
+
+Names that do not resolve help us improve the normalization and fallback logic. Please contact us through [GitHub Issues](https://github.com/nisikazu/seestar-metcalf-stack/issues) or [@RollerRacers](https://twitter.com/RollerRacers) with:
+
+- the Seestar Metcalf Stack version
+- the exact FITS `OBJECT` value
+- the intended official target name or designation
+- the log section from `Trying Horizons target:` through the final error
+- any `--horizons-object`, `--horizons-command`, or CSV input that succeeded
+
+Do not publish your Astrometry.net API key, observing location, personal information, or FITS files. Check the log for private information before attaching it.
+
 ## Other useful options
 
 Include Seestar files whose names contain `_failed_`:
@@ -289,10 +360,9 @@ Include Seestar files whose names contain `_failed_`:
 seestar-metcalf-stack.cmd "C:\path\to\frames" --include-failed-frames
 ```
 
-Use an existing Horizons CSV or Astrometry.net result:
+Use an existing Astrometry.net result:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --ephemeris-csv "C:\path\to\ephemeris.csv"
 seestar-metcalf-stack.cmd "C:\path\to\frames" --astrometry-json "C:\path\to\solution.json"
 ```
 
