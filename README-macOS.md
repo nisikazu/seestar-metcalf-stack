@@ -37,24 +37,31 @@ cd /path/to/seestar-metcalf-stack
 sh setup-macos.sh
 ```
 
-続いて[Astrometry.net](https://nova.astrometry.net/)へログインし、
-[API help](https://nova.astrometry.net/api_help)からAPIキーを取得して保存します。
+続いてAstrometry.netのAPIキーを次の手順で取得します。
+
+1. ブラウザで[Astrometry.netのログイン画面](https://nova.astrometry.net/signin)を開きます。
+2. Googleアカウントなど、画面に表示される外部認証を使ってログイン、または新規登録します。
+3. ログイン後、画面上部の`API`または`API Help`を開きます。[API Helpを直接開く](https://nova.astrometry.net/api_help)こともできます。
+4. ページに表示される`Your API key is xxxxxx...`の英数字部分をコピーします。
+
+Terminalで`YOUR_API_KEY`をコピーした文字列に置き換えて実行します。
 
 ```sh
 ./set-astrometry-api-key.sh YOUR_API_KEY
 ```
 
-キーはプロジェクト直下の`.astrometry_api_key`へ保存されます。このファイルは
-公開したり、他人へ渡したりしないでください。
+キーはプロジェクト直下の`.astrometry_api_key`へ保存されます。
 
 ## 実行方法
 
 ### Finderから実行
 
-`setup-macos.sh`が作成した`Seestar Metcalf Stack.app`へ、Seestarの
-`*_sub`フォルダを1つドロップします。Terminalが開いて処理状況を表示します。
-処理後も結果を確認できるよう、Returnキーを押すまでTerminalを閉じません。
-正常終了すると成果物フォルダもFinderで開きます。
+基本的な使い方は、処理したいサブフレームフォルダを
+`Seestar Metcalf Stack.app`へドラッグ&ドロップするだけです。セッション、
+処理状況を表示するTerminalが開き、正常終了すると成果物フォルダもFinderで
+開きます。処理後も結果を確認できるよう、Returnキーを押すまでTerminalを
+閉じません。セッション、処理方式、天体名などを指定する場合は、次の
+「Terminalから実行」の方法でオプションを付けて実行してください。
 
 ### Terminalから実行
 

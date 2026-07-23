@@ -112,16 +112,23 @@ installs PyInstaller into `.build`, which requires network access.
    setup-python-deps.cmd
    ```
 
-4. Sign in to [Astrometry.net](https://nova.astrometry.net/), open its
-   [API help page](https://nova.astrometry.net/api_help), and copy your API key.
-5. Save the key with the included assistant command:
+4. Obtain an Astrometry.net API key:
+
+   1. Open the [Astrometry.net sign-in page](https://nova.astrometry.net/signin).
+   2. Sign in or create an account with one of the external identity providers shown on the page, such as a Google account.
+   3. After signing in, open `API` or `API Help` in the top menu. You can also open the [API Help page directly](https://nova.astrometry.net/api_help).
+   4. Copy the alphanumeric value shown after `Your API key is xxxxxx...`.
+
+5. In Windows Explorer, open the extracted Seestar Metcalf Stack directory.
+   Right-click an empty area inside the directory and choose `Open in Terminal`.
+
+6. In that terminal, replace `YOUR_API_KEY` with the value copied above:
 
    ```bat
    set-astrometry-api-key.cmd YOUR_API_KEY
    ```
 
-The key is stored in `.astrometry_api_key` beside the scripts. That file is
-ignored by Git and must not be published.
+The key is stored in `.astrometry_api_key` beside the scripts.
 
 ## Choose an observing session
 
@@ -162,8 +169,12 @@ as the reference:
 seestar-metcalf-stack.cmd "C:\path\to\C2025 R2 (SWAN)_sub"
 ```
 
-You can also drag the subframe folder directly onto `seestar-metcalf-stack.cmd`.
-The output folder opens after a successful run.
+For normal use, simply drag the subframe folder onto
+`seestar-metcalf-stack.cmd`. The output folder opens after a successful run.
+To select a session, processing method, target name, or another option,
+right-click an empty area in the installation directory, choose
+`Open in Terminal`, and run the command with options as shown in the examples
+above.
 
 The pipeline automatically obtains a Horizons ephemeris, solves the reference
 frame, registers the background stars, and writes all final products under
