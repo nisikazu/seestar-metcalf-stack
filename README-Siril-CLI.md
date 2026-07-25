@@ -1,5 +1,11 @@
 # Siril CLI workflow notes
 
+> **Historical development record:** This file preserves early Siril and
+> moving-target experiments. Some absolute paths and helper commands are local
+> to the original workspace and are no longer part of the public package.
+> Current architecture, known limitations, tests, and handoff instructions are
+> documented in `DEVELOPMENT.md`.
+
 This workspace uses a local portable Siril install:
 
 - Wrapper: `C:\local\codex\seestar\siril-cli.cmd`

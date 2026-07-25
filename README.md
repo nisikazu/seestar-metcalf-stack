@@ -160,6 +160,24 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
 
 選ばれたフレームがAstrometry.netへ送られ、Sirilの位置合わせ基準にも明示設定されます。最終FITSの `DATE-OBS` とWCS座標はこの基準フレームを反映します。`REFMODE`、`REFINDEX`、`MTREFRA`、`MTREFDEC` にも基準情報を残します。
 
+### サブフレームの飽和警告
+
+彗星や比較星の測光では、スタック画像だけを見ると元サブフレームの飽和を見落とすことがあります。次の指定で、いずれかのサブフレームが飽和レベルの90%を超えた画素を赤く示す警告PNGを追加生成できます。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable
+```
+
+既定は `--saturation-warning disable` です。判定割合と警告色は変更できます。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable --saturation-threshold-percent 90 --saturation-color FF0000
+```
+
+`--saturation-threshold-percent` は0より大きく100以下、`--saturation-color` は6桁のRGB 16進数です。Seestarのunsigned 16-bit FITSでは通常65535を飽和レベルとし、既定では58981.5を超えた画素を検出します。FITSに `SATURATE` または `SATLEVEL` があれば、その値を優先します。画像内の実測最大値を表すことがある `DATAMAX` は飽和レベルとして使いません。
+
+判定はSirilで背景星位置合わせした各サブフレームをADUへ戻した後に行います。マスクは星固定像と移動天体固定像へそれぞれ伝播するため、両方の座標系で該当位置を確認できます。警告色は専用PNGだけに描画され、測光用FITSと通常プレビューPNGは変更しません。
+
 ## 出力
 
 ファイル名には対象、露光時間、フィルター、UTCの開始・終了時刻、使用枚数、平均/メジアン方式が入ります。
@@ -170,6 +188,8 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
 - `*_star_stack.fit`: 同じ採用フレームによる背景星固定の線形FITS
 - `*_star_left_metcalf_right.fit`: 左に星固定、右に移動天体固定を並べたFITS。WCSは左半分に有効
 - `*_metcalf_preview.png`、`*_star_preview.png`: 表示用ストレッチ画像。測光には使用しません
+- `*_metcalf_saturation_warning.png`、`*_star_saturation_warning.png`: `--saturation-warning enable` 時だけ作る飽和警告PNG
+- `*_star_left_metcalf_right_saturation_warning.png`: 星固定と移動天体固定の飽和警告を並べたPNG
 - `*_shifts.csv`: 各フレームの星位置合わせ量と天体移動量
 - `*_summary.json`、`moving_target_pipeline_summary.json`: 再現用の処理記録
 

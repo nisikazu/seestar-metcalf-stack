@@ -299,6 +299,68 @@ def unsigned_uint16_full_scale(header: dict[str, object]) -> float | None:
     return None
 
 
+def fits_saturation_level(header: dict[str, object]) -> float | None:
+    """Return the physical-count saturation level represented by a FITS image."""
+    for key in ("SATURATE", "SATLEVEL"):
+        try:
+            value = float(header[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0.0:
+            return value
+
+    try:
+        bitpix = int(header.get("BITPIX", 0))
+        bscale = float(header.get("BSCALE", 1.0))
+        bzero = float(header.get("BZERO", 0.0))
+    except (TypeError, ValueError):
+        return None
+    integer_limits = {
+        8: (0.0, 255.0),
+        16: (-32768.0, 32767.0),
+        32: (-2147483648.0, 2147483647.0),
+    }
+    if bitpix not in integer_limits or not math.isfinite(bscale) or not math.isfinite(bzero):
+        return None
+    raw_low, raw_high = integer_limits[bitpix]
+    return max(raw_low * bscale + bzero, raw_high * bscale + bzero)
+
+
+def normalize_saturation_color(value: str) -> str:
+    color = str(value).strip().lstrip("#").upper()
+    if not re.fullmatch(r"[0-9A-F]{6}", color):
+        raise ValueError("--saturation-color must be a six-digit RGB hex value such as FF0000")
+    return color
+
+
+def saturation_rgb(value: str) -> tuple[int, int, int]:
+    color = normalize_saturation_color(value)
+    return tuple(int(color[offset : offset + 2], 16) for offset in (0, 2, 4))
+
+
+def detect_saturation(
+    data: np.ndarray,
+    source_header: dict[str, object],
+    threshold_percent: float,
+) -> tuple[np.ndarray, float | None, float | None, float | None]:
+    """Return a 2D mask and count statistics for one registered subframe."""
+    level = fits_saturation_level(source_header)
+    finite = data[np.isfinite(data)]
+    maximum = float(np.max(finite)) if finite.size else None
+    if level is None:
+        return np.zeros(data.shape[-2:], dtype=bool), None, None, maximum
+    threshold = level * threshold_percent / 100.0
+    over = np.isfinite(data) & (data > threshold)
+    mask = np.any(over, axis=0) if data.ndim == 3 else over
+    return mask, level, threshold, maximum
+
+
+def shift_boolean_mask(mask: np.ndarray, dx: float, dy: float) -> np.ndarray:
+    """Conservatively mark every output pixel touched by a shifted true pixel."""
+    shifted, valid = shift_plane(mask.astype(np.float32, copy=False), dx, dy)
+    return valid & (shifted > 0.0)
+
+
 def restore_registered_units(image: FitsImage, source_header: dict[str, object]) -> tuple[FitsImage, float]:
     """Siril may write registered float FITS normalized to 0..1; restore ADU."""
     source_full_scale = unsigned_uint16_full_scale(source_header)
@@ -737,6 +799,8 @@ def export_preview_png(
     flip_vertical: bool = False,
     low_percentile: float = 5.0,
     high_percentile: float = 99.95,
+    warning_mask: np.ndarray | None = None,
+    warning_color: tuple[int, int, int] = (255, 0, 0),
 ) -> None:
     # Siril's FITS-to-PNG export keeps the visual orientation expected for
     # Seestar subframes, so the default preview is not flipped. Use
@@ -764,12 +828,20 @@ def export_preview_png(
             scaled = np.clip((plane - lo) / (hi - lo), 0.0, 1.0)
             scaled = (scaled * 255.0 + 0.5).astype(np.uint8)
         stretched.append(scaled)
-    if len(stretched) == 1:
+    if len(stretched) == 1 and warning_mask is None:
         image = Image.fromarray(stretched[0], mode="L")
     else:
         while len(stretched) < 3:
             stretched.append(stretched[-1])
-        image = Image.fromarray(np.stack(stretched[:3], axis=2), mode="RGB")
+        rgb = np.stack(stretched[:3], axis=2)
+        if warning_mask is not None:
+            if warning_mask.shape != data.shape[-2:]:
+                raise ValueError(
+                    f"Warning mask shape {warning_mask.shape} does not match image shape {data.shape[-2:]}"
+                )
+            display_mask = np.flipud(warning_mask) if flip_vertical else warning_mask
+            rgb[display_mask] = np.asarray(warning_color, dtype=np.uint8)
+        image = Image.fromarray(rgb, mode="RGB")
     image.save(path)
 
 
@@ -1303,6 +1375,24 @@ def main() -> int:
     parser.add_argument("--preview-low-percentile", type=float, default=5.0)
     parser.add_argument("--preview-high-percentile", type=float, default=99.95)
     parser.add_argument(
+        "--saturation-warning",
+        type=str.lower,
+        choices=("enable", "disable"),
+        default="disable",
+        help="Enable or disable separate saturation-warning preview PNGs. Defaults to disable.",
+    )
+    parser.add_argument(
+        "--saturation-threshold-percent",
+        type=float,
+        default=90.0,
+        help="Warn above this percentage of the FITS saturation level. Defaults to 90.",
+    )
+    parser.add_argument(
+        "--saturation-color",
+        default="FF0000",
+        help="Warning overlay color as six-digit RGB hex. Defaults to FF0000.",
+    )
+    parser.add_argument(
         "--no-cleanup",
         action="store_true",
         help="Keep intermediate image FITS files generated for Siril registration.",
@@ -1314,6 +1404,12 @@ def main() -> int:
 
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
+    if not 0.0 < args.saturation_threshold_percent <= 100.0:
+        parser.error("--saturation-threshold-percent must be greater than 0 and at most 100")
+    try:
+        args.saturation_color = normalize_saturation_color(args.saturation_color)
+    except ValueError as error:
+        parser.error(str(error))
 
     if not args.wcs_fits and not args.astrometry_json:
         parser.error("--wcs-fits or --astrometry-json is required")
@@ -1396,6 +1492,12 @@ def main() -> int:
     reference_time = parse_time(reference.header["DATE-OBS"])
     reference_target = interpolate_ephemeris(ephemeris, reference_time)
     reference_x, reference_y = wcs.world_to_pixel(reference_target.ra_deg, reference_target.dec_deg)
+    saturation_enabled = args.saturation_warning == "enable"
+    warning_color_rgb = saturation_rgb(args.saturation_color)
+    metcalf_saturation_mask = np.zeros((height, width), dtype=bool) if saturation_enabled else None
+    star_saturation_mask = np.zeros((height, width), dtype=bool) if saturation_enabled else None
+    saturated_frame_count = 0
+    saturation_level_unavailable_frames = 0
 
     sum_image: np.ndarray | None = None
     count_image: np.ndarray | None = None
@@ -1441,6 +1543,40 @@ def main() -> int:
         image, registered_unit_scale = restore_registered_units(read_fits(registered), source_header)
         shifted, mask2d = shift_image(image.data, dx, dy)
         star_shifted, star_mask2d = shift_image(image.data, 0.0, 0.0)
+        saturation_level: float | None = None
+        saturation_threshold_count: float | None = None
+        subframe_max_count: float | None = None
+        saturated_pixel_count = 0
+        frame_saturation_warning = False
+        if saturation_enabled:
+            (
+                frame_saturation_mask,
+                saturation_level,
+                saturation_threshold_count,
+                subframe_max_count,
+            ) = detect_saturation(image.data, source_header, args.saturation_threshold_percent)
+            if saturation_level is None:
+                saturation_level_unavailable_frames += 1
+                if args.verbose:
+                    print(
+                        f"[saturation] level unavailable for {files[i - 1].name}; no pixels marked",
+                        flush=True,
+                    )
+            else:
+                saturated_pixel_count = int(np.count_nonzero(frame_saturation_mask))
+                frame_saturation_warning = saturated_pixel_count > 0
+                if frame_saturation_warning:
+                    saturated_frame_count += 1
+                    if star_saturation_mask is None or metcalf_saturation_mask is None:
+                        raise RuntimeError("Saturation warning masks were not initialized")
+                    star_saturation_mask |= frame_saturation_mask & star_mask2d
+                    metcalf_saturation_mask |= shift_boolean_mask(frame_saturation_mask, dx, dy)
+                    if args.verbose:
+                        print(
+                            f"[saturation] {files[i - 1].name}: max={subframe_max_count:.3f}, "
+                            f"threshold={saturation_threshold_count:.3f}, pixels={saturated_pixel_count}",
+                            flush=True,
+                        )
         if args.stack_method == "mean":
             sum_image, count_image = add_to_average(sum_image, count_image, shifted, mask2d)
             star_sum_image, star_count_image = add_to_average(
@@ -1488,6 +1624,11 @@ def main() -> int:
                 "star_rotation_deg": star_reg.star_rotation_deg,
                 "star_scale": star_reg.star_scale,
                 "registered_unit_scale": registered_unit_scale,
+                "saturation_warning": frame_saturation_warning if saturation_enabled else None,
+                "saturation_level": saturation_level,
+                "saturation_threshold_count": saturation_threshold_count,
+                "subframe_max_count": subframe_max_count,
+                "saturated_pixel_count": saturated_pixel_count if saturation_enabled else None,
             }
         )
 
@@ -1538,6 +1679,17 @@ def main() -> int:
     star_output_png = work_dir / f"{output_stem}_star_preview.png"
     comparison_output_fits = work_dir / f"{output_stem}_star_left_metcalf_right.fit"
     comparison_output_png = work_dir / f"{output_stem}_star_left_metcalf_right_preview.png"
+    saturation_output_png = (
+        work_dir / f"{output_stem}_metcalf_saturation_warning.png" if saturation_enabled else None
+    )
+    star_saturation_output_png = (
+        work_dir / f"{output_stem}_star_saturation_warning.png" if saturation_enabled else None
+    )
+    comparison_saturation_output_png = (
+        work_dir / f"{output_stem}_star_left_metcalf_right_saturation_warning.png"
+        if saturation_enabled
+        else None
+    )
     shifts_csv = work_dir / f"{output_stem}_shifts.csv"
     summary_json = work_dir / f"{output_stem}_summary.json"
     star_wcs_header = wcs.to_fits_header(width, height)
@@ -1645,6 +1797,46 @@ def main() -> int:
         low_percentile=args.preview_low_percentile,
         high_percentile=args.preview_high_percentile,
     )
+    if saturation_enabled:
+        if metcalf_saturation_mask is None or star_saturation_mask is None:
+            raise RuntimeError("Saturation warning masks were not initialized")
+        comparison_saturation_mask = concatenate_side_by_side(
+            star_saturation_mask,
+            metcalf_saturation_mask,
+        )
+        export_preview_png(
+            saturation_output_png,
+            stack,
+            flip_vertical=args.preview_flip_vertical,
+            low_percentile=args.preview_low_percentile,
+            high_percentile=args.preview_high_percentile,
+            warning_mask=metcalf_saturation_mask,
+            warning_color=warning_color_rgb,
+        )
+        export_preview_png(
+            star_saturation_output_png,
+            star_stack,
+            flip_vertical=args.preview_flip_vertical,
+            low_percentile=args.preview_low_percentile,
+            high_percentile=args.preview_high_percentile,
+            warning_mask=star_saturation_mask,
+            warning_color=warning_color_rgb,
+        )
+        export_preview_png(
+            comparison_saturation_output_png,
+            comparison_stack,
+            flip_vertical=args.preview_flip_vertical,
+            low_percentile=args.preview_low_percentile,
+            high_percentile=args.preview_high_percentile,
+            warning_mask=comparison_saturation_mask,
+            warning_color=warning_color_rgb,
+        )
+        print(
+            f"[saturation] warning previews: {saturated_frame_count}/{used} frames; "
+            f"star pixels={int(np.count_nonzero(star_saturation_mask))}; "
+            f"metcalf pixels={int(np.count_nonzero(metcalf_saturation_mask))}",
+            flush=True,
+        )
 
     with shifts_csv.open("w", encoding="utf-8", newline="") as handle:
         fieldnames = [
@@ -1668,6 +1860,11 @@ def main() -> int:
             "star_rotation_deg",
             "star_scale",
             "registered_unit_scale",
+            "saturation_warning",
+            "saturation_level",
+            "saturation_threshold_count",
+            "subframe_max_count",
+            "saturated_pixel_count",
         ]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -1690,6 +1887,24 @@ def main() -> int:
         "preview_flip_vertical": args.preview_flip_vertical,
         "preview_low_percentile": args.preview_low_percentile,
         "preview_high_percentile": args.preview_high_percentile,
+        "saturation_warning": {
+            "mode": args.saturation_warning,
+            "enabled": saturation_enabled,
+            "threshold_percent": args.saturation_threshold_percent,
+            "color": args.saturation_color,
+            "saturated_frames": saturated_frame_count if saturation_enabled else None,
+            "level_unavailable_frames": saturation_level_unavailable_frames if saturation_enabled else None,
+            "star_marked_pixels": (
+                int(np.count_nonzero(star_saturation_mask))
+                if star_saturation_mask is not None
+                else None
+            ),
+            "metcalf_marked_pixels": (
+                int(np.count_nonzero(metcalf_saturation_mask))
+                if metcalf_saturation_mask is not None
+                else None
+            ),
+        },
         "cleanup_intermediate_images": not args.no_cleanup,
         "removed_intermediate_images": removed_intermediate_images,
         "removed_intermediate_image_count": len(removed_intermediate_images),
@@ -1728,6 +1943,15 @@ def main() -> int:
             "star_preview_png": str(star_output_png),
             "comparison_fits": str(comparison_output_fits),
             "comparison_preview_png": str(comparison_output_png),
+            "metcalf_saturation_warning_png": (
+                str(saturation_output_png) if saturation_output_png else None
+            ),
+            "star_saturation_warning_png": (
+                str(star_saturation_output_png) if star_saturation_output_png else None
+            ),
+            "comparison_saturation_warning_png": (
+                str(comparison_saturation_output_png) if comparison_saturation_output_png else None
+            ),
             "shifts_csv": str(shifts_csv),
         },
     }

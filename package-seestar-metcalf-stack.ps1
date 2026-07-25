@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.5.0",
+    [string]$Version = "0.5.1",
     [switch]$NoZip
 )
 
@@ -40,6 +40,9 @@ $Files = @(
     @("README.md", "README.md"),
     @("README-en.md", "README-en.md"),
     @("README-macOS.md", "README-macOS.md"),
+    @("DEVELOPMENT.md", "DEVELOPMENT.md"),
+    @("PUBLISHING.md", "PUBLISHING.md"),
+    @("README-Siril-CLI.md", "README-Siril-CLI.md"),
     @("requirements.txt", "requirements.txt"),
     @("seestar-metcalf-stack.cmd", "seestar-metcalf-stack.cmd"),
     @("seestar-metcalf-stack.sh", "seestar-metcalf-stack.sh"),

@@ -268,6 +268,35 @@ The selected frame is sent to Astrometry.net and is explicitly set as Siril's
 registration reference. Its `DATE-OBS` and WCS are written to the final FITS.
 The FITS headers also contain `REFMODE`, `REFINDEX`, `MTREFRA`, and `MTREFDEC`.
 
+### Subframe saturation warning
+
+For comet or comparison-star photometry, a stacked image can hide saturation
+that occurred in an individual subframe. Enable separate warning PNGs that mark
+pixels exceeding 90 percent of the subframe saturation level in red:
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable
+```
+
+The default is `--saturation-warning disable`. The threshold and warning color
+can be selected explicitly:
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable --saturation-threshold-percent 90 --saturation-color FF0000
+```
+
+`--saturation-threshold-percent` must be greater than 0 and no greater than 100.
+`--saturation-color` is a six-digit RGB hexadecimal value. For a normal Seestar
+unsigned 16-bit FITS, the full-scale level is 65535, so the default detects
+values strictly greater than 58981.5. A FITS `SATURATE` or `SATLEVEL` value
+takes precedence when present. `DATAMAX` is not used because it may describe
+the observed maximum in that image rather than the detector saturation level.
+
+Detection is performed on each Siril star-registered subframe after restoring
+its ADU scale. Masks are propagated independently into the star-aligned and
+moving-target-aligned coordinates. The color overlay is written only to the
+dedicated warning PNGs; science FITS and ordinary preview PNGs are unchanged.
+
 ## Outputs
 
 Output names contain target, exposure, filter, UTC time range, used frame count,
@@ -281,6 +310,10 @@ and combine method, for example:
   star-aligned left half
 - `*_metcalf_preview.png`, `*_star_preview.png`: stretched display previews,
   not photometry products
+- `*_metcalf_saturation_warning.png`, `*_star_saturation_warning.png`: optional
+  warning previews created by `--saturation-warning enable`
+- `*_star_left_metcalf_right_saturation_warning.png`: side-by-side warning
+  preview
 - `*_shifts.csv`: per-frame star registration and target-motion offsets
 - `*_summary.json`, `moving_target_pipeline_summary.json`: reproducibility data
 

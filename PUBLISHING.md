@@ -10,6 +10,9 @@ Use the Siril-free package contents as the GitHub repository root:
 - `README.md`
 - `README-en.md`
 - `README-macOS.md`
+- `DEVELOPMENT.md`
+- `PUBLISHING.md`
+- `README-Siril-CLI.md`
 - `requirements.txt`
 - `seestar-metcalf-stack.cmd`
 - `seestar-metcalf-stack.sh`

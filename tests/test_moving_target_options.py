@@ -155,6 +155,98 @@ class PreviewTests(unittest.TestCase):
             self.assertLess(int(preview[-1, 4]), 255)
 
 
+class SaturationWarningTests(unittest.TestCase):
+    def test_unsigned_seestar_fits_saturation_level_is_65535(self):
+        level = stacker.fits_saturation_level(
+            {
+                "BITPIX": 16,
+                "BZERO": 32768,
+                "BSCALE": 1,
+            }
+        )
+
+        self.assertEqual(level, 65535.0)
+
+    def test_saturation_keyword_overrides_storage_full_scale(self):
+        level = stacker.fits_saturation_level(
+            {
+                "BITPIX": 16,
+                "BZERO": 32768,
+                "BSCALE": 1,
+                "SATURATE": 60000,
+            }
+        )
+
+        self.assertEqual(level, 60000.0)
+
+    def test_datamax_does_not_replace_detector_full_scale(self):
+        level = stacker.fits_saturation_level(
+            {
+                "BITPIX": 16,
+                "BZERO": 32768,
+                "BSCALE": 1,
+                "DATAMAX": 12000,
+            }
+        )
+
+        self.assertEqual(level, 65535.0)
+
+    def test_detection_uses_strictly_greater_than_threshold(self):
+        data = np.array(
+            [
+                [[58981.5, 58982.0], [100.0, 200.0]],
+                [[0.0, 10.0], [20.0, 30.0]],
+                [[0.0, 10.0], [20.0, 30.0]],
+            ],
+            dtype=np.float32,
+        )
+
+        mask, level, threshold, maximum = stacker.detect_saturation(
+            data,
+            {"BITPIX": 16, "BZERO": 32768, "BSCALE": 1},
+            90.0,
+        )
+
+        np.testing.assert_array_equal(mask, np.array([[False, True], [False, False]]))
+        self.assertEqual(level, 65535.0)
+        self.assertEqual(threshold, 58981.5)
+        self.assertEqual(maximum, 58982.0)
+
+    def test_shifted_warning_mask_marks_all_touched_pixels(self):
+        mask = np.zeros((3, 3), dtype=bool)
+        mask[1, 1] = True
+
+        shifted = stacker.shift_boolean_mask(mask, 0.5, 0.5)
+
+        expected = np.zeros((3, 3), dtype=bool)
+        expected[1:3, 1:3] = True
+        np.testing.assert_array_equal(shifted, expected)
+
+    def test_warning_preview_uses_requested_rgb_color(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "warning.png"
+            data = np.array([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32)
+            warning_mask = np.array([[False, True], [False, False]])
+
+            stacker.export_preview_png(
+                path,
+                data,
+                low_percentile=0.0,
+                high_percentile=100.0,
+                warning_mask=warning_mask,
+                warning_color=stacker.saturation_rgb("12AB34"),
+            )
+
+            preview = np.asarray(Image.open(path))
+            self.assertEqual(preview.shape, (2, 2, 3))
+            np.testing.assert_array_equal(preview[0, 1], np.array([0x12, 0xAB, 0x34], dtype=np.uint8))
+
+    def test_color_accepts_optional_hash_and_normalizes_case(self):
+        self.assertEqual(stacker.normalize_saturation_color("#ff0000"), "FF0000")
+        with self.assertRaises(ValueError):
+            stacker.normalize_saturation_color("red")
+
+
 class ReferenceSelectionTests(unittest.TestCase):
     def test_middle_selects_frame_nearest_temporal_midpoint(self):
         files = [Path("a.fit"), Path("b.fit"), Path("c.fit")]
@@ -287,6 +379,30 @@ class CrossPlatformCliTests(unittest.TestCase):
 
         self.assertTrue(args.verbose)
         self.assertTrue(args.open_output)
+        self.assertEqual(args.saturation_warning, "disable")
+        self.assertEqual(args.saturation_threshold_percent, 90.0)
+        self.assertEqual(args.saturation_color, "FF0000")
+
+    def test_pipeline_accepts_explicit_saturation_warning_options(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "seestar-metcalf-stack",
+                "frames",
+                "--saturation-warning",
+                "enable",
+                "--saturation-threshold-percent",
+                "87.5",
+                "--saturation-color",
+                "12ab34",
+            ],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.saturation_warning, "enable")
+        self.assertEqual(args.saturation_threshold_percent, 87.5)
+        self.assertEqual(args.saturation_color, "12AB34")
 
     def test_pipeline_no_verbose_and_no_open_output_disable_defaults(self):
         with patch.object(

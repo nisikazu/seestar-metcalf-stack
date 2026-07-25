@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.5.0",
+    [string]$Version = "0.5.1",
     [switch]$NoZip
 )
 
@@ -48,6 +48,9 @@ Copy-Item -LiteralPath (Join-Path $Root "scripts\astrometry_solve.py") -Destinat
 Copy-Item -LiteralPath (Join-Path $Root "README.md") -Destination (Join-Path $PackageRoot "README.md")
 Copy-Item -LiteralPath (Join-Path $Root "README-en.md") -Destination (Join-Path $PackageRoot "README-en.md")
 Copy-Item -LiteralPath (Join-Path $Root "README-macOS.md") -Destination (Join-Path $PackageRoot "README-macOS.md")
+Copy-Item -LiteralPath (Join-Path $Root "DEVELOPMENT.md") -Destination (Join-Path $PackageRoot "DEVELOPMENT.md")
+Copy-Item -LiteralPath (Join-Path $Root "PUBLISHING.md") -Destination (Join-Path $PackageRoot "PUBLISHING.md")
+Copy-Item -LiteralPath (Join-Path $Root "README-Siril-CLI.md") -Destination (Join-Path $PackageRoot "README-Siril-CLI.md")
 Copy-Item -LiteralPath (Join-Path $Root "requirements.txt") -Destination (Join-Path $PackageRoot "requirements.txt")
 Copy-Item -LiteralPath (Join-Path $Root "seestar-metcalf-stack.cmd") -Destination (Join-Path $PackageRoot "seestar-metcalf-stack.cmd")
 Copy-Item -LiteralPath (Join-Path $Root "seestar-metcalf-stack.sh") -Destination (Join-Path $PackageRoot "seestar-metcalf-stack.sh")

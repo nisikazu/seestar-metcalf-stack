@@ -24,7 +24,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
-from moving_target_stack import parse_time, processing_method_token, read_fits_header, select_reference_index
+from moving_target_stack import (
+    normalize_saturation_color,
+    parse_time,
+    processing_method_token,
+    read_fits_header,
+    select_reference_index,
+)
 
 
 REPO_ROOT = (
@@ -171,6 +177,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview-low-percentile", type=float, default=5.0)
     parser.add_argument("--preview-high-percentile", type=float, default=99.95)
     parser.add_argument(
+        "--saturation-warning",
+        type=str.lower,
+        choices=("enable", "disable"),
+        default="disable",
+        help="Enable or disable separate saturation-warning preview PNGs. Defaults to disable.",
+    )
+    parser.add_argument(
+        "--saturation-threshold-percent",
+        type=float,
+        default=90.0,
+        help="Warn above this percentage of the FITS saturation level. Defaults to 90.",
+    )
+    parser.add_argument(
+        "--saturation-color",
+        default="FF0000",
+        help="Warning overlay color as six-digit RGB hex. Defaults to FF0000.",
+    )
+    parser.add_argument(
         "--no-cleanup",
         action="store_true",
         help="Keep intermediate image FITS files generated during Siril registration.",
@@ -195,6 +219,12 @@ def parse_args() -> argparse.Namespace:
     delattr(args, "source_dir_option")
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
+    if not 0.0 < args.saturation_threshold_percent <= 100.0:
+        parser.error("--saturation-threshold-percent must be greater than 0 and at most 100")
+    try:
+        args.saturation_color = normalize_saturation_color(args.saturation_color)
+    except ValueError as error:
+        parser.error(str(error))
     return args
 
 
@@ -708,6 +738,12 @@ def run_stack(
             str(args.preview_low_percentile),
             "--preview-high-percentile",
             str(args.preview_high_percentile),
+            "--saturation-warning",
+            args.saturation_warning,
+            "--saturation-threshold-percent",
+            str(args.saturation_threshold_percent),
+            "--saturation-color",
+            args.saturation_color,
         ],
     )
     if args.pattern:
@@ -796,6 +832,9 @@ def main(args: argparse.Namespace) -> Path | None:
         "stack_method": args.stack_method,
         "stack_method_token": processing_method_token(args.stack_method, args.rankfit_fraction),
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,
+        "saturation_warning": args.saturation_warning,
+        "saturation_threshold_percent": args.saturation_threshold_percent,
+        "saturation_color": args.saturation_color,
         "wcs_fits": str(wcs_fits) if wcs_fits else None,
         "astrometry_json": str(astrometry_json) if astrometry_json else None,
         "stack": stack_summary,
