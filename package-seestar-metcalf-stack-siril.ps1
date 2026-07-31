@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.5.1",
+    [string]$Version = "0.5.2",
     [switch]$NoZip
 )
 
@@ -39,6 +39,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "scripts") | O
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "tests") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "macos") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot ".github\workflows") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot ".github\ISSUE_TEMPLATE") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "tools\siril-1.4.1") | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $Root "scripts\moving_target_pipeline.py") -Destination (Join-Path $PackageRoot "scripts\moving_target_pipeline.py")
@@ -48,6 +49,10 @@ Copy-Item -LiteralPath (Join-Path $Root "scripts\astrometry_solve.py") -Destinat
 Copy-Item -LiteralPath (Join-Path $Root "README.md") -Destination (Join-Path $PackageRoot "README.md")
 Copy-Item -LiteralPath (Join-Path $Root "README-en.md") -Destination (Join-Path $PackageRoot "README-en.md")
 Copy-Item -LiteralPath (Join-Path $Root "README-macOS.md") -Destination (Join-Path $PackageRoot "README-macOS.md")
+Copy-Item -LiteralPath (Join-Path $Root "TROUBLESHOOTING.md") -Destination (Join-Path $PackageRoot "TROUBLESHOOTING.md")
+Copy-Item -LiteralPath (Join-Path $Root "TROUBLESHOOTING-en.md") -Destination (Join-Path $PackageRoot "TROUBLESHOOTING-en.md")
+Copy-Item -LiteralPath (Join-Path $Root "CHANGELOG.md") -Destination (Join-Path $PackageRoot "CHANGELOG.md")
+Copy-Item -LiteralPath (Join-Path $Root "CHANGELOG-en.md") -Destination (Join-Path $PackageRoot "CHANGELOG-en.md")
 Copy-Item -LiteralPath (Join-Path $Root "DEVELOPMENT.md") -Destination (Join-Path $PackageRoot "DEVELOPMENT.md")
 Copy-Item -LiteralPath (Join-Path $Root "PUBLISHING.md") -Destination (Join-Path $PackageRoot "PUBLISHING.md")
 Copy-Item -LiteralPath (Join-Path $Root "README-Siril-CLI.md") -Destination (Join-Path $PackageRoot "README-Siril-CLI.md")
@@ -68,6 +73,7 @@ Copy-Item -LiteralPath (Join-Path $Root "tests\test_moving_target_options.py") -
 Copy-Item -LiteralPath (Join-Path $Root "LICENSE") -Destination (Join-Path $PackageRoot "LICENSE")
 Copy-Item -LiteralPath (Join-Path $Root ".gitignore") -Destination (Join-Path $PackageRoot ".gitignore")
 Copy-Item -LiteralPath (Join-Path $Root ".github\workflows\tests.yml") -Destination (Join-Path $PackageRoot ".github\workflows\tests.yml")
+Copy-Item -LiteralPath (Join-Path $Root ".github\ISSUE_TEMPLATE\bug_report.md") -Destination (Join-Path $PackageRoot ".github\ISSUE_TEMPLATE\bug_report.md")
 Copy-Item -LiteralPath $ExeSource -Destination (Join-Path $PackageRoot "seestar-metcalf-stack.exe")
 
 Copy-Item -LiteralPath $SirilSource -Destination $SirilTarget -Recurse

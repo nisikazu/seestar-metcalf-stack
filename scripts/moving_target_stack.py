@@ -92,6 +92,14 @@ class SirilRegistration:
         return math.hypot(self.matrix[0], self.matrix[3])
 
 
+class SirilRegistrationError(RuntimeError):
+    """Registration failure with Siril's output retained for diagnosis."""
+
+    def __init__(self, message: str, output: str):
+        super().__init__(message)
+        self.output = output
+
+
 class WcsModel:
     def __init__(self, header: dict[str, object] | None = None, calibration: dict[str, object] | None = None):
         self.header = header
@@ -929,9 +937,23 @@ def default_output_stem(
     return f"{target}_{start}-{end}_{used_frames}frames"
 
 
-def select_reference_index(files: list[Path], mode: str) -> int:
+def select_reference_index(files: list[Path], mode: str, explicit_name: str | None = None) -> int:
     if not files:
         raise ValueError("Cannot select a reference from an empty file list")
+    if explicit_name:
+        requested_name = Path(explicit_name).name
+        exact_matches = [index for index, path in enumerate(files, start=1) if path.name == requested_name]
+        matches = exact_matches or [
+            index for index, path in enumerate(files, start=1) if path.name.casefold() == requested_name.casefold()
+        ]
+        if not matches:
+            raise ValueError(
+                f"--reference-frame-file was not found in the selected frames: {requested_name}. "
+                "Check the filename and session/time filters."
+            )
+        if len(matches) > 1:
+            raise ValueError(f"--reference-frame-file matched multiple selected frames: {requested_name}")
+        return matches[0]
     if mode == "first":
         return 1
     if mode != "middle":
@@ -1015,6 +1037,37 @@ def parse_siril_registration(seq_path: Path) -> dict[int, SirilRegistration]:
     return registrations
 
 
+def registration_validation_issues(
+    files: list[Path],
+    registration_dir: Path,
+    basename: str,
+    registrations: dict[int, SirilRegistration],
+    minpairs: int,
+) -> dict[int, list[str]]:
+    """Return per-frame reasons that a background-star registration is unusable."""
+    issues: dict[int, list[str]] = {}
+    for index, source in enumerate(files, start=1):
+        registration = registrations.get(index)
+        registered = registration_dir / f"r_{basename}_{index:05d}.fit"
+        reasons: list[str] = []
+        if not registered.exists():
+            reasons.append("registered FITS was not produced")
+        if registration is None:
+            reasons.append("Siril registration metadata is missing")
+        else:
+            if registration.selected is not True:
+                reasons.append("not selected by Siril")
+            if registration.matrix is None:
+                reasons.append("registration transform is missing")
+            if registration.star_pairs is None:
+                reasons.append("star-pair count is missing")
+            elif registration.star_pairs < minpairs:
+                reasons.append(f"only {registration.star_pairs} star pair(s); requires {minpairs}")
+        if reasons:
+            issues[index] = reasons
+    return issues
+
+
 def write_console_safe(text: str, stream = None) -> None:
     stream = stream or sys.stdout
     encoding = stream.encoding or "utf-8"
@@ -1036,6 +1089,11 @@ def siril_failure_reason(output: str) -> str | None:
         if line and any(marker in line.lower() for marker in markers) and line not in matches:
             matches.append(line)
     return "; ".join(matches) if matches else None
+
+
+def siril_reference_star_count(output: str) -> int | None:
+    matches = re.findall(r"Found\s+(\d+)\s+stars\s+in\s+reference", output, flags=re.IGNORECASE)
+    return int(matches[-1]) if matches else None
 
 
 def resolve_siril_command(explicit: Path | None = None) -> Path:
@@ -1112,9 +1170,9 @@ def run_siril(siril_cmd: Path | None, work_dir: Path, script_path: Path, verbose
         output = "".join(output_lines)
         failure = siril_failure_reason(output)
         if failure:
-            raise RuntimeError(f"Siril registration failed: {failure}")
+            raise SirilRegistrationError(f"Siril registration failed: {failure}", output)
         if returncode != 0:
-            raise subprocess.CalledProcessError(returncode, cmd, output=output)
+            raise SirilRegistrationError(f"Siril registration exited with status {returncode}", output)
         return
 
     completed = subprocess.run(
@@ -1131,15 +1189,13 @@ def run_siril(siril_cmd: Path | None, work_dir: Path, script_path: Path, verbose
     if failure:
         write_console_safe(completed.stdout, sys.stderr)
         write_console_safe(completed.stderr, sys.stderr)
-        raise RuntimeError(f"Siril registration failed: {failure}")
+        raise SirilRegistrationError(f"Siril registration failed: {failure}", combined_output)
     if completed.returncode != 0:
         write_console_safe(completed.stdout, sys.stderr)
         write_console_safe(completed.stderr, sys.stderr)
-        raise subprocess.CalledProcessError(
-            completed.returncode,
-            cmd,
-            output=completed.stdout,
-            stderr=completed.stderr,
+        raise SirilRegistrationError(
+            f"Siril registration exited with status {completed.returncode}",
+            combined_output,
         )
     for line in completed.stderr.splitlines():
         if "pyproject.toml" in line and "Failed to install Python module" in line:
@@ -1344,7 +1400,15 @@ def main() -> int:
     parser.add_argument("--siril", type=Path, help="Siril CLI path. Defaults to SIRIL_CLI, PATH, or an OS-standard location.")
     parser.add_argument("--basename", default="frame")
     parser.add_argument("--registration-transform", default="similarity")
-    parser.add_argument("--registration-minpairs", type=int, default=6)
+    parser.add_argument(
+        "--registration-minpairs",
+        type=int,
+        default=6,
+        help=(
+            "Minimum matched background-star pairs. The reference frame must meet this "
+            "requirement; other frames below it are skipped. Defaults to 6."
+        ),
+    )
     parser.add_argument(
         "--stack-method",
         choices=("mean", "median", "rankfit"),
@@ -1362,6 +1426,10 @@ def main() -> int:
         choices=("first", "middle"),
         default="first",
         help="Use the first frame or the frame nearest the session midpoint as registration/WCS reference.",
+    )
+    parser.add_argument(
+        "--reference-frame-file",
+        help="Use this FITS filename as the registration/WCS reference; overrides --reference-frame.",
     )
     parser.add_argument(
         "--output-prefix",
@@ -1404,6 +1472,8 @@ def main() -> int:
 
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
+    if args.registration_minpairs < 1:
+        parser.error("--registration-minpairs must be at least 1")
     if not 0.0 < args.saturation_threshold_percent <= 100.0:
         parser.error("--saturation-threshold-percent must be greater than 0 and at most 100")
     try:
@@ -1427,7 +1497,8 @@ def main() -> int:
         files = files[: args.count]
     if not files:
         raise FileNotFoundError("No files remain after time/session filtering")
-    reference_index = select_reference_index(files, args.reference_frame)
+    reference_index = select_reference_index(files, args.reference_frame, args.reference_frame_file)
+    reference_mode = "file" if args.reference_frame_file else args.reference_frame
     reference_source = files[reference_index - 1]
     ephemeris = load_ephemeris(args.ephemeris_csv)
     if not args.work_name:
@@ -1461,26 +1532,61 @@ def main() -> int:
         args.registration_minpairs,
         reference_index,
     )
+    registration_seq = registration_dir / f"{args.basename}_.seq"
     try:
         if args.verbose:
             print(f"[registration] Siril background-star registration: {len(copied)} frames", flush=True)
         run_siril(args.siril, registration_dir, siril_script, args.verbose)
+        star_registrations = parse_siril_registration(registration_seq)
+        registration_issues = registration_validation_issues(
+            files,
+            registration_dir,
+            args.basename,
+            star_registrations,
+            args.registration_minpairs,
+        )
+        reference_issues = registration_issues.get(reference_index)
+        if reference_issues:
+            details = "; ".join(reference_issues)
+            print(
+                "[warning] The selected reference frame has insufficient background stars; "
+                "no stack will be created.\n"
+                f"  - {reference_index}/{len(files)} {reference_source.name}: {details}",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise RuntimeError("Selected reference frame cannot support background-star registration; see warning above")
         registered_count = sum(
             (registration_dir / f"r_{args.basename}_{i:05d}.fit").exists()
             for i in range(1, len(copied) + 1)
         )
-        if registered_count == 0:
-            raise RuntimeError("Siril registration produced no registered FITS frames")
         if args.verbose:
-            print(f"[registration] Registered {registered_count}/{len(copied)} frames", flush=True)
+            usable_count = len(copied) - len(registration_issues)
+            print(
+                f"[registration] Siril produced {registered_count}/{len(copied)} registered frames; "
+                f"{usable_count}/{len(copied)} will be stacked",
+                flush=True,
+            )
+    except SirilRegistrationError as error:
+        reference_stars = siril_reference_star_count(error.output)
+        if reference_stars is not None and reference_stars < args.registration_minpairs:
+            print(
+                "[warning] The selected reference frame has insufficient background stars; "
+                "no stack will be created.\n"
+                f"  - {reference_index}/{len(files)} {reference_source.name}: only {reference_stars} "
+                f"background star(s); requires {args.registration_minpairs}",
+                file=sys.stderr,
+                flush=True,
+            )
+        if not args.no_cleanup:
+            removed = cleanup_intermediate_images(registration_dir, args.basename, copied, len(copied))
+            print(f"[cleanup] Removed {len(removed)} intermediate FITS files after registration failure", flush=True)
+        raise
     except Exception:
         if not args.no_cleanup:
             removed = cleanup_intermediate_images(registration_dir, args.basename, copied, len(copied))
             print(f"[cleanup] Removed {len(removed)} intermediate FITS files after registration failure", flush=True)
         raise
-    registration_seq = registration_dir / f"{args.basename}_.seq"
-    star_registrations = parse_siril_registration(registration_seq)
-
     reference = read_fits(copied[reference_index - 1])
     height = int(reference.header["NAXIS2"])
     width = int(reference.header["NAXIS1"])
@@ -1517,13 +1623,14 @@ def main() -> int:
             )
         registered = registration_dir / f"r_{args.basename}_{i:05d}.fit"
         star_reg = star_registrations.get(i, SirilRegistration(index=i))
-        if not registered.exists():
+        issues = registration_issues.get(i)
+        if issues:
             frame_rows.append(
                 {
                     "index": i,
                     "source": files[i - 1].name,
                     "used": False,
-                    "reason": "no registered frame",
+                    "reason": "; ".join(issues),
                     "star_selected": star_reg.selected,
                     "star_reference_index": star_reg.reference_index,
                     "star_pairs": star_reg.star_pairs,
@@ -1704,7 +1811,7 @@ def main() -> int:
         "STKMODE": args.stack_method,
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
         "RFDEG": 5 if args.stack_method == "rankfit" else 0,
-        "REFMODE": args.reference_frame,
+        "REFMODE": reference_mode,
         "REFINDEX": reference_index,
         "MTUNITS": "ADU",
     }
@@ -1717,7 +1824,7 @@ def main() -> int:
         "STKMODE": args.stack_method,
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
         "RFDEG": 5 if args.stack_method == "rankfit" else 0,
-        "REFMODE": args.reference_frame,
+        "REFMODE": reference_mode,
         "REFINDEX": reference_index,
     }
     comparison_extra_header = {
@@ -1733,7 +1840,7 @@ def main() -> int:
         "STKMODE": args.stack_method,
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
         "RFDEG": 5 if args.stack_method == "rankfit" else 0,
-        "REFMODE": args.reference_frame,
+        "REFMODE": reference_mode,
         "REFINDEX": reference_index,
     }
     uint16_stats: list[dict[str, float]] | None = None
@@ -1838,6 +1945,8 @@ def main() -> int:
             flush=True,
         )
 
+    print(f"[result] Stacked {used}/{len(copied)} frames; skipped {len(copied) - used}", flush=True)
+
     with shifts_csv.open("w", encoding="utf-8", newline="") as handle:
         fieldnames = [
             "index",
@@ -1923,7 +2032,7 @@ def main() -> int:
         "stack_method_token": method_token,
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,
         "rankfit_polynomial_degree": 5 if args.stack_method == "rankfit" else None,
-        "reference_frame_mode": args.reference_frame,
+        "reference_frame_mode": reference_mode,
         "reference_frame_index": reference_index,
         "reference_frame": reference_source.name,
         "reference_date_obs": reference_time.isoformat(),

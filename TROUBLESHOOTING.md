@@ -1,0 +1,93 @@
+# 改訂内容とトラブルシュート
+
+この文書は、Seestar Metcalf Stack の実行中に起こりやすい問題と、結果の確認方法をまとめたものです。通常の導入手順は [README](README.md) を参照してください。
+
+## 2026-07-31 の改訂
+
+- `--reference-frame-index` は廃止しました。セッション・時刻フィルタ後の番号は実行前に予見できないためです。
+- 任意の基準画像は `--reference-frame-file` にサブフレームのファイル名を指定します。選択されたセッション内に同名ファイルが必要です。
+- 基準フレームで背景星が不足する場合は、基準画像・検出星数・必要数を表示して、スタックを作らず終了します。
+- 基準以外のフレームは、雲・障害物・導入ずれなどで星位置合わせに失敗しても異常ではありません。そのフレームだけを除外し、残りをスタックします。
+- 完了時には必ず `Stacked 使用枚数/対象枚数; skipped 除外枚数` を表示します。出力FITSのファイル名に入るフレーム数も実際に使った枚数です。
+
+## 基準フレームを指定する
+
+通常は最初のフレームが基準です。長時間セッションでは時刻中央のフレームを選べます。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
+```
+
+任意の画像を指定する場合は、フォルダ全体のパスではなく、そのフォルダ内のFITSファイル名を渡します。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
+```
+
+ファイル名またはフォルダ名に空白がある場合は、必ず引用符で囲みます。Windowsでは、引用符の直前にフォルダ末尾の `\` を置かないでください。
+
+```bat
+rem Correct
+seestar-metcalf-stack.cmd "C:\data\C2025 R2 (SWAN)_sub"
+
+rem Avoid: the trailing backslash can consume the closing quote in some shells
+seestar-metcalf-stack.cmd "C:\data\C2025 R2 (SWAN)_sub\"
+```
+
+## 背景星の登録と除外
+
+`--registration-minpairs` は、Sirilが各フレームを背景星で位置合わせする際に必要な最小星対数です。既定値は6です。
+
+基準フレームでは、この条件を満たせないと正しい座標基準を作れないため停止します。まず雲のない、星像が十分に写ったフレームを基準に選び直してください。値をむやみに下げると誤った位置合わせを受け入れるおそれがあるため、通常は既定値のまま使います。
+
+基準以外のフレームで失敗した場合は、処理を継続します。出力フォルダの `*_shifts.csv` を開き、次を確認してください。
+
+- `used=true`: スタックに使用したフレームです。
+- `used=false`: 除外したフレームです。`reason` に未登録、星対数不足、変換行列の欠落などの理由が残ります。
+- `star_pairs`: Sirilが使った背景星対数です。
+
+例えば `Stacked 53/64 frames; skipped 11` と表示された場合、64枚を対象にし53枚を使用、11枚を除外したことを示します。雲や建物による一時的な劣化では正常な結果です。除外が多すぎるときは、その観測区間をフォルダから外すか、`--session-index` または `--session-at` で別セッションを選んでください。
+
+## よくある問題
+
+### `--reference-frame-file was not found`
+
+指定したファイルが、選択されたセッションまたは時刻範囲に含まれていません。`--list-sessions` で対象セッションを確認し、拡張子を含む正確なファイル名を指定してください。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --list-sessions
+```
+
+### `The selected reference frame has insufficient background stars`
+
+基準画像の星が少なすぎます。雲、薄明、ピント不良、障害物、または視野移動直後の画像が候補です。`--reference-frame middle` または星が明瞭なファイル名を指定して再実行してください。
+
+### 使用枚数が少ない、またはスタックが作られない
+
+`*_shifts.csv` の `reason` を確認してください。雲や障害物で失敗したフレームは除外されます。良好な連続区間だけを別フォルダにして再実行しても構いません。使用可能フレームが0ならスタックは作られずエラーで終了します。基準フレームまで失敗している場合は、基準を変更してください。
+
+### `No files matching *.fit`
+
+Seestarの最終スタック画像ではなく、サブフレームフォルダを指定してください。通常は末尾が `_sub` のフォルダです。拡張子が `.fits` のデータでは `--pattern "*.fits"` を指定します。
+
+### Sirilが見つからない、または途中で失敗する
+
+Siril同梱版を使うか、Sirilをインストールして `siril-cli` をPATHへ追加してください。`Not enough free disk space` は出力先に十分な空き容量がないことを示します。原因調査では `--no-cleanup` を付けると、Siril登録後の中間FITSを残せます。
+
+### Astrometry.netで停止する
+
+APIキーを確認し、ネットワーク接続を確認してください。成功済みの基準フレームはソースフォルダの `*_astrometry.json` または `*_wcs.fits` を再利用するため、同じ基準を選べば通常は再送しません。別の基準を選ぶと、そのファイル用に新しい解が必要です。
+
+### Horizonsで天体名が見つからない
+
+READMEの「Horizonsで天体を特定できない場合」を参照し、`--horizons-object` または `--horizons-command` を指定してください。作成済みの座標CSVがあれば `--ephemeris-csv` も使えます。
+
+## 問題報告に添えるもの
+
+再現や原因調査には、次の情報が役立ちます。APIキーや個人情報は含めないでください。
+
+- 実行したコマンドとコンソール出力
+- `metcalf-*.log`
+- `*_shifts.csv` と `*_summary.json`
+- 使用したSeestar機種、ファームウェア、Sirilの版
+- 問題が起きたサブフレーム数と、可能なら該当FITS数枚

@@ -169,6 +169,10 @@ def parse_args() -> argparse.Namespace:
         default="first",
         help="Use the first frame or the frame nearest the session midpoint as registration/WCS reference.",
     )
+    parser.add_argument(
+        "--reference-frame-file",
+        help="Use this FITS filename as the registration/WCS reference; overrides --reference-frame.",
+    )
     parser.add_argument("--preview-flip-vertical", action="store_true")
     parser.add_argument("--output-bitpix", choices=("float32", "uint16"), default="uint16")
     parser.add_argument("--uint16-scale", choices=("none", "global", "per-channel"), default="none")
@@ -756,6 +760,8 @@ def run_stack(
         cmd.extend(["--astrometry-json", str(astrometry_json)])
     if args.count is not None:
         cmd.extend(["--count", str(args.count)])
+    if args.reference_frame_file:
+        cmd.extend(["--reference-frame-file", args.reference_frame_file])
     if args.after:
         cmd.extend(["--after", args.after])
     if args.before:
@@ -806,7 +812,8 @@ def main(args: argparse.Namespace) -> Path | None:
         return None
     session_index, files, session_info = resolve_session(args)
     args.session_index = session_index
-    reference_index = select_reference_index(files, args.reference_frame)
+    reference_index = select_reference_index(files, args.reference_frame, args.reference_frame_file)
+    reference_mode = "file" if args.reference_frame_file else args.reference_frame
     reference_frame = files[reference_index - 1]
     verbose(
         args,
@@ -826,7 +833,7 @@ def main(args: argparse.Namespace) -> Path | None:
         "source_dir": str(args.source_dir),
         "ephemeris_csv": str(ephemeris_csv),
         "session": session_info,
-        "reference_frame_mode": args.reference_frame,
+        "reference_frame_mode": reference_mode,
         "reference_frame_index": reference_index,
         "reference_frame": str(reference_frame),
         "stack_method": args.stack_method,

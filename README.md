@@ -1,5 +1,7 @@
 # Seestar Metcalf Stack
 
+[改訂内容とトラブルシュート](TROUBLESHOOTING.md) | [変更履歴](CHANGELOG.md)
+
 [English](README-en.md) | [macOSセットアップ](README-macOS.md)
 
 Seestar のサブフレームFITSから、彗星や小惑星を追跡したメトカーフスタックを作るWindows/macOS向けツールです。同じフレームから背景星固定スタックと、両者を左右に並べた比較FITSも作成します。
@@ -156,6 +158,12 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method rankfit --rankfit-f
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
+```
+
+任意のサブフレームを基準にする場合は、番号ではなくファイル名を指定します。空白を含む名前は引用符で囲みます。選んだ基準フレームで `--registration-minpairs`（既定6）以上の背景星対を取得できない場合は、警告して処理を中止します。雲の通過などで登録できない他のフレームは、shifts CSVに理由を記録して除外し、利用可能なフレームだけをスタックします。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
 ```
 
 選ばれたフレームがAstrometry.netへ送られ、Sirilの位置合わせ基準にも明示設定されます。最終FITSの `DATE-OBS` とWCS座標はこの基準フレームを反映します。`REFMODE`、`REFINDEX`、`MTREFRA`、`MTREFDEC` にも基準情報を残します。

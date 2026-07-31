@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.5.1",
+    [string]$Version = "0.5.2",
     [switch]$NoZip
 )
 
@@ -30,6 +30,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "scripts") | O
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "tests") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "macos") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot ".github\workflows") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot ".github\ISSUE_TEMPLATE") | Out-Null
 
 $Files = @(
     @("scripts\moving_target_pipeline.py", "scripts\moving_target_pipeline.py"),
@@ -40,6 +41,10 @@ $Files = @(
     @("README.md", "README.md"),
     @("README-en.md", "README-en.md"),
     @("README-macOS.md", "README-macOS.md"),
+    @("TROUBLESHOOTING.md", "TROUBLESHOOTING.md"),
+    @("TROUBLESHOOTING-en.md", "TROUBLESHOOTING-en.md"),
+    @("CHANGELOG.md", "CHANGELOG.md"),
+    @("CHANGELOG-en.md", "CHANGELOG-en.md"),
     @("DEVELOPMENT.md", "DEVELOPMENT.md"),
     @("PUBLISHING.md", "PUBLISHING.md"),
     @("README-Siril-CLI.md", "README-Siril-CLI.md"),
@@ -58,6 +63,7 @@ $Files = @(
     @("LICENSE", "LICENSE"),
     @(".gitignore", ".gitignore"),
     @(".github\workflows\tests.yml", ".github\workflows\tests.yml")
+    ,@(".github\ISSUE_TEMPLATE\bug_report.md", ".github\ISSUE_TEMPLATE\bug_report.md")
 )
 
 foreach ($Pair in $Files) {

@@ -1,6 +1,6 @@
 # Seestar Metcalf Stack: macOSセットアップ
 
-[メインREADME](README.md) | [English README](README-en.md)
+[メインREADME](README.md) | [English README](README-en.md) | [トラブルシュート](TROUBLESHOOTING.md)
 
 macOSではPythonソース版を使用します。Windows版と共通のPython プログラムで処理を行い、
 `seestar-metcalf-stack.sh`は実行環境を判定するランチャーです。

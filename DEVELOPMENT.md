@@ -1,5 +1,15 @@
 # Seestar Metcalf Stack 開発・引き継ぎノート
 
+利用者に影響する変更は[変更履歴](CHANGELOG.md)と[改訂内容とトラブルシュート](TROUBLESHOOTING.md)にまとめています。この文書は実装判断、検証、引き継ぎを目的とした開発者向け資料です。
+
+## 2026-07-31: 基準フレームと登録失敗の扱い
+
+- 実行前に予見不能なフィルタ後の番号指定 `--reference-frame-index` を廃止し、`--reference-frame-file` で選択済みセッション内のFITSファイル名を指定する方式へ変更した。
+- 基準フレームが `--registration-minpairs` を満たさない場合は、検出星数と必要数を表示して停止する。基準が崩れるとWCS・星位置合わせ・移動補正の座標基準がすべて不正になるためである。
+- 非基準フレームの登録失敗は雲・遮蔽物・導入ずれで通常に起こる。失敗理由を `*_shifts.csv` に残し、当該フレームだけを除外してスタックする。
+- 完了時に `Stacked used/total frames; skipped excluded` を表示する。`used_frames`、出力名、summary JSONも実使用枚数を記録する。
+- Sirilが登録途中で非ゼロ終了した場合も、出力の `Found N stars in reference` を解析して基準星不足を明示する。
+
 最終更新: 2026-07-25
 
 この文書は、Seestar Metcalf Stackを改造する人、保守する人、または開発を
@@ -9,7 +19,7 @@ macOSの導入方法は`README-macOS.md`、リリース作業は`PUBLISHING.md`�
 
 ## 現在の状態
 
-- 最新の公開Releaseは`v0.5.1`です。
+- 最新の公開Releaseは`v0.5.2`です。
 - `v0.5.1`にはHorizons復旧手順、座標CSVの補間・外挿説明、
   Astrometry.net APIキー取得手順の改善、飽和警告、開発文書の配布同梱が
   含まれます。

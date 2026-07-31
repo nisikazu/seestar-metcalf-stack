@@ -263,6 +263,70 @@ class ReferenceSelectionTests(unittest.TestCase):
             self.assertEqual(stacker.select_reference_index(files, "first"), 1)
             self.assertEqual(stacker.select_reference_index(files, "middle"), 2)
 
+    def test_explicit_filename_overrides_mode(self):
+        files = [Path("a.fit"), Path("b.fit"), Path("c.fit")]
+
+        self.assertEqual(stacker.select_reference_index(files, "first", "c.fit"), 3)
+        self.assertEqual(stacker.select_reference_index(files, "middle", "a.fit"), 1)
+
+    def test_explicit_filename_must_be_in_selected_frames(self):
+        files = [Path("a.fit"), Path("b.fit"), Path("c.fit")]
+
+        with self.assertRaisesRegex(ValueError, "was not found"):
+            stacker.select_reference_index(files, "first", "missing.fit")
+
+    def test_explicit_filename_accepts_a_path_with_spaces(self):
+        files = [Path("a.fit"), Path("Light C2025 R2 (SWAN).fit"), Path("c.fit")]
+
+        self.assertEqual(
+            stacker.select_reference_index(
+                files,
+                "first",
+                "C:/frames with spaces/Light C2025 R2 (SWAN).fit",
+            ),
+            2,
+        )
+
+
+class RegistrationValidationTests(unittest.TestCase):
+    def test_validation_accepts_every_registered_frame_with_enough_star_pairs(self):
+        files = [Path("first.fit"), Path("second.fit")]
+        matrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        registrations = {
+            1: stacker.SirilRegistration(index=1, selected=True, star_pairs=6, matrix=matrix),
+            2: stacker.SirilRegistration(index=2, selected=True, star_pairs=8, matrix=matrix),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            registration_dir = Path(temporary)
+            for index in (1, 2):
+                (registration_dir / f"r_frame_{index:05d}.fit").write_bytes(b"registered")
+
+            issues = stacker.registration_validation_issues(
+                files, registration_dir, "frame", registrations, 6
+            )
+
+        self.assertEqual(issues, {})
+
+    def test_validation_reports_per_frame_missing_stars_and_registered_frame(self):
+        files = [Path("first.fit"), Path("second.fit")]
+        matrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        registrations = {
+            1: stacker.SirilRegistration(index=1, selected=True, star_pairs=5, matrix=matrix),
+            2: stacker.SirilRegistration(index=2, selected=False),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            registration_dir = Path(temporary)
+            (registration_dir / "r_frame_00001.fit").write_bytes(b"registered")
+
+            issues = stacker.registration_validation_issues(
+                files, registration_dir, "frame", registrations, 6
+            )
+
+        self.assertEqual(set(issues), {1, 2})
+        self.assertEqual(issues[1], ["only 5 star pair(s); requires 6"])
+        self.assertIn("registered FITS was not produced", issues[2])
+        self.assertIn("not selected by Siril", issues[2])
+
 
 class PlateSolveCacheTests(unittest.TestCase):
     def test_cache_paths_use_reference_stem_in_source_directory(self):
@@ -371,6 +435,14 @@ class VerboseOutputTests(unittest.TestCase):
     def test_siril_success_output_has_no_failure_reason(self):
         self.assertIsNone(stacker.siril_failure_reason("log: Registration finished.\nprogress: 100%"))
 
+    def test_siril_reference_star_count_is_read_from_registration_output(self):
+        output = "log: Found 37 stars in reference, channel #1\n"
+
+        self.assertEqual(stacker.siril_reference_star_count(output), 37)
+
+    def test_siril_reference_star_count_is_none_when_not_reported(self):
+        self.assertIsNone(stacker.siril_reference_star_count("log: Registration aborted."))
+
 
 class CrossPlatformCliTests(unittest.TestCase):
     def test_pipeline_verbose_and_open_output_are_enabled_by_default(self):
@@ -403,6 +475,18 @@ class CrossPlatformCliTests(unittest.TestCase):
         self.assertEqual(args.saturation_warning, "enable")
         self.assertEqual(args.saturation_threshold_percent, 87.5)
         self.assertEqual(args.saturation_color, "12AB34")
+
+    def test_pipeline_accepts_explicit_reference_frame_file(self):
+        with patch.object(
+            sys,
+            "argv",
+            ["seestar-metcalf-stack", "frames with spaces", "--reference-frame-file", "Light C2025 R2 (SWAN).fit"],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.source_dir, Path("frames with spaces"))
+        self.assertEqual(args.reference_frame_file, "Light C2025 R2 (SWAN).fit")
+        self.assertFalse(hasattr(args, "reference_frame_index"))
 
     def test_pipeline_no_verbose_and_no_open_output_disable_defaults(self):
         with patch.object(

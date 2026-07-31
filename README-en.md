@@ -1,5 +1,7 @@
 # Seestar Metcalf Stack
 
+[Changes and troubleshooting](TROUBLESHOOTING-en.md) | [Changelog](CHANGELOG-en.md)
+
 [日本語](README.md) | [macOS setup (Japanese)](README-macOS.md)
 
 Seestar Metcalf Stack turns Seestar subframe FITS files into a stack that
@@ -262,6 +264,12 @@ reduce the largest registration and moving-target offsets:
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
+```
+
+To use a particular subframe as the reference, specify its filename rather than its filtered index. Quote names containing spaces. The selected reference must have at least `--registration-minpairs` background-star pairs (default: 6), or the run stops with a warning. Other frames that cannot be registered, for example during cloud passage, are skipped and recorded in the shifts CSV; the remaining usable frames are stacked.
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
 ```
 
 The selected frame is sent to Astrometry.net and is explicitly set as Siril's

@@ -10,6 +10,10 @@ Use the Siril-free package contents as the GitHub repository root:
 - `README.md`
 - `README-en.md`
 - `README-macOS.md`
+- `TROUBLESHOOTING.md`
+- `TROUBLESHOOTING-en.md`
+- `CHANGELOG.md`
+- `CHANGELOG-en.md`
 - `DEVELOPMENT.md`
 - `PUBLISHING.md`
 - `README-Siril-CLI.md`
@@ -43,6 +47,18 @@ zips, `downloads/`, `siril_work/`, `metcalf_output/`, `plate_solve/`, or the bro
 control/reverse-engineering workspace.
 
 ## Release Assets
+
+Before creating a release, update the `Unreleased` sections in both changelogs
+to the release version and date, then verify the public tree:
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
+git diff --check
+```
+
+Confirm that no observing data, API key, FITS/PNG output, log, or local Siril
+installation is included in the staged files. The bug-report template under
+`.github/ISSUE_TEMPLATE/` should remain available in the public repository.
 
 Create both release zips:
 
