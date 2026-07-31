@@ -62,6 +62,10 @@ Use the Seestar subframe folder, usually ending in `_sub`, rather than a final s
 
 Use the Siril bundle, or install Siril and put `siril-cli` on PATH. `Not enough free disk space` means the output volume needs more free space. Add `--no-cleanup` when diagnosing a run to retain registered intermediate FITS files.
 
+### `FileNotFoundError` while writing output on Windows
+
+The combined installation, input, output, and target-name path may exceed the Windows path-length limit. Spaces are supported, but keep the directory structure short. For example, use a short installation directory such as `C:\Seestar Metcalf Stack` and avoid deeply nested OneDrive folders or long target-name nesting.
+
 ### Astrometry.net or Horizons fails
 
 Check the API key and network for Astrometry.net. Cached `*_astrometry.json` and `*_wcs.fits` in the source folder are reused for the same reference. For Horizons target-name failures, use `--horizons-object`, `--horizons-command`, or a prepared `--ephemeris-csv` as described in the README.

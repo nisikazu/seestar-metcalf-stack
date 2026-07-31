@@ -74,6 +74,10 @@ Seestarの最終スタック画像ではなく、サブフレームフォルダ�
 
 Siril同梱版を使うか、Sirilをインストールして `siril-cli` をPATHへ追加してください。`Not enough free disk space` は出力先に十分な空き容量がないことを示します。原因調査では `--no-cleanup` を付けると、Siril登録後の中間FITSを残せます。
 
+### Windowsで出力時に `FileNotFoundError` になる
+
+展開先、入力フォルダ、出力フォルダ、対象名を連結したパスがWindowsのパス長制限を超えている可能性があります。空白は問題ありませんが、フォルダ階層を浅くしてください。たとえば `C:\Seestar Metcalf Stack` のような短い展開先を使い、深いOneDrive配下や長い対象名の入れ子は避けます。
+
 ### Astrometry.netで停止する
 
 APIキーを確認し、ネットワーク接続を確認してください。成功済みの基準フレームはソースフォルダの `*_astrometry.json` または `*_wcs.fits` を再利用するため、同じ基準を選べば通常は再送しません。別の基準を選ぶと、そのファイル用に新しい解が必要です。
