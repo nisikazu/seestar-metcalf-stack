@@ -1104,6 +1104,7 @@ def resolve_siril_command(explicit: Path | None = None) -> Path:
     if env_command:
         candidates.append(Path(env_command).expanduser())
     if os.name == "nt":
+        candidates.append(REPO_ROOT / "tools" / "siril-1.4.1" / "siril" / "bin" / "siril-cli.exe")
         candidates.append(REPO_ROOT / "siril-cli.cmd")
         for name in ("siril-cli.exe", "siril-cli"):
             found = shutil.which(name)
@@ -1141,17 +1142,21 @@ def resolve_siril_command(explicit: Path | None = None) -> Path:
 
 def build_siril_command(siril_cmd: Path, work_dir: Path, script_path: Path) -> list[str]:
     arguments = ["-d", str(work_dir), "-s", str(script_path)]
-    if os.name == "nt" and siril_cmd.suffix.lower() in {".cmd", ".bat"}:
-        return ["cmd.exe", "/c", str(siril_cmd), *arguments]
     return [str(siril_cmd), *arguments]
+
+
+def siril_requires_windows_shell(siril_cmd: Path) -> bool:
+    return os.name == "nt" and siril_cmd.suffix.lower() in {".cmd", ".bat"}
 
 
 def run_siril(siril_cmd: Path | None, work_dir: Path, script_path: Path, verbose: bool = True) -> None:
     resolved_siril = resolve_siril_command(siril_cmd)
     cmd = build_siril_command(resolved_siril, work_dir, script_path)
+    use_shell = siril_requires_windows_shell(resolved_siril)
     if verbose:
         process = subprocess.Popen(
             cmd,
+            shell=use_shell,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -1177,6 +1182,7 @@ def run_siril(siril_cmd: Path | None, work_dir: Path, script_path: Path, verbose
 
     completed = subprocess.run(
         cmd,
+        shell=use_shell,
         check=False,
         text=True,
         encoding="utf-8",

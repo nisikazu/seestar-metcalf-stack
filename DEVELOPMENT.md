@@ -19,7 +19,7 @@ macOSの導入方法は`README-macOS.md`、リリース作業は`PUBLISHING.md`�
 
 ## 現在の状態
 
-- 最新の公開Releaseは`v0.5.2`です。
+- 最新の公開Releaseは`v0.5.3`です。
 - `v0.5.1`にはHorizons復旧手順、座標CSVの補間・外挿説明、
   Astrometry.net APIキー取得手順の改善、飽和警告、開発文書の配布同梱が
   含まれます。

@@ -500,14 +500,15 @@ class CrossPlatformCliTests(unittest.TestCase):
         self.assertFalse(args.open_output)
 
     def test_windows_cmd_siril_launcher_uses_cmd_exe(self):
-        siril = Path("tool") / "siril-cli.cmd"
-        work_dir = Path("work")
-        script = work_dir / "register.ssf"
+        siril = Path("tool path") / "siril-cli.cmd"
+        work_dir = Path("work directory")
+        script = work_dir / "register script.ssf"
         with patch.object(stacker.os, "name", "nt"):
             command = stacker.build_siril_command(siril, work_dir, script)
+            uses_shell = stacker.siril_requires_windows_shell(siril)
 
-        self.assertEqual(command[:3], ["cmd.exe", "/c", str(siril)])
-        self.assertEqual(command[-4:], ["-d", str(work_dir), "-s", str(script)])
+        self.assertEqual(command, [str(siril), "-d", str(work_dir), "-s", str(script)])
+        self.assertTrue(uses_shell)
 
     def test_posix_siril_launcher_runs_executable_directly(self):
         with patch.object(stacker.os, "name", "posix"):
@@ -527,6 +528,7 @@ class CrossPlatformCliTests(unittest.TestCase):
                 "/tmp/work/register.ssf",
             ],
         )
+        self.assertFalse(stacker.siril_requires_windows_shell(Path("/opt/homebrew/bin/siril-cli")))
 
     def test_explicit_siril_file_is_resolved(self):
         with tempfile.TemporaryDirectory() as temp_dir:
