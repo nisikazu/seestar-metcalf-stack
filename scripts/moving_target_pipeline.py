@@ -170,6 +170,21 @@ def parse_args() -> argparse.Namespace:
         help="Use the first frame or the frame nearest the session midpoint as registration/WCS reference.",
     )
     parser.add_argument(
+        "--padding-policy",
+        choices=("valid", "legacy"),
+        default="valid",
+        help=(
+            "Treat all-zero Siril registration padding as missing and use per-pixel contribution "
+            "counts (valid, default), or reproduce the previous padding behavior (legacy)."
+        ),
+    )
+    parser.add_argument(
+        "--zero-sample-policy",
+        choices=("exclude", "include"),
+        default="exclude",
+        help="Exclude or include exact-zero samples in median and rank-fit stacks. Defaults to exclude.",
+    )
+    parser.add_argument(
         "--reference-frame-file",
         help="Use this FITS filename as the registration/WCS reference; overrides --reference-frame.",
     )
@@ -587,6 +602,31 @@ def parse_stack_summary(output: str) -> dict[str, object]:
     raise RuntimeError("moving_target_stack.py did not print JSON summary")
 
 
+def child_error_message(output: str) -> str:
+    explicit = re.findall(r"(?m)^ERROR:\s*(.+)$", output)
+    if explicit:
+        return explicit[-1].strip()
+    if "No image was registered to the reference" in output:
+        return (
+            "Background-star registration failed: Siril could not align any frame to the selected reference. "
+            "Choose a sharper frame with more detected stars using --reference-frame-file; "
+            "see registration_diagnostics.csv in the run output directory."
+        )
+    if "Not enough free disk space" in output:
+        return "Siril ran out of disk space while registering frames. Free space or select another --work-root."
+    return "The stacking worker failed. See the run log and registration_diagnostics.csv for details."
+
+
+def friendly_exception_message(error: BaseException) -> str:
+    if isinstance(error, subprocess.CalledProcessError):
+        output = str(error.output or "")
+        return child_error_message(output)
+    text = str(error).strip()
+    if not text:
+        return error.__class__.__name__
+    return " ".join(text.splitlines())
+
+
 def sanitize_fits_for_upload(source: Path, destination: Path) -> Path:
     """Copy FITS while blanking observing-site cards before external upload."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -726,6 +766,10 @@ def run_stack(
             str(args.registration_minpairs),
             "--stack-method",
             args.stack_method,
+            "--padding-policy",
+            args.padding_policy,
+            "--zero-sample-policy",
+            args.zero_sample_policy,
             "--rankfit-fraction",
             str(args.rankfit_fraction),
             "--reference-frame",
@@ -793,16 +837,13 @@ def run_stack(
         raise RuntimeError("moving_target_stack.py stdout pipe was not created")
     for line in iter(process.stdout.readline, ""):
         output_lines.append(line)
-        write_console_safe(line)
+        if not line.startswith("ERROR:"):
+            write_console_safe(line)
     process.stdout.close()
     returncode = process.wait()
     output = "".join(output_lines)
     if returncode != 0:
-        raise subprocess.CalledProcessError(
-            returncode,
-            cmd,
-            output=output,
-        )
+        raise RuntimeError(child_error_message(output))
     return parse_stack_summary(output)
 
 
@@ -838,6 +879,8 @@ def main(args: argparse.Namespace) -> Path | None:
         "reference_frame": str(reference_frame),
         "stack_method": args.stack_method,
         "stack_method_token": processing_method_token(args.stack_method, args.rankfit_fraction),
+        "padding_policy": args.padding_policy,
+        "zero_sample_policy": args.zero_sample_policy if args.stack_method != "mean" else None,
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,
         "saturation_warning": args.saturation_warning,
         "saturation_threshold_percent": args.saturation_threshold_percent,
@@ -910,9 +953,10 @@ def run_cli(args: argparse.Namespace) -> int:
             except KeyboardInterrupt:
                 print("\nProcessing cancelled.", file=sys.stderr)
                 return 130
-            except Exception:
-                traceback.print_exc()
-                print(f"\nProcessing failed. See log: {log_path}", file=sys.stderr)
+            except Exception as error:
+                traceback.print_exc(file=log_handle)
+                print(f"\nError: {friendly_exception_message(error)}", file=sys.stderr)
+                print(f"Details were written to: {log_path}", file=sys.stderr)
                 return 1
 
 
@@ -930,7 +974,14 @@ def run_internal_script() -> int:
         from moving_target_stack import main as script_main
     else:
         raise SystemExit(f"Unknown internal script: {script_name}")
-    return script_main()
+    try:
+        return script_main()
+    except KeyboardInterrupt:
+        print("ERROR: Processing cancelled.", file=sys.stderr)
+        return 130
+    except Exception as error:
+        print(f"ERROR: {friendly_exception_message(error)}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

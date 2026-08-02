@@ -68,7 +68,10 @@ class SirilRegistration:
     index: int
     selected: bool | None = None
     reference_index: int | None = None
-    star_pairs: int | None = None
+    detected_stars: int | None = None
+    fwhm_px: float | None = None
+    weighted_fwhm_px: float | None = None
+    roundness: float | None = None
     matrix: tuple[float, float, float, float, float, float, float, float, float] | None = None
 
     @property
@@ -90,6 +93,14 @@ class SirilRegistration:
         if self.matrix is None:
             return None
         return math.hypot(self.matrix[0], self.matrix[3])
+
+
+@dataclass
+class SirilMatchDiagnostics:
+    index: int
+    initial_pairs: int | None = None
+    fitted_pairs: int | None = None
+    inlier_fraction: float | None = None
 
 
 class SirilRegistrationError(RuntimeError):
@@ -618,23 +629,43 @@ def interpolate_ephemeris(points: list[TargetPoint], when: datetime) -> TargetPo
     return TargetPoint(when, ra, dec)
 
 
-def shift_image(data: np.ndarray, dx: float, dy: float) -> tuple[np.ndarray, np.ndarray]:
+def registered_valid_mask(data: np.ndarray) -> np.ndarray:
+    """Identify finite pixels that are not all-channel registration padding."""
+    if data.ndim == 3:
+        return np.all(np.isfinite(data), axis=0) & np.any(data != 0.0, axis=0)
+    return np.isfinite(data) & (data != 0.0)
+
+
+def shift_image(
+    data: np.ndarray,
+    dx: float,
+    dy: float,
+    source_valid: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     if data.ndim == 2:
-        shifted, mask = shift_plane(data, dx, dy)
+        shifted, mask = shift_plane(data, dx, dy, source_valid)
         return shifted, mask
     planes = []
     common_mask = None
     for plane in data:
-        shifted, mask = shift_plane(plane, dx, dy)
+        shifted, mask = shift_plane(plane, dx, dy, source_valid)
         planes.append(shifted)
         common_mask = mask if common_mask is None else (common_mask & mask)
     return np.stack(planes, axis=0), common_mask
 
 
-def shift_plane(data: np.ndarray, dx: float, dy: float) -> tuple[np.ndarray, np.ndarray]:
+def shift_plane(
+    data: np.ndarray,
+    dx: float,
+    dy: float,
+    source_valid: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     height, width = data.shape
+    if source_valid is not None and source_valid.shape != (height, width):
+        raise ValueError(f"Validity mask shape changed: {source_valid.shape} != {(height, width)}")
     if abs(dx) < 1.0e-9 and abs(dy) < 1.0e-9:
-        return data.astype(np.float64, copy=True), np.ones((height, width), dtype=bool)
+        valid = np.ones((height, width), dtype=bool) if source_valid is None else source_valid.copy()
+        return data.astype(np.float64, copy=True), valid
     yy, xx = np.indices((height, width), dtype=np.float32)
     src_x = xx - np.float32(dx)
     src_y = yy - np.float32(dy)
@@ -643,6 +674,17 @@ def shift_plane(data: np.ndarray, dx: float, dy: float) -> tuple[np.ndarray, np.
     x1 = x0 + 1
     y1 = y0 + 1
     valid = (x0 >= 0) & (y0 >= 0) & (x1 < width) & (y1 < height)
+    if source_valid is not None and np.any(valid):
+        valid_indices = np.flatnonzero(valid)
+        valid_y = valid_indices // width
+        valid_x = valid_indices % width
+        kernel_valid = (
+            source_valid[y0[valid_y, valid_x], x0[valid_y, valid_x]]
+            & source_valid[y0[valid_y, valid_x], x1[valid_y, valid_x]]
+            & source_valid[y1[valid_y, valid_x], x0[valid_y, valid_x]]
+            & source_valid[y1[valid_y, valid_x], x1[valid_y, valid_x]]
+        )
+        valid[valid_y, valid_x] = kernel_valid
 
     out = np.zeros((height, width), dtype=np.float32)
     if not np.any(valid):
@@ -671,7 +713,7 @@ def add_to_average(
     if sum_image is None:
         sum_image = np.zeros_like(image, dtype=np.float64)
         count_shape = image.shape[-2:]
-        count_image = np.zeros(count_shape, dtype=np.uint16)
+        count_image = np.zeros(count_shape, dtype=np.uint32)
     if count_image is None:
         raise ValueError("count_image must be initialized with sum_image")
     if image.ndim == 3:
@@ -698,11 +740,18 @@ def finalize_average(sum_image: np.ndarray | None, count_image: np.ndarray | Non
 class MedianAccumulator:
     """Disk-backed per-pixel median accumulator for large Seestar sequences."""
 
-    def __init__(self, path: Path, capacity: int, image_shape: tuple[int, ...]):
+    def __init__(
+        self,
+        path: Path,
+        capacity: int,
+        image_shape: tuple[int, ...],
+        exclude_zero_samples: bool = True,
+    ):
         self.path = path
         self.capacity = capacity
         self.image_shape = image_shape
         self.count = 0
+        self.exclude_zero_samples = exclude_zero_samples
         self.data = np.lib.format.open_memmap(
             path,
             mode="w+",
@@ -716,9 +765,10 @@ class MedianAccumulator:
         if image.shape != self.image_shape:
             raise ValueError(f"Median frame shape changed: {image.shape} != {self.image_shape}")
         valid = mask2d[np.newaxis, :, :] if image.ndim == 3 else mask2d
-        # Exact-zero samples are registration/shift padding for order-statistic
-        # stacks. Treat them as missing for both median and rank-fit methods.
-        valid = valid & (image != 0.0)
+        if self.exclude_zero_samples:
+            # Exact-zero samples are normally registration/shift padding for
+            # order-statistic stacks, so treat them as missing by default.
+            valid = valid & (image != 0.0)
         self.data[self.count] = np.where(valid, image, np.nan).astype(np.float32, copy=False)
         self.count += 1
 
@@ -1027,14 +1077,45 @@ def parse_siril_registration(seq_path: Path) -> dict[int, SirilRegistration]:
                 continue
             try:
                 matrix = tuple(float(value) for value in matrix_values)
-                star_pairs = int(float(parts[h_index - 1])) if h_index >= 1 else None
+                fwhm = float(parts[1])
+                weighted_fwhm = float(parts[2])
+                roundness = float(parts[3])
+                detected_stars = int(float(parts[h_index - 1])) if h_index >= 1 else None
             except ValueError:
                 continue
             reg = registrations.setdefault(index, SirilRegistration(index=index))
             reg.reference_index = reference_index
-            reg.star_pairs = star_pairs
+            reg.fwhm_px = fwhm or None
+            reg.weighted_fwhm_px = weighted_fwhm or None
+            reg.roundness = roundness or None
+            reg.detected_stars = detected_stars
             reg.matrix = matrix  # type: ignore[assignment]
     return registrations
+
+
+def parse_siril_match_diagnostics(output: str) -> dict[int, SirilMatchDiagnostics]:
+    """Extract per-frame correspondence counts from Siril's registration log."""
+    diagnostics: dict[int, SirilMatchDiagnostics] = {}
+    current: SirilMatchDiagnostics | None = None
+    patterns = (
+        ("initial_pairs", re.compile(r"Initial pair matches:\s*(\d+)", re.IGNORECASE), int),
+        ("fitted_pairs", re.compile(r"Pair matches after fitting:\s*(\d+)", re.IGNORECASE), int),
+        ("inlier_fraction", re.compile(r"Inliers:\s*([0-9.+-]+)", re.IGNORECASE), float),
+    )
+    for raw_line in output.splitlines():
+        image_match = re.search(r"Matching stars in image\s+(\d+)\s*:\s*done", raw_line, re.IGNORECASE)
+        if image_match:
+            index = int(image_match.group(1))
+            current = diagnostics.setdefault(index, SirilMatchDiagnostics(index=index))
+            continue
+        if current is None:
+            continue
+        for attribute, pattern, conversion in patterns:
+            match = pattern.search(raw_line)
+            if match:
+                setattr(current, attribute, conversion(match.group(1)))
+                break
+    return diagnostics
 
 
 def registration_validation_issues(
@@ -1059,13 +1140,75 @@ def registration_validation_issues(
                 reasons.append("not selected by Siril")
             if registration.matrix is None:
                 reasons.append("registration transform is missing")
-            if registration.star_pairs is None:
-                reasons.append("star-pair count is missing")
-            elif registration.star_pairs < minpairs:
-                reasons.append(f"only {registration.star_pairs} star pair(s); requires {minpairs}")
+            if registration.detected_stars is None:
+                reasons.append("detected-star count is missing")
+            elif registration.detected_stars < minpairs:
+                reasons.append(f"only {registration.detected_stars} detected star(s); requires {minpairs}")
         if reasons:
             issues[index] = reasons
     return issues
+
+
+REGISTRATION_DIAGNOSTIC_FIELDS = [
+    "index",
+    "source",
+    "is_reference",
+    "used",
+    "reason",
+    "fwhm_px",
+    "weighted_fwhm_px",
+    "roundness",
+    "detected_stars",
+    "initial_matched_pairs",
+    "fitted_matched_pairs",
+    "inlier_fraction",
+    "star_tx_px",
+    "star_ty_px",
+    "star_rotation_deg",
+    "star_scale",
+]
+
+
+def build_registration_diagnostic_rows(
+    files: list[Path],
+    reference_index: int,
+    registrations: dict[int, SirilRegistration],
+    matches: dict[int, SirilMatchDiagnostics],
+    issues: dict[int, list[str]],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for index, source in enumerate(files, start=1):
+        registration = registrations.get(index, SirilRegistration(index=index))
+        match = matches.get(index, SirilMatchDiagnostics(index=index))
+        reasons = issues.get(index, [])
+        rows.append(
+            {
+                "index": index,
+                "source": source.name,
+                "is_reference": index == reference_index,
+                "used": not reasons,
+                "reason": "; ".join(reasons),
+                "fwhm_px": registration.fwhm_px,
+                "weighted_fwhm_px": registration.weighted_fwhm_px,
+                "roundness": registration.roundness,
+                "detected_stars": registration.detected_stars,
+                "initial_matched_pairs": match.initial_pairs,
+                "fitted_matched_pairs": match.fitted_pairs,
+                "inlier_fraction": match.inlier_fraction,
+                "star_tx_px": registration.star_tx_px,
+                "star_ty_px": registration.star_ty_px,
+                "star_rotation_deg": registration.star_rotation_deg,
+                "star_scale": registration.star_scale,
+            }
+        )
+    return rows
+
+
+def write_registration_diagnostics(path: Path, rows: list[dict[str, object]]) -> None:
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=REGISTRATION_DIAGNOSTIC_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def write_console_safe(text: str, stream = None) -> None:
@@ -1094,6 +1237,27 @@ def siril_failure_reason(output: str) -> str | None:
 def siril_reference_star_count(output: str) -> int | None:
     matches = re.findall(r"Found\s+(\d+)\s+stars\s+in\s+reference", output, flags=re.IGNORECASE)
     return int(matches[-1]) if matches else None
+
+
+def siril_registration_failure_message(
+    output: str,
+    reference_index: int,
+    reference_name: str,
+    diagnostics_path: Path | None = None,
+) -> str:
+    reference = f"reference {reference_index} ({reference_name})"
+    if "No image was registered to the reference" in output:
+        message = (
+            f"Background-star registration failed: Siril could not align any frame to {reference}. "
+            "Choose a sharper frame with more detected stars using --reference-frame-file."
+        )
+    elif "Not enough free disk space" in output:
+        message = "Siril ran out of disk space while registering frames. Free space or select another --work-root."
+    else:
+        message = f"Siril background-star registration failed for {reference}."
+    if diagnostics_path is not None and diagnostics_path.exists():
+        message += f" Diagnostics: {diagnostics_path}"
+    return message
 
 
 def resolve_siril_command(explicit: Path | None = None) -> Path:
@@ -1149,7 +1313,7 @@ def siril_requires_windows_shell(siril_cmd: Path) -> bool:
     return os.name == "nt" and siril_cmd.suffix.lower() in {".cmd", ".bat"}
 
 
-def run_siril(siril_cmd: Path | None, work_dir: Path, script_path: Path, verbose: bool = True) -> None:
+def run_siril(siril_cmd: Path | None, work_dir: Path, script_path: Path, verbose: bool = True) -> str:
     resolved_siril = resolve_siril_command(siril_cmd)
     cmd = build_siril_command(resolved_siril, work_dir, script_path)
     use_shell = siril_requires_windows_shell(resolved_siril)
@@ -1178,7 +1342,7 @@ def run_siril(siril_cmd: Path | None, work_dir: Path, script_path: Path, verbose
             raise SirilRegistrationError(f"Siril registration failed: {failure}", output)
         if returncode != 0:
             raise SirilRegistrationError(f"Siril registration exited with status {returncode}", output)
-        return
+        return output
 
     completed = subprocess.run(
         cmd,
@@ -1209,6 +1373,7 @@ def run_siril(siril_cmd: Path | None, work_dir: Path, script_path: Path, verbose
         if "Reading sequence failed" in line and "frame.seq" in line:
             continue
         write_console_safe(line + "\n", sys.stderr)
+    return combined_output
 
 
 def make_work_dir(base: Path, name: str) -> Path:
@@ -1434,6 +1599,25 @@ def main() -> int:
         help="Use the first frame or the frame nearest the session midpoint as registration/WCS reference.",
     )
     parser.add_argument(
+        "--padding-policy",
+        choices=("valid", "legacy"),
+        default="valid",
+        help=(
+            "Handle all-zero Siril registration padding as missing pixels and normalize mean stacks "
+            "by an integer per-pixel contribution count (valid, default), or reproduce the previous "
+            "padding behavior (legacy)."
+        ),
+    )
+    parser.add_argument(
+        "--zero-sample-policy",
+        choices=("exclude", "include"),
+        default="exclude",
+        help=(
+            "Exclude or include exact-zero samples in median and rank-fit stacks. "
+            "Defaults to exclude."
+        ),
+    )
+    parser.add_argument(
         "--reference-frame-file",
         help="Use this FITS filename as the registration/WCS reference; overrides --reference-frame.",
     )
@@ -1542,8 +1726,9 @@ def main() -> int:
     try:
         if args.verbose:
             print(f"[registration] Siril background-star registration: {len(copied)} frames", flush=True)
-        run_siril(args.siril, registration_dir, siril_script, args.verbose)
+        siril_output = run_siril(args.siril, registration_dir, siril_script, args.verbose)
         star_registrations = parse_siril_registration(registration_seq)
+        match_diagnostics = parse_siril_match_diagnostics(siril_output)
         registration_issues = registration_validation_issues(
             files,
             registration_dir,
@@ -1551,6 +1736,16 @@ def main() -> int:
             star_registrations,
             args.registration_minpairs,
         )
+        registration_diagnostic_rows = build_registration_diagnostic_rows(
+            files,
+            reference_index,
+            star_registrations,
+            match_diagnostics,
+            registration_issues,
+        )
+        registration_snapshot_csv = work_dir / "registration_diagnostics.csv"
+        write_registration_diagnostics(registration_snapshot_csv, registration_diagnostic_rows)
+        print(f"[registration] Diagnostics: {registration_snapshot_csv}", flush=True)
         reference_issues = registration_issues.get(reference_index)
         if reference_issues:
             details = "; ".join(reference_issues)
@@ -1574,6 +1769,27 @@ def main() -> int:
                 flush=True,
             )
     except SirilRegistrationError as error:
+        star_registrations = parse_siril_registration(registration_seq)
+        match_diagnostics = parse_siril_match_diagnostics(error.output)
+        registration_issues = registration_validation_issues(
+            files,
+            registration_dir,
+            args.basename,
+            star_registrations,
+            args.registration_minpairs,
+        )
+        registration_snapshot_csv = work_dir / "registration_diagnostics.csv"
+        write_registration_diagnostics(
+            registration_snapshot_csv,
+            build_registration_diagnostic_rows(
+                files,
+                reference_index,
+                star_registrations,
+                match_diagnostics,
+                registration_issues,
+            ),
+        )
+        print(f"[registration] Diagnostics: {registration_snapshot_csv}", flush=True)
         reference_stars = siril_reference_star_count(error.output)
         if reference_stars is not None and reference_stars < args.registration_minpairs:
             print(
@@ -1587,7 +1803,14 @@ def main() -> int:
         if not args.no_cleanup:
             removed = cleanup_intermediate_images(registration_dir, args.basename, copied, len(copied))
             print(f"[cleanup] Removed {len(removed)} intermediate FITS files after registration failure", flush=True)
-        raise
+        raise RuntimeError(
+            siril_registration_failure_message(
+                error.output,
+                reference_index,
+                reference_source.name,
+                registration_snapshot_csv,
+            )
+        ) from None
     except Exception:
         if not args.no_cleanup:
             removed = cleanup_intermediate_images(registration_dir, args.basename, copied, len(copied))
@@ -1620,6 +1843,11 @@ def main() -> int:
     frame_rows: list[dict[str, object]] = []
     used_times: list[datetime] = []
     used = 0
+    if args.verbose:
+        print(
+            f"[stack] padding policy={args.padding_policy}; zero-sample policy={args.zero_sample_policy}",
+            flush=True,
+        )
 
     for i, source in enumerate(copied, start=1):
         if args.verbose:
@@ -1629,6 +1857,24 @@ def main() -> int:
             )
         registered = registration_dir / f"r_{args.basename}_{i:05d}.fit"
         star_reg = star_registrations.get(i, SirilRegistration(index=i))
+        match_diag = match_diagnostics.get(i, SirilMatchDiagnostics(index=i))
+        registration_metrics = {
+            "is_reference": i == reference_index,
+            "fwhm_px": star_reg.fwhm_px,
+            "weighted_fwhm_px": star_reg.weighted_fwhm_px,
+            "roundness": star_reg.roundness,
+            "detected_stars": star_reg.detected_stars,
+            "initial_matched_pairs": match_diag.initial_pairs,
+            "fitted_matched_pairs": match_diag.fitted_pairs,
+            "inlier_fraction": match_diag.inlier_fraction,
+            "star_pairs": match_diag.fitted_pairs,
+            "star_selected": star_reg.selected,
+            "star_reference_index": star_reg.reference_index,
+            "star_tx_px": star_reg.star_tx_px,
+            "star_ty_px": star_reg.star_ty_px,
+            "star_rotation_deg": star_reg.star_rotation_deg,
+            "star_scale": star_reg.star_scale,
+        }
         issues = registration_issues.get(i)
         if issues:
             frame_rows.append(
@@ -1637,13 +1883,7 @@ def main() -> int:
                     "source": files[i - 1].name,
                     "used": False,
                     "reason": "; ".join(issues),
-                    "star_selected": star_reg.selected,
-                    "star_reference_index": star_reg.reference_index,
-                    "star_pairs": star_reg.star_pairs,
-                    "star_tx_px": star_reg.star_tx_px,
-                    "star_ty_px": star_reg.star_ty_px,
-                    "star_rotation_deg": star_reg.star_rotation_deg,
-                    "star_scale": star_reg.star_scale,
+                    **registration_metrics,
                 }
             )
             continue
@@ -1654,8 +1894,9 @@ def main() -> int:
         dx = reference_x - x
         dy = reference_y - y
         image, registered_unit_scale = restore_registered_units(read_fits(registered), source_header)
-        shifted, mask2d = shift_image(image.data, dx, dy)
-        star_shifted, star_mask2d = shift_image(image.data, 0.0, 0.0)
+        source_valid = registered_valid_mask(image.data) if args.padding_policy == "valid" else None
+        shifted, mask2d = shift_image(image.data, dx, dy, source_valid)
+        star_shifted, star_mask2d = shift_image(image.data, 0.0, 0.0, source_valid)
         saturation_level: float | None = None
         saturation_threshold_count: float | None = None
         subframe_max_count: float | None = None
@@ -1704,11 +1945,13 @@ def main() -> int:
                     work_dir / f"{args.stack_method}_metcalf_frames.npy",
                     len(files),
                     shifted.shape,
+                    exclude_zero_samples=args.zero_sample_policy == "exclude",
                 )
                 median_star_stack = MedianAccumulator(
                     work_dir / f"{args.stack_method}_star_frames.npy",
                     len(files),
                     star_shifted.shape,
+                    exclude_zero_samples=args.zero_sample_policy == "exclude",
                 )
             median_stack.add(shifted, mask2d)
             if median_star_stack is None:
@@ -1729,13 +1972,7 @@ def main() -> int:
                 "target_y_1based": y,
                 "extra_dx_px": dx,
                 "extra_dy_px": dy,
-                "star_selected": star_reg.selected,
-                "star_reference_index": star_reg.reference_index,
-                "star_pairs": star_reg.star_pairs,
-                "star_tx_px": star_reg.star_tx_px,
-                "star_ty_px": star_reg.star_ty_px,
-                "star_rotation_deg": star_reg.star_rotation_deg,
-                "star_scale": star_reg.star_scale,
+                **registration_metrics,
                 "registered_unit_scale": registered_unit_scale,
                 "saturation_warning": frame_saturation_warning if saturation_enabled else None,
                 "saturation_level": saturation_level,
@@ -1804,6 +2041,7 @@ def main() -> int:
         else None
     )
     shifts_csv = work_dir / f"{output_stem}_shifts.csv"
+    registration_diagnostics_csv = work_dir / f"{output_stem}_registration_diagnostics.csv"
     summary_json = work_dir / f"{output_stem}_summary.json"
     star_wcs_header = wcs.to_fits_header(width, height)
     extra_header = {
@@ -1815,6 +2053,8 @@ def main() -> int:
         "MTREFRA": reference_target.ra_deg,
         "MTREFDEC": reference_target.dec_deg,
         "STKMODE": args.stack_method,
+        "PADPOL": args.padding_policy,
+        "ZEROPOL": args.zero_sample_policy if args.stack_method != "mean" else "n/a",
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
         "RFDEG": 5 if args.stack_method == "rankfit" else 0,
         "REFMODE": reference_mode,
@@ -1828,6 +2068,8 @@ def main() -> int:
         "MTFRAMES": used,
         "MTUNITS": "ADU",
         "STKMODE": args.stack_method,
+        "PADPOL": args.padding_policy,
+        "ZEROPOL": args.zero_sample_policy if args.stack_method != "mean" else "n/a",
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
         "RFDEG": 5 if args.stack_method == "rankfit" else 0,
         "REFMODE": reference_mode,
@@ -1844,6 +2086,8 @@ def main() -> int:
         "MTFRAMES": used,
         "MTUNITS": "ADU",
         "STKMODE": args.stack_method,
+        "PADPOL": args.padding_policy,
+        "ZEROPOL": args.zero_sample_policy if args.stack_method != "mean" else "n/a",
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
         "RFDEG": 5 if args.stack_method == "rankfit" else 0,
         "REFMODE": reference_mode,
@@ -1967,6 +2211,14 @@ def main() -> int:
             "target_y_1based",
             "extra_dx_px",
             "extra_dy_px",
+            "is_reference",
+            "fwhm_px",
+            "weighted_fwhm_px",
+            "roundness",
+            "detected_stars",
+            "initial_matched_pairs",
+            "fitted_matched_pairs",
+            "inlier_fraction",
             "star_selected",
             "star_reference_index",
             "star_pairs",
@@ -1984,6 +2236,9 @@ def main() -> int:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(frame_rows)
+
+    write_registration_diagnostics(registration_diagnostics_csv, frame_rows)
+    print(f"[result] Registration diagnostics: {registration_diagnostics_csv}", flush=True)
 
     removed_intermediate_images: list[str] = []
     if not args.no_cleanup:
@@ -2036,6 +2291,8 @@ def main() -> int:
         "used_frames": used,
         "stack_method": args.stack_method,
         "stack_method_token": method_token,
+        "padding_policy": args.padding_policy,
+        "zero_sample_policy": args.zero_sample_policy if args.stack_method != "mean" else None,
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,
         "rankfit_polynomial_degree": 5 if args.stack_method == "rankfit" else None,
         "reference_frame_mode": reference_mode,
@@ -2068,6 +2325,7 @@ def main() -> int:
                 str(comparison_saturation_output_png) if comparison_saturation_output_png else None
             ),
             "shifts_csv": str(shifts_csv),
+            "registration_diagnostics_csv": str(registration_diagnostics_csv),
         },
     }
     summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -2078,4 +2336,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("ERROR: Processing cancelled.", file=sys.stderr)
+        raise SystemExit(130) from None
+    except Exception as error:
+        message = " ".join(str(error).splitlines()) or error.__class__.__name__
+        print(f"ERROR: {message}", file=sys.stderr)
+        raise SystemExit(1) from None

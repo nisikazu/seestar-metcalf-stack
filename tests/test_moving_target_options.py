@@ -117,6 +117,25 @@ class MedianAccumulatorTests(unittest.TestCase):
 
             np.testing.assert_allclose(result, np.array([[9, 6]], dtype=np.float64))
 
+    def test_median_can_include_exact_zero_samples_for_legacy_results(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "median.npy"
+            accumulator = stacker.MedianAccumulator(
+                path,
+                3,
+                (1, 2),
+                exclude_zero_samples=False,
+            )
+            mask = np.ones((1, 2), dtype=bool)
+            accumulator.add(np.array([[0, 0]], dtype=np.float32), mask)
+            accumulator.add(np.array([[0, 4]], dtype=np.float32), mask)
+            accumulator.add(np.array([[9, 8]], dtype=np.float32), mask)
+
+            result = accumulator.finalize(row_chunk=1)
+            accumulator.close(remove=True)
+
+            np.testing.assert_allclose(result, np.array([[0, 4]], dtype=np.float64))
+
     def test_rankfit_recovers_center_of_rank_polynomial(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "rankfit.npy"
@@ -136,6 +155,46 @@ class MedianAccumulatorTests(unittest.TestCase):
         self.assertEqual(stacker.processing_method_token("mean", 50), "mean")
         self.assertEqual(stacker.processing_method_token("median", 50), "median")
         self.assertEqual(stacker.processing_method_token("rankfit", 37), "rankfit5_p37")
+
+
+class ValidPixelMeanTests(unittest.TestCase):
+    def test_registered_padding_is_detected_only_when_all_channels_are_zero(self):
+        image = np.array(
+            [
+                [[0, 0], [1, 0]],
+                [[0, 2], [1, 0]],
+                [[0, 0], [1, 0]],
+            ],
+            dtype=np.float32,
+        )
+
+        mask = stacker.registered_valid_mask(image)
+
+        np.testing.assert_array_equal(mask, np.array([[False, True], [True, False]]))
+
+    def test_shift_mask_rejects_a_pixel_when_any_bilinear_source_is_padding(self):
+        image = np.arange(9, dtype=np.float32).reshape(3, 3)
+        source_valid = np.ones((3, 3), dtype=bool)
+        source_valid[0, 0] = False
+
+        _shifted, mask = stacker.shift_plane(image, 0.5, 0.5, source_valid)
+
+        self.assertFalse(bool(mask[1, 1]))
+        self.assertTrue(bool(mask[2, 2]))
+
+    def test_mean_uses_integer_per_pixel_contribution_counts(self):
+        first = np.array([[0, 10], [0, 10]], dtype=np.float32)
+        second = np.full((2, 2), 20, dtype=np.float32)
+        total = None
+        counts = None
+
+        total, counts = stacker.add_to_average(total, counts, first, stacker.registered_valid_mask(first))
+        total, counts = stacker.add_to_average(total, counts, second, stacker.registered_valid_mask(second))
+        result = stacker.finalize_average(total, counts)
+
+        self.assertEqual(counts.dtype, np.uint32)
+        np.testing.assert_array_equal(counts, np.array([[1, 2], [1, 2]], dtype=np.uint32))
+        np.testing.assert_allclose(result, np.array([[20, 15], [20, 15]], dtype=np.float64))
 
 
 class PreviewTests(unittest.TestCase):
@@ -289,12 +348,86 @@ class ReferenceSelectionTests(unittest.TestCase):
 
 
 class RegistrationValidationTests(unittest.TestCase):
-    def test_validation_accepts_every_registered_frame_with_enough_star_pairs(self):
+    def test_seq_parser_reads_quality_and_registration_metrics(self):
+        content = "\n".join(
+            [
+                "S 'frame_' 1 2 2 5 0 6 0 0 0",
+                "I 1 1",
+                "I 2 1",
+                "R1 2.31961 2.41961 0.65534 0 0.193171 8 H 1 0 0 0 1 0 0 0 1",
+                "R1 3.00499 4.50748 0.738075 0 0.192033 11 H 1 0 14.5 0 1 -1.2 0 0 1",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            seq = Path(temporary) / "frame_.seq"
+            seq.write_text(content, encoding="utf-8")
+            registrations = stacker.parse_siril_registration(seq)
+
+        self.assertEqual(registrations[1].detected_stars, 8)
+        self.assertAlmostEqual(registrations[1].fwhm_px, 2.31961)
+        self.assertAlmostEqual(registrations[1].weighted_fwhm_px, 2.41961)
+        self.assertAlmostEqual(registrations[1].roundness, 0.65534)
+        self.assertAlmostEqual(registrations[2].star_tx_px, 14.5)
+
+    def test_siril_log_parser_separates_detected_stars_from_matched_pairs(self):
+        output = "\n".join(
+            [
+                "log: Matching stars in image 19: done",
+                "log: Initial pair matches: 7",
+                "log: Pair matches after fitting: 6",
+                "log: Inliers: 0.857",
+                "log: Reading FITS: another frame",
+                "log: Matching stars in image 139: done",
+                "log: Initial pair matches: 8",
+                "log: Pair matches after fitting: 7",
+                "log: Inliers: 0.875",
+            ]
+        )
+
+        diagnostics = stacker.parse_siril_match_diagnostics(output)
+
+        self.assertEqual(diagnostics[19].initial_pairs, 7)
+        self.assertEqual(diagnostics[19].fitted_pairs, 6)
+        self.assertAlmostEqual(diagnostics[19].inlier_fraction, 0.857)
+        self.assertEqual(diagnostics[139].fitted_pairs, 7)
+
+    def test_diagnostic_rows_keep_excluded_frames_and_roundness(self):
+        matrix = (1.0, 0.0, 12.5, 0.0, 1.0, -3.0, 0.0, 0.0, 1.0)
+        registrations = {
+            1: stacker.SirilRegistration(
+                index=1,
+                selected=True,
+                detected_stars=12,
+                fwhm_px=2.4,
+                weighted_fwhm_px=2.6,
+                roundness=0.82,
+                matrix=matrix,
+            ),
+            2: stacker.SirilRegistration(index=2, selected=False, detected_stars=3),
+        }
+        matches = {1: stacker.SirilMatchDiagnostics(index=1, fitted_pairs=8, inlier_fraction=0.9)}
+
+        rows = stacker.build_registration_diagnostic_rows(
+            [Path("good.fit"), Path("poor.fit")],
+            1,
+            registrations,
+            matches,
+            {2: ["not selected by Siril"]},
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(rows[0]["is_reference"])
+        self.assertEqual(rows[0]["roundness"], 0.82)
+        self.assertEqual(rows[0]["fitted_matched_pairs"], 8)
+        self.assertFalse(rows[1]["used"])
+        self.assertEqual(rows[1]["reason"], "not selected by Siril")
+
+    def test_validation_accepts_every_registered_frame_with_enough_detected_stars(self):
         files = [Path("first.fit"), Path("second.fit")]
         matrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
         registrations = {
-            1: stacker.SirilRegistration(index=1, selected=True, star_pairs=6, matrix=matrix),
-            2: stacker.SirilRegistration(index=2, selected=True, star_pairs=8, matrix=matrix),
+            1: stacker.SirilRegistration(index=1, selected=True, detected_stars=6, matrix=matrix),
+            2: stacker.SirilRegistration(index=2, selected=True, detected_stars=8, matrix=matrix),
         }
         with tempfile.TemporaryDirectory() as temporary:
             registration_dir = Path(temporary)
@@ -307,11 +440,11 @@ class RegistrationValidationTests(unittest.TestCase):
 
         self.assertEqual(issues, {})
 
-    def test_validation_reports_per_frame_missing_stars_and_registered_frame(self):
+    def test_validation_reports_per_frame_insufficient_stars_and_registered_frame(self):
         files = [Path("first.fit"), Path("second.fit")]
         matrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
         registrations = {
-            1: stacker.SirilRegistration(index=1, selected=True, star_pairs=5, matrix=matrix),
+            1: stacker.SirilRegistration(index=1, selected=True, detected_stars=5, matrix=matrix),
             2: stacker.SirilRegistration(index=2, selected=False),
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -323,7 +456,7 @@ class RegistrationValidationTests(unittest.TestCase):
             )
 
         self.assertEqual(set(issues), {1, 2})
-        self.assertEqual(issues[1], ["only 5 star pair(s); requires 6"])
+        self.assertEqual(issues[1], ["only 5 detected star(s); requires 6"])
         self.assertIn("registered FITS was not produced", issues[2])
         self.assertIn("not selected by Siril", issues[2])
 
@@ -443,6 +576,42 @@ class VerboseOutputTests(unittest.TestCase):
     def test_siril_reference_star_count_is_none_when_not_reported(self):
         self.assertIsNone(stacker.siril_reference_star_count("log: Registration aborted."))
 
+    def test_no_registered_image_has_actionable_stack_error(self):
+        output = "\n".join(
+            [
+                "log: No image was registered to the reference",
+                "log: Registration aborted.",
+            ]
+        )
+
+        message = pipeline.child_error_message(output)
+
+        self.assertIn("could not align any frame", message)
+        self.assertIn("--reference-frame-file", message)
+
+    def test_explicit_child_error_is_forwarded_without_traceback(self):
+        output = "progress: 100%\nERROR: Selected reference frame is unsuitable.\n"
+
+        self.assertEqual(
+            pipeline.child_error_message(output),
+            "Selected reference frame is unsuitable.",
+        )
+
+    def test_siril_failure_message_names_reference_and_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            diagnostics = Path(temporary) / "registration_diagnostics.csv"
+            diagnostics.write_text("index,source\n", encoding="utf-8")
+            message = stacker.siril_registration_failure_message(
+                "log: No image was registered to the reference",
+                142,
+                "Light 10P Tempel.fit",
+                diagnostics,
+            )
+
+        self.assertIn("reference 142 (Light 10P Tempel.fit)", message)
+        self.assertIn("--reference-frame-file", message)
+        self.assertIn("registration_diagnostics.csv", message)
+
 
 class CrossPlatformCliTests(unittest.TestCase):
     def test_pipeline_verbose_and_open_output_are_enabled_by_default(self):
@@ -454,6 +623,26 @@ class CrossPlatformCliTests(unittest.TestCase):
         self.assertEqual(args.saturation_warning, "disable")
         self.assertEqual(args.saturation_threshold_percent, 90.0)
         self.assertEqual(args.saturation_color, "FF0000")
+        self.assertEqual(args.padding_policy, "valid")
+        self.assertEqual(args.zero_sample_policy, "exclude")
+
+    def test_pipeline_accepts_legacy_padding_and_zero_inclusion(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "seestar-metcalf-stack",
+                "frames",
+                "--padding-policy",
+                "legacy",
+                "--zero-sample-policy",
+                "include",
+            ],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.padding_policy, "legacy")
+        self.assertEqual(args.zero_sample_policy, "include")
 
     def test_pipeline_accepts_explicit_saturation_warning_options(self):
         with patch.object(

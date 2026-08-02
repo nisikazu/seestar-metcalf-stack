@@ -130,16 +130,28 @@ Sirilの背景星位置合わせでは、デベイヤ済み画像と登録済み
 
 ### 平均、メジアン、ランクフィット
 
-デフォルトの平均は、入力が良好なら一般に最も高いS/Nを得やすい方式です。
+デフォルトの平均は、入力が良好なら一般に最も高いS/Nを得やすい方式です。Sirilの位置合わせやメトカーフシフトによって画像外になった画素は加算せず、画素ごとの整数の寄与枚数で割ります。補間に必要な4近傍がすべて実画像内にある場合だけ採用するため、外挿を行わず、重なり枚数が少ない周辺部でも平均輝度が暗くなりません。
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean
 ```
 
-画素ごとのメジアンは、人工衛星、飛行機、ホットピクセルなど少数フレームだけに現れる外れ値に強い方式です。メジアンはメトカーフスタッキング像において星の軌跡を低減し、彗星光度の精度向上を図ります。一方で平均より遅く、大きなディスク上の一時配列を使い、統計的な効率も通常は平均より低くなります。メジアンでは登録・シフト境界の完全な0を常に母集団から除外します。
+以前の版と同じpadding処理を再現して比較する場合だけ、`--padding-policy legacy`を指定します。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean --padding-policy legacy
+```
+
+画素ごとのメジアンは、人工衛星、飛行機、ホットピクセルなど少数フレームだけに現れる外れ値に強い方式です。メジアンはメトカーフスタッキング像において星の軌跡を低減し、彗星光度の精度向上を図ります。一方で平均より遅く、大きなディスク上の一時配列を使い、統計的な効率も通常は平均より低くなります。メジアンでは登録・シフト境界に現れる完全な0をデフォルトで母集団から除外します。
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median
+```
+
+厳密な0も中央値の母集団に含めて従来処理と比較する場合は、`--zero-sample-policy include`を追加します。この指定はランクフィットにも適用されます。ただし、重なりの少ない領域ではpaddingの0が中央値を占め、真っ黒な領域が広く発生するため、通常のスタックには非推奨です。旧版との比較など、0を含める必要が明確な場合だけ使用してください。
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median --zero-sample-policy include
 ```
 
 ランクフィットは、各画素の非0サンプルを明るさ順に並べ、中央の指定割合を採用し、正規化順位に対する明るさを5次多項式でフィットして中央値順位での関数値を返します。既定の採用率は50%です。
@@ -199,7 +211,14 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable --satu
 - `*_metcalf_saturation_warning.png`、`*_star_saturation_warning.png`: `--saturation-warning enable` 時だけ作る飽和警告PNG
 - `*_star_left_metcalf_right_saturation_warning.png`: 星固定と移動天体固定の飽和警告を並べたPNG
 - `*_shifts.csv`: 各フレームの星位置合わせ量と天体移動量
+- `*_registration_diagnostics.csv`: 全フレームの位置合わせ診断表。基準フレームの選び直しや、採用枚数が少ない原因の確認に使います
 - `*_summary.json`、`moving_target_pipeline_summary.json`: 再現用の処理記録
+
+位置合わせ診断表は、index、元ファイル名、基準フレームか、採用/除外、除外理由、FWHM、weighted FWHM、roundness、検出星数、初期対応星数、フィッティング後の対応星数、inlier率、背景星位置合わせのX/Y移動量・回転角・倍率を記録します。`fwhm_px`はSirilの代表FWHM、`weighted_fwhm_px`はSirilの星品質を考慮したweighted FWHMです。値が小さいほど星像は鋭く、roundnessは1に近いほど丸い星像です。
+
+基準フレーム不良などで最終スタックまで進めなかった場合も、同じ内容の`registration_diagnostics.csv`を作業フォルダへ先に保存します。
+
+スタック枚数が少ない場合は、まず`reason`と`fitted_matched_pairs`を確認してください。検出星数が多く、FWHMが小さく、roundnessが高いフレームが基準候補です。対応星数は現在選ばれている基準に対する値なので、別候補の良否はそのファイルを`--reference-frame-file`で指定して再実行して確認します。基準フレーム自身は他画像との対応付けを行わないため、対応星数は空欄になります。X/Y/回転角はSirilの変換行列から読み取った「各フレームを基準座標へ写す変換」です。
 
 最終FITSは線形ADU値を保ち、中間計算は浮動小数点で行います。デフォルトのunsigned 16-bit出力は再スケールしません。補間後の小数値も直接残したい場合は `--output-bitpix float32` を使います。
 

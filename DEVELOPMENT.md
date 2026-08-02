@@ -9,6 +9,7 @@
 - 非基準フレームの登録失敗は雲・遮蔽物・導入ずれで通常に起こる。失敗理由を `*_shifts.csv` に残し、当該フレームだけを除外してスタックする。
 - 完了時に `Stacked used/total frames; skipped excluded` を表示する。`used_frames`、出力名、summary JSONも実使用枚数を記録する。
 - Sirilが登録途中で非ゼロ終了した場合も、出力の `Found N stars in reference` を解析して基準星不足を明示する。
+- CLIではPython Tracebackを直接表示せず、原因と復旧操作を示す短い`Error:`を表示する。Tracebackは公開版ランチャーの実行ログだけに残し、子処理の`ERROR:`を親処理が一度だけ表示する。
 
 最終更新: 2026-07-25
 
@@ -19,7 +20,7 @@ macOSの導入方法は`README-macOS.md`、リリース作業は`PUBLISHING.md`�
 
 ## 現在の状態
 
-- 最新の公開Releaseは`v0.5.3`です。
+- 最新の公開Releaseは`v0.5.4`です。
 - `v0.5.1`にはHorizons復旧手順、座標CSVの補間・外挿説明、
   Astrometry.net APIキー取得手順の改善、飽和警告、開発文書の配布同梱が
   含まれます。
@@ -118,8 +119,8 @@ JSON calibrationの中心、pixel scale、orientationからTAN WCSを構成し�
 
 ### 画素結合
 
-- `mean`: 有効画素ごとの算術平均。加算は`float64`です。
-- `median`: 画素ごとの中央値。登録・シフトで生じる厳密な0を欠損として除外します。
+- `mean`: 有効画素ごとの算術平均。加算は`float64`、寄与枚数は`uint32`です。デフォルトの`--padding-policy valid`ではSiril登録後の全チャンネル0 paddingを検出し、メトカーフの小数画素シフトでは補間4近傍がすべて有効な画素だけを整数countへ加えます。`legacy`は旧挙動との比較用です。
+- `median`: 画素ごとの中央値。登録・シフトで生じる厳密な0をデフォルトで欠損として除外します。`--zero-sample-policy include`で0を母集団へ戻せますが、低重複領域ではpaddingの0が中央値となって真っ黒な領域を作るため、旧版との比較以外には非推奨です。
 - `rankfit`: 0を除外して明るさ順に並べ、中央の指定割合へ5次多項式を当て、
   順位中央の値を返します。標本が少ない画素は中央値へフォールバックします。
 
@@ -171,6 +172,7 @@ CSVにはフレームごとの最大値、判定閾値、飽和画素数を、su
 | v0.5.0後 / 2026-07-22 | 座標CSVの線形補間・外挿と、撮影期間をまたぐ2点以上を推奨する条件を文書化 |
 | v0.5.0後 / 2026-07-25 | サブフレーム飽和を星固定・メトカーフ固定の両座標へ伝播し、科学FITSとは別の警告PNGへ表示する任意機能を追加 |
 | v0.5.1 / 2026-07-25 | 上記のREADME改善と飽和警告を公開。`DEVELOPMENT.md`、`PUBLISHING.md`、`README-Siril-CLI.md`を両配布ZIPへ同梱 |
+| v0.5.4 / 2026-08-02 | 有効画素だけを画素別枚数で正規化する平均スタック、登録診断CSV、利用者向けエラー表示を追加 |
 
 初回公開時点ですでに含まれていた重要な試作改良には、次のものがあります。
 
@@ -261,8 +263,7 @@ EXEには変更ありません。
   対象とします。FITS extension、tile compression、一般的な多次元FITSは未対応です。
 - メジアン/ランクフィットはフレーム数×画像サイズのfloat32 memmapを2組使います。
   Sirilのデベイヤ・登録画像も加わるため、大規模セッションは空き容量を多く使います。
-- 平均の有効画素countは現在uint16です。現実的ではありませんが、65535枚を超える
-  セッションではoverflowします。
+- 平均の有効画素countはuint32です。
 - 実機データで主に確認したのはSeestar S30です。S50、S30 Pro、将来firmwareが
   出力するFITSカードや画像形状は追加検証が必要です。
 - FITSの上下方向は表示ソフトによって見え方が異なります。内部配列を既定では反転
@@ -307,12 +308,13 @@ Astrometry request、Siril失敗検出、飽和閾値・マスク伝播・警告
 2. キャッシュ済みWCS/JSONと座標CSVを使い、少数フレームの`mean`を完走する
 3. `median`と`rankfit`で0 paddingが画像を支配しない
 4. メトカーフ、星固定、左右比較のFITS/PNGがすべて生成される
-5. `*_shifts.csv`と`*_summary.json`のフレーム数、時刻、基準フレームが一致する
+5. `*_shifts.csv`、`*_registration_diagnostics.csv`、`*_summary.json`のフレーム数、時刻、基準フレームが一致する
 6. uint16 `none`とfloat32の画素値が想定したADU関係を保つ
 7. 成功時cleanupと`--no-cleanup`の両方を確認する
 8. 通信中断後にAstrometry submissionを再開できる
 9. `--saturation-warning enable`で専用PNGだけが生成され、通常PNGとFITSが変わらない
 10. `*_shifts.csv`とsummary JSONの飽和件数が、確認した元フレームと一致する
+11. 登録診断CSVのFWHM・weighted FWHM・roundness・検出星数がSiril `.seq`と一致し、対応星数がSirilログと一致する
 
 実観測FITS、APIキー、観測地点、ログはリポジトリへcommitしないでください。
 

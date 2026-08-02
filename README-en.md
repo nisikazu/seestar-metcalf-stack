@@ -224,20 +224,42 @@ the source folder.
 ### Mean, median, or rank-fit
 
 Mean is the default and generally provides the best signal-to-noise ratio when
-the input frames are clean:
+the input frames are clean. Pixels outside a Siril-registered or
+Metcalf-shifted frame do not contribute to the sum. Each output pixel is
+divided by its integer number of contributing frames, and interpolation is
+accepted only when all four bilinear source pixels are valid. This avoids
+extrapolation and prevents low-coverage borders from becoming artificially
+dark:
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean
+```
+
+Use `--padding-policy legacy` only to reproduce the padding behavior of an
+older release for comparison:
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean --padding-policy legacy
 ```
 
 Median is more resistant to satellites, airplanes, hot pixels, and other
 one-frame outliers. In a Metcalf stack, it reduces star trails and is intended
 to improve the accuracy of comet photometry. However, it is slower, uses large
 temporary disk-backed arrays, and usually has lower statistical efficiency.
-Exact-zero padding is always excluded from the median samples:
+Exact-zero padding is excluded from the median samples by default:
 
 ```bat
 seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median
+```
+
+Use `--zero-sample-policy include` to include exact zeros for comparison with
+legacy results. The same option also applies to rank-fit stacks. This is not
+recommended for normal stacking: in low-overlap areas, zero padding can become
+the median and produce large completely black regions. Use it only when exact
+zeros must intentionally be included, such as for a legacy comparison:
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median --zero-sample-policy include
 ```
 
 Rank-fit sorts the nonzero samples at each pixel, keeps the central percentage,
@@ -323,7 +345,28 @@ and combine method, for example:
 - `*_star_left_metcalf_right_saturation_warning.png`: side-by-side warning
   preview
 - `*_shifts.csv`: per-frame star registration and target-motion offsets
+- `*_registration_diagnostics.csv`: every frame's registration quality and
+  transform, intended for diagnosing low acceptance and choosing a better reference
 - `*_summary.json`, `moving_target_pipeline_summary.json`: reproducibility data
+
+The registration diagnostics table records the index, source filename,
+reference/used status, exclusion reason, FWHM, weighted FWHM, roundness,
+detected stars, initial and fitted correspondence counts, inlier fraction,
+and the background-star X/Y translation, rotation, and scale. Lower FWHM is
+sharper and roundness nearer 1 is more circular. The reference frame has no
+correspondence count because it is not matched against itself. The transform
+columns describe the Siril matrix that maps each frame into reference-frame
+coordinates.
+
+If processing stops before the final stack, for example because the reference
+is unsuitable, an early `registration_diagnostics.csv` snapshot remains in
+the work directory with the same columns.
+
+When few frames are accepted, inspect `reason` and `fitted_matched_pairs`
+first. A useful alternative reference generally has many detected stars, low
+FWHM, and high roundness. Correspondence counts are measured against the
+currently selected reference, so verify another candidate by rerunning with
+that filename through `--reference-frame-file`.
 
 Final FITS values remain linear ADU data. Intermediate calculations use floating
 point. The default unsigned 16-bit output uses no rescaling; use

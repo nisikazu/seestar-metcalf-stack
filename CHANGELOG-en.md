@@ -4,6 +4,21 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.5.4 - 2026-08-02
+
+### Improved
+
+- Mean stacks now accumulate only pixels backed by real registered/shifted image data and normalize by an integer per-pixel contribution count. This prevents zero padding from darkening low-overlap borders.
+- Sub-pixel motion is interpolated only when all four source neighbors are valid; image-edge zero interpolation and extrapolation are avoided. Use `--padding-policy legacy` to compare with the previous behavior.
+- The median/rankfit zero-sample behavior is explicit through `--zero-sample-policy exclude`; the discouraged legacy result remains available with `include`.
+- Added `*_registration_diagnostics.csv` with every frame's FWHM, weighted FWHM, roundness, detected stars, matched pairs, inlier fraction, X/Y translation, rotation, scale, acceptance, and rejection reason.
+- An early `registration_diagnostics.csv` remains in the work directory even when an unsuitable reference prevents stacking.
+
+### Fixed
+
+- Corrected the former labeling of Siril `.seq` detected-star counts as matched pairs. Initial and fitted correspondence counts are now parsed separately from the Siril log.
+- Stack failures no longer print duplicate Python tracebacks to the console. Users receive a concise error with the cause, reference, diagnostics path, and recovery action; the detailed traceback remains in the run log.
+
 ## v0.5.3 - 2026-07-31
 
 ### Fixed
