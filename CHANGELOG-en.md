@@ -4,6 +4,12 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.5.5 - 2026-08-04
+
+### Fixed
+
+- When background-star registration fails, every debayered frame is now measured sequentially with Siril. `registration_diagnostics.csv` retains detected-star count, FWHM, and roundness so a better `--reference-frame-file` can be selected even when the original reference cannot register any frame.
+
 ## v0.5.4 - 2026-08-02
 
 ### Improved

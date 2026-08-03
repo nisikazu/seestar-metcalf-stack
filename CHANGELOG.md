@@ -4,6 +4,12 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## v0.5.5 - 2026-08-04
+
+### 修正
+
+- 背景星登録が失敗した場合、デベイヤ済みの各フレームをSirilで個別に再解析し、`registration_diagnostics.csv`へ検出星数、FWHM、roundnessを記録するようにしました。登録できない基準フレームでも、CSVを見て`--reference-frame-file`の候補を選べます。
+
 ## v0.5.4 - 2026-08-02
 
 ### 改善

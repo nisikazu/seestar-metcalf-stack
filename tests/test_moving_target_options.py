@@ -391,6 +391,45 @@ class RegistrationValidationTests(unittest.TestCase):
         self.assertAlmostEqual(diagnostics[19].inlier_fraction, 0.857)
         self.assertEqual(diagnostics[139].fitted_pairs, 7)
 
+    def test_failed_registration_findstar_parser_keeps_per_frame_quality(self):
+        output = "\n".join(
+            [
+                "log: Reading FITS: file frame_00001.fit, 3 layer(s)",
+                "log: Found 4 Gaussian profile stars in image, channel #1 (FWHM 2.360296)",
+                "log: Reading FITS: file frame_00002.fit, 3 layer(s)",
+                "log: Found 7 Gaussian profile stars in image, channel #1 (FWHM 2.904935)",
+            ]
+        )
+        catalog = "\n".join(
+            [
+                "# star#\tlayer\tB\tA\tbeta\tX\tY\tFWHMx [px]\tFWHMy [px]",
+                "1\t1\t0\t0\t-1\t10\t20\t2.40\t2.00",
+                "2\t1\t0\t0\t-1\t30\t40\t2.20\t2.20",
+                "3\t1\t0\t0\t-1\t50\t60\t2.50\t2.00",
+                "4\t1\t0\t0\t-1\t70\t80\t2.10\t2.00",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            work_dir = Path(temporary)
+            (work_dir / "frame_stars_00001.tsv").write_text(catalog, encoding="utf-8")
+            registrations = stacker.parse_siril_findstar_diagnostics(output, work_dir, "frame", 2)
+
+        self.assertEqual(registrations[1].detected_stars, 4)
+        self.assertAlmostEqual(registrations[1].fwhm_px, 2.360296)
+        self.assertAlmostEqual(registrations[1].roundness, 0.892857, places=5)
+        self.assertEqual(registrations[2].detected_stars, 7)
+        self.assertAlmostEqual(registrations[2].fwhm_px, 2.904935)
+
+    def test_findstar_diagnostic_script_processes_frames_in_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            script = Path(temporary) / "diagnose.ssf"
+            stacker.write_siril_findstar_script(script, "frame", 2)
+            content = script.read_text(encoding="ascii")
+
+        self.assertIn("load frame_00001.fit", content)
+        self.assertIn("findstar -layer=1 -out=frame_stars_00001.tsv", content)
+        self.assertLess(content.index("load frame_00001.fit"), content.index("load frame_00002.fit"))
+
     def test_diagnostic_rows_keep_excluded_frames_and_roundness(self):
         matrix = (1.0, 0.0, 12.5, 0.0, 1.0, -3.0, 0.0, 0.0, 1.0)
         registrations = {

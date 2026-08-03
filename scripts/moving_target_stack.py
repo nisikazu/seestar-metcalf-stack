@@ -927,6 +927,18 @@ def write_siril_script(
     )
 
 
+def write_siril_findstar_script(path: Path, basename: str, frame_count: int) -> None:
+    lines = ["requires 1.4.0"]
+    for index in range(1, frame_count + 1):
+        lines.extend(
+            [
+                f"load {basename}_{index:05d}.fit",
+                f"findstar -layer=1 -out={basename}_stars_{index:05d}.tsv",
+            ]
+        )
+    path.write_text("\n".join([*lines, ""]), encoding="ascii")
+
+
 def safe_name(value: str) -> str:
     text = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
     text = re.sub(r"_+", "_", text).strip("_")
@@ -1116,6 +1128,107 @@ def parse_siril_match_diagnostics(output: str) -> dict[int, SirilMatchDiagnostic
                 setattr(current, attribute, conversion(match.group(1)))
                 break
     return diagnostics
+
+
+def parse_siril_findstar_diagnostics(
+    output: str,
+    work_dir: Path,
+    basename: str,
+    frame_count: int,
+) -> dict[int, SirilRegistration]:
+    """Read sequential FINDSTAR results produced after a failed registration."""
+    registrations: dict[int, SirilRegistration] = {}
+    current_index: int | None = None
+    file_pattern = re.compile(rf"Reading FITS:\s+file\s+{re.escape(basename)}_(\d{{5}})\.fit", re.IGNORECASE)
+    found_pattern = re.compile(
+        r"Found\s+(\d+)\s+Gaussian profile stars.*?\(FWHM\s+([0-9.+-]+)\)",
+        re.IGNORECASE,
+    )
+    for raw_line in output.splitlines():
+        file_match = file_pattern.search(raw_line)
+        if file_match:
+            current_index = int(file_match.group(1))
+            continue
+        found_match = found_pattern.search(raw_line)
+        if current_index is not None and found_match:
+            registration = registrations.setdefault(
+                current_index,
+                SirilRegistration(index=current_index),
+            )
+            registration.detected_stars = int(found_match.group(1))
+            registration.fwhm_px = float(found_match.group(2))
+            current_index = None
+
+    for index in range(1, frame_count + 1):
+        catalog = work_dir / f"{basename}_stars_{index:05d}.tsv"
+        if not catalog.exists():
+            continue
+        fwhm_pairs: list[tuple[float, float]] = []
+        for raw_line in catalog.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not raw_line or raw_line.startswith("#"):
+                continue
+            parts = raw_line.split("\t")
+            if len(parts) < 9:
+                continue
+            try:
+                fwhm_x = float(parts[7])
+                fwhm_y = float(parts[8])
+            except ValueError:
+                continue
+            if fwhm_x > 0.0 and fwhm_y > 0.0:
+                fwhm_pairs.append((fwhm_x, fwhm_y))
+        registration = registrations.setdefault(index, SirilRegistration(index=index))
+        registration.detected_stars = len(fwhm_pairs)
+        if fwhm_pairs:
+            ratios = [min(x, y) / max(x, y) for x, y in fwhm_pairs]
+            registration.roundness = float(np.median(np.asarray(ratios, dtype=np.float64)))
+            if registration.fwhm_px is None:
+                sizes = [math.sqrt(x * y) for x, y in fwhm_pairs]
+                registration.fwhm_px = float(np.median(np.asarray(sizes, dtype=np.float64)))
+    return registrations
+
+
+def merge_registration_diagnostics(
+    registrations: dict[int, SirilRegistration],
+    diagnostics: dict[int, SirilRegistration],
+) -> dict[int, SirilRegistration]:
+    for index, diagnostic in diagnostics.items():
+        registration = registrations.setdefault(index, SirilRegistration(index=index))
+        if registration.detected_stars is None:
+            registration.detected_stars = diagnostic.detected_stars
+        if registration.fwhm_px is None:
+            registration.fwhm_px = diagnostic.fwhm_px
+        if registration.weighted_fwhm_px is None:
+            registration.weighted_fwhm_px = diagnostic.weighted_fwhm_px
+        if registration.roundness is None:
+            registration.roundness = diagnostic.roundness
+    return registrations
+
+
+def collect_failed_registration_diagnostics(
+    siril_cmd: Path | None,
+    registration_dir: Path,
+    basename: str,
+    frame_count: int,
+    verbose: bool,
+) -> dict[int, SirilRegistration]:
+    script = registration_dir / "diagnose_background_stars.ssf"
+    write_siril_findstar_script(script, basename, frame_count)
+    print(
+        f"[diagnostics] Registration failed; measuring stars in {frame_count} frame(s) individually",
+        flush=True,
+    )
+    try:
+        output = run_siril(siril_cmd, registration_dir, script, verbose)
+        return parse_siril_findstar_diagnostics(output, registration_dir, basename, frame_count)
+    except Exception as error:
+        print(f"[warning] Per-frame star diagnostics failed: {error}", file=sys.stderr, flush=True)
+        return {}
+    finally:
+        if not verbose:
+            script.unlink(missing_ok=True)
+        for index in range(1, frame_count + 1):
+            (registration_dir / f"{basename}_stars_{index:05d}.tsv").unlink(missing_ok=True)
 
 
 def registration_validation_issues(
@@ -1770,6 +1883,16 @@ def main() -> int:
             )
     except SirilRegistrationError as error:
         star_registrations = parse_siril_registration(registration_seq)
+        star_registrations = merge_registration_diagnostics(
+            star_registrations,
+            collect_failed_registration_diagnostics(
+                args.siril,
+                registration_dir,
+                args.basename,
+                len(files),
+                args.verbose,
+            ),
+        )
         match_diagnostics = parse_siril_match_diagnostics(error.output)
         registration_issues = registration_validation_issues(
             files,
@@ -1790,7 +1913,12 @@ def main() -> int:
             ),
         )
         print(f"[registration] Diagnostics: {registration_snapshot_csv}", flush=True)
-        reference_stars = siril_reference_star_count(error.output)
+        reference_registration = star_registrations.get(reference_index)
+        reference_stars = (
+            reference_registration.detected_stars
+            if reference_registration is not None
+            else siril_reference_star_count(error.output)
+        )
         if reference_stars is not None and reference_stars < args.registration_minpairs:
             print(
                 "[warning] The selected reference frame has insufficient background stars; "

@@ -62,6 +62,8 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --list-sessions
 
 基準画像の星が少なすぎます。雲、薄明、ピント不良、障害物、または視野移動直後の画像が候補です。`--reference-frame middle` または星が明瞭なファイル名を指定して再実行してください。
 
+処理が停止しても、作業フォルダの`registration_diagnostics.csv`には全フレームの`detected_stars`、`fwhm_px`、`roundness`が記録されます。まず`detected_stars`が`--registration-minpairs`以上のフレームを絞り、その中からFWHMが小さくroundnessが大きいものを`--reference-frame-file`で指定してください。
+
 ### 使用枚数が少ない、またはスタックが作られない
 
 `*_shifts.csv` の `reason` を確認してください。雲や障害物で失敗したフレームは除外されます。良好な連続区間だけを別フォルダにして再実行しても構いません。使用可能フレームが0ならスタックは作られずエラーで終了します。基準フレームまで失敗している場合は、基準を変更してください。

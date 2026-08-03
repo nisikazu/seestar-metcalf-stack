@@ -50,6 +50,8 @@ The filename is not in the selected session or time range. Use `--list-sessions`
 
 Choose a clearer reference frame. Clouds, twilight, poor focus, obstructions, and images just after a pointing adjustment are common causes. Try `--reference-frame middle` or specify a different filename.
 
+Even when processing stops, `registration_diagnostics.csv` in the work directory records `detected_stars`, `fwhm_px`, and `roundness` for every frame. First keep candidates whose `detected_stars` meets `--registration-minpairs`, then prefer a smaller FWHM and larger roundness when choosing `--reference-frame-file`.
+
 ### Few frames were stacked
 
 Open `*_shifts.csv` and inspect `reason`. Poor frames are intentionally skipped. If no usable registered frames remain, no stack is created and the run exits with an error. If the reference also fails, choose another reference.
