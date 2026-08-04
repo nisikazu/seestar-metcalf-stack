@@ -2,7 +2,7 @@ import io
 import tempfile
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -19,7 +19,83 @@ import astrometry_solve
 import horizons_ephemeris as horizons
 
 
+class FitsPatternTests(unittest.TestCase):
+    def test_pipeline_default_pattern_accepts_fit_and_fits(self):
+        with patch.object(sys, "argv", ["seestar-metcalf-stack", "frames"]):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.pattern, "*.fit*")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fit = root / "frame.fit"
+            fits = root / "frame.fits"
+            invalid = root / "frame.fits.invalid"
+            fit.touch()
+            fits.touch()
+            invalid.touch()
+            self.assertTrue(pipeline.is_fits_frame(fits))
+            self.assertTrue(pipeline.is_fits_frame(fit))
+            self.assertFalse(pipeline.is_fits_frame(invalid))
+
+    def test_pipeline_accepts_site_and_pixel_scale_overrides(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "seestar-metcalf-stack",
+                "frames",
+                "--site-longitude",
+                "139.6",
+                "--site-latitude",
+                "+35.9",
+                "--pixel-scale-arcsec",
+                "0.959",
+            ],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.site_longitude, 139.6)
+        self.assertEqual(args.site_latitude, 35.9)
+        self.assertAlmostEqual(args.pixel_scale_arcsec, 0.959)
+
+
 class HorizonsObjectResolutionTests(unittest.TestCase):
+    def test_site_override_has_priority_over_fits_header(self):
+        args = Namespace(site_longitude=139.6, site_latitude=35.9, elevation_km=None, center="fits-site")
+        frame = horizons.FitsFrame(
+            Path("frame.fits"),
+            datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "332P",
+            140.0,
+            36.0,
+            100.0,
+            None,
+            None,
+        )
+
+        center, longitude, latitude, elevation = horizons.resolve_site_coordinates(args, frame)
+
+        self.assertEqual((center, longitude, latitude), ("fits-site", 139.6, 35.9))
+        self.assertAlmostEqual(elevation, 0.1)
+
+    def test_missing_site_coordinates_fall_back_to_geocenter(self):
+        args = Namespace(site_longitude=None, site_latitude=None, elevation_km=None, center="fits-site")
+        frame = horizons.FitsFrame(
+            Path("frame.fits"),
+            datetime(2026, 8, 3, tzinfo=timezone.utc),
+            "332P",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+        with redirect_stderr(io.StringIO()):
+            center, longitude, latitude, elevation = horizons.resolve_site_coordinates(args, frame)
+
+        self.assertEqual((center, longitude, latitude, elevation), ("geocenter", None, None, None))
+
     def test_compact_periodic_comet_prefers_designation(self):
         candidates = horizons.generate_object_candidates("24PSchaumasse")
 
@@ -568,6 +644,19 @@ class AstrometryHelperTests(unittest.TestCase):
         self.assertIsNotNone(hint)
         self.assertAlmostEqual(hint["arcsecPerPix"], 2.391, places=2)
         self.assertAlmostEqual(hint["fovDeg"]["width"], 1.28, places=2)
+
+    def test_scale_hint_accepts_command_line_pixel_scale(self):
+        hint = astrometry_solve.estimate_scale_hint({"NAXIS1": 3856, "NAXIS2": 2180}, 0.959)
+
+        self.assertEqual(hint["source"], "command-line")
+        self.assertAlmostEqual(hint["arcsecPerPix"], 0.959)
+        self.assertAlmostEqual(hint["fovDeg"]["width"], 1.027, places=2)
+
+    def test_wcs_response_validation_rejects_html(self):
+        self.assertFalse(astrometry_solve.is_valid_wcs_bytes(b"<?xml version=\"1.0\"?>"))
+        simple = b"SIMPLE  =                    T".ljust(80)
+        end = b"END".ljust(80)
+        self.assertTrue(astrometry_solve.is_valid_wcs_bytes(simple + end))
 
     def test_multipart_body_contains_json_and_fits_parts(self):
         body, content_type = astrometry_solve.multipart_body(

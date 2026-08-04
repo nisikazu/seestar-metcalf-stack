@@ -4,6 +4,19 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## v0.6.0 - 2026-08-05
+
+### 追加
+
+- `.fit`と`.fits`の両方を標準入力として扱い、SharpCapのFITSを処理できるようにしました。
+- `--site-longitude`、`--site-latitude`で東経・北緯を指定でき、FITSヘッダーより優先できるようにしました。観測地情報がない場合はgeocenterへフォールバックします。
+- `--pixel-scale-arcsec`で、FITSに画素スケールがない場合の秒角/画素を指定できるようにしました。
+
+### 修正
+
+- Astrometry.netのWCS取得応答がHTMLなどの不正データだった場合に、FITSとして保存せず、正常なJSONキャリブレーションへフォールバックするようにしました。
+- SharpCapなどのフォルダ内にある`.fits.invalid`のような退避ファイルを入力対象から除外するようにしました。
+
 ## v0.5.5 - 2026-08-04
 
 ### 修正

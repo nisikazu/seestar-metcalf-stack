@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Existing or desired Horizons CSV. If omitted, one is generated automatically.",
     )
-    parser.add_argument("--pattern", default="*.fit")
+    parser.add_argument("--pattern", default="*.fit*")
     parser.add_argument("--count", type=int)
     parser.add_argument("--after", help="Keep frames at or after this UTC ISO timestamp")
     parser.add_argument("--before", help="Keep frames at or before this UTC ISO timestamp")
@@ -121,6 +121,21 @@ def parse_args() -> argparse.Namespace:
         choices=("fits-site", "geocenter"),
         default="fits-site",
         help="Observer center for auto-generated Horizons CSV. fits-site sends FITS SITELONG/SITELAT to JPL.",
+    )
+    parser.add_argument(
+        "--site-longitude",
+        type=float,
+        help="Observer longitude in degrees east. Overrides FITS SITELONG when both site coordinates are supplied.",
+    )
+    parser.add_argument(
+        "--site-latitude",
+        type=float,
+        help="Observer latitude in degrees north. Overrides FITS SITELAT when both site coordinates are supplied.",
+    )
+    parser.add_argument(
+        "--pixel-scale-arcsec",
+        type=float,
+        help="Approximate image scale in arcseconds per pixel for Astrometry.net when FITS camera metadata is missing.",
     )
     parser.add_argument("--horizons-object", help="Override Horizons object/designation for auto ephemeris")
     parser.add_argument("--horizons-command", help="Raw Horizons COMMAND value for auto ephemeris")
@@ -351,15 +366,19 @@ def repair_windows_cmd_path(path: Path) -> Path:
 
 
 def looks_like_stacked_outputs(files: list[Path]) -> bool:
-    fits_files = [path for path in files if path.suffix.lower() in {".fit", ".fits"}]
+    fits_files = [path for path in files if is_fits_frame(path)]
     return bool(fits_files) and all(path.name.lower().startswith("stacked_") for path in fits_files)
+
+
+def is_fits_frame(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in {".fit", ".fits"}
 
 
 def resolve_source_dir(source_dir: Path, pattern: str) -> Path:
     source_dir = repair_windows_cmd_path(source_dir)
-    files = sorted(source_dir.glob(pattern), key=lambda p: p.name) if source_dir.exists() else []
+    files = sorted((path for path in source_dir.glob(pattern) if is_fits_frame(path)), key=lambda p: p.name) if source_dir.exists() else []
     sub_candidate = source_dir.with_name(f"{source_dir.name}_sub")
-    sub_files = sorted(sub_candidate.glob(pattern), key=lambda p: p.name) if sub_candidate.exists() else []
+    sub_files = sorted((path for path in sub_candidate.glob(pattern) if is_fits_frame(path)), key=lambda p: p.name) if sub_candidate.exists() else []
     if sub_files and (not files or looks_like_stacked_outputs(files)):
         print(f"Using subframe directory: {sub_candidate}", file=sys.stderr)
         return sub_candidate
@@ -371,7 +390,7 @@ def is_failed_frame(path: Path) -> bool:
 
 
 def load_dated_files(source_dir: Path, pattern: str, include_failed_frames: bool = False) -> list[tuple[datetime, Path]]:
-    files = sorted(source_dir.glob(pattern), key=lambda p: p.name)
+    files = sorted((path for path in source_dir.glob(pattern) if is_fits_frame(path)), key=lambda p: p.name)
     if not files:
         raise FileNotFoundError(f"No files matching {pattern} in {source_dir}")
     if not include_failed_frames:
@@ -552,6 +571,10 @@ def ensure_ephemeris(args: argparse.Namespace, first_frame: Path, session_index:
     )
     if args.horizons_center == "fits-site":
         cmd.append("--allow-site-upload")
+    if args.site_longitude is not None:
+        cmd.extend(["--site-longitude", str(args.site_longitude)])
+    if args.site_latitude is not None:
+        cmd.extend(["--site-latitude", str(args.site_latitude)])
     if args.verbose:
         cmd.append("--verbose")
     if args.horizons_object:
@@ -723,6 +746,8 @@ def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path
         "astrometry_solve.py",
         [str(upload_frame), str(json_path), str(wcs_path)],
     )
+    if args.pixel_scale_arcsec is not None:
+        solve_command.extend(["--pixel-scale-arcsec", str(args.pixel_scale_arcsec)])
     resume_subid = cached_submission_id(json_path)
     if resume_subid:
         print(f"Resuming cached Astrometry.net submission {resume_subid} for {first_frame.name}.", flush=True)

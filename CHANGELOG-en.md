@@ -4,6 +4,19 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.6.0 - 2026-08-05
+
+### Added
+
+- Accept both `.fit` and `.fits` as standard input files, including FITS exported by SharpCap.
+- Add `--site-longitude` and `--site-latitude` for east-positive longitude and north-positive latitude overrides. If no site is available in the FITS or command line, Horizons now falls back to the geocenter.
+- Add `--pixel-scale-arcsec` for files that do not record their image scale.
+
+### Fixed
+
+- Validate Astrometry.net WCS downloads before saving them. HTML or other non-FITS responses are rejected and the valid JSON calibration is used instead.
+- Ignore backup files such as `.fits.invalid` when the default `*.fit*` pattern is used.
+
 ## v0.5.5 - 2026-08-04
 
 ### Fixed

@@ -170,7 +170,27 @@ def positive_number(value: object) -> float | None:
     return number if math.isfinite(number) and number > 0 else None
 
 
-def estimate_scale_hint(header: dict[str, object]) -> dict | None:
+def estimate_scale_hint(header: dict[str, object], pixel_scale_arcsec: float | None = None) -> dict | None:
+    if pixel_scale_arcsec is not None:
+        if not math.isfinite(pixel_scale_arcsec) or pixel_scale_arcsec <= 0:
+            raise ValueError("--pixel-scale-arcsec must be a positive finite number")
+        width = positive_number(header.get("NAXIS1"))
+        height = positive_number(header.get("NAXIS2"))
+        return {
+            "arcsecPerPix": pixel_scale_arcsec,
+            "lower": pixel_scale_arcsec * max(0.05, 1 - SCALE_MARGIN),
+            "upper": pixel_scale_arcsec * (1 + SCALE_MARGIN),
+            "source": "command-line",
+            "fovDeg": (
+                {
+                    "width": width * pixel_scale_arcsec / 3600,
+                    "height": height * pixel_scale_arcsec / 3600,
+                    "diagonal": math.hypot(width * pixel_scale_arcsec, height * pixel_scale_arcsec) / 3600,
+                }
+                if width and height
+                else None
+            ),
+        }
     focal_mm = positive_number(header.get("FOCALLEN"))
     x_pix_um = positive_number(header.get("XPIXSZ"))
     y_pix_um = positive_number(header.get("YPIXSZ"))
@@ -205,9 +225,13 @@ def estimate_scale_hint(header: dict[str, object]) -> dict | None:
     }
 
 
-def upload_file(session: str, file_path: pathlib.Path) -> tuple[dict, dict, dict, dict]:
+def upload_file(
+    session: str,
+    file_path: pathlib.Path,
+    pixel_scale_arcsec: float | None = None,
+) -> tuple[dict, dict, dict, dict]:
     header = read_fits_header(file_path)
-    scale_hint = estimate_scale_hint(header)
+    scale_hint = estimate_scale_hint(header, pixel_scale_arcsec)
     request = {
         "session": session,
         "publicly_visible": "n",
@@ -283,20 +307,41 @@ def angular_separation_deg(ra1: float, dec1: float, ra2: float, dec2: float) -> 
     return math.acos(max(-1.0, min(1.0, cosine))) / d2r
 
 
-def parse_args(argv: list[str]) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, str]:
-    fits_path = pathlib.Path(argv[0]) if len(argv) > 0 else DEFAULT_FILE
-    output_path = pathlib.Path(argv[1]) if len(argv) > 1 else SCRIPT_DIR / "downloads" / "98943_Torifune_astrometry_result.json"
-    wcs_path = pathlib.Path(argv[2]) if len(argv) > 2 else output_path.with_name(output_path.stem + "_wcs.fits")
-    resume_id = argv[3] if len(argv) > 3 else os.environ.get("ASTROMETRY_NET_SUBID", "")
-    return fits_path, output_path, wcs_path, resume_id
+def parse_args(argv: list[str]) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, str, float | None]:
+    positional: list[str] = []
+    pixel_scale_arcsec: float | None = None
+    index = 0
+    while index < len(argv):
+        if argv[index] == "--pixel-scale-arcsec":
+            if index + 1 >= len(argv):
+                raise ValueError("--pixel-scale-arcsec requires a value")
+            pixel_scale_arcsec = float(argv[index + 1])
+            index += 2
+            continue
+        positional.append(argv[index])
+        index += 1
+    fits_path = pathlib.Path(positional[0]) if len(positional) > 0 else DEFAULT_FILE
+    output_path = pathlib.Path(positional[1]) if len(positional) > 1 else SCRIPT_DIR / "downloads" / "98943_Torifune_astrometry_result.json"
+    wcs_path = pathlib.Path(positional[2]) if len(positional) > 2 else output_path.with_name(output_path.stem + "_wcs.fits")
+    resume_id = positional[3] if len(positional) > 3 else os.environ.get("ASTROMETRY_NET_SUBID", "")
+    return fits_path, output_path, wcs_path, resume_id, pixel_scale_arcsec
+
+
+def is_valid_wcs_bytes(data: bytes) -> bool:
+    if len(data) < 80 or data[:8] != b"SIMPLE  ":
+        return False
+    for offset in range(0, min(len(data), 2880 * 32), 80):
+        if data[offset : offset + 8].rstrip() == b"END":
+            return True
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
-    fits_path, output_path, wcs_path, resume_id = parse_args(argv or sys.argv[1:])
+    fits_path, output_path, wcs_path, resume_id, pixel_scale_arcsec = parse_args(argv or sys.argv[1:])
     if not fits_path.exists():
         raise FileNotFoundError(f"FITS file not found: {fits_path}")
     header = read_fits_header(fits_path)
-    scale_hint = estimate_scale_hint(header)
+    scale_hint = estimate_scale_hint(header, pixel_scale_arcsec)
     upload = None
     request = {"resumed": True}
     submission_id = resume_id.strip()
@@ -306,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Uploading {fits_path}")
         session = login(read_api_key())
         print("Astrometry login succeeded")
-        upload, request, header, scale_hint = upload_file(session, fits_path)
+        upload, request, header, scale_hint = upload_file(session, fits_path, pixel_scale_arcsec)
         submission_id = str(upload["subid"])
         print(f"Submission id: {submission_id}")
         if scale_hint:
@@ -343,9 +388,18 @@ def main(argv: list[str] | None = None) -> int:
     if status.get("status") == "success":
         try:
             wcs_data = request_bytes(f"{API_BASE}/jobs/{job_id}/wcs_file/")
-            wcs_path.parent.mkdir(parents=True, exist_ok=True)
-            wcs_path.write_bytes(wcs_data)
-            wcs_download = {"filePath": str(wcs_path), "bytes": len(wcs_data)}
+            if not is_valid_wcs_bytes(wcs_data):
+                preview = wcs_data[:120].decode("utf-8", errors="replace").replace("\n", " ")
+                wcs_download = {
+                    "error": "Astrometry.net returned a non-FITS WCS response",
+                    "response_preview": preview,
+                    "bytes": len(wcs_data),
+                }
+                print("Warning: Astrometry.net WCS response was not a valid FITS file; using JSON calibration.", file=sys.stderr)
+            else:
+                wcs_path.parent.mkdir(parents=True, exist_ok=True)
+                wcs_path.write_bytes(wcs_data)
+                wcs_download = {"filePath": str(wcs_path), "bytes": len(wcs_data)}
         except Exception as error:
             wcs_download = {"error": str(error)}
 

@@ -1521,15 +1521,19 @@ def repair_windows_cmd_path(path: Path) -> Path:
 
 
 def looks_like_stacked_outputs(files: list[Path]) -> bool:
-    fits_files = [path for path in files if path.suffix.lower() in {".fit", ".fits"}]
+    fits_files = [path for path in files if is_fits_frame(path)]
     return bool(fits_files) and all(path.name.lower().startswith("stacked_") for path in fits_files)
+
+
+def is_fits_frame(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in {".fit", ".fits"}
 
 
 def resolve_source_dir(source_dir: Path, pattern: str) -> Path:
     source_dir = repair_windows_cmd_path(source_dir)
-    files = sorted(source_dir.glob(pattern), key=lambda p: p.name) if source_dir.exists() else []
+    files = sorted((path for path in source_dir.glob(pattern) if is_fits_frame(path)), key=lambda p: p.name) if source_dir.exists() else []
     sub_candidate = source_dir.with_name(f"{source_dir.name}_sub")
-    sub_files = sorted(sub_candidate.glob(pattern), key=lambda p: p.name) if sub_candidate.exists() else []
+    sub_files = sorted((path for path in sub_candidate.glob(pattern) if is_fits_frame(path)), key=lambda p: p.name) if sub_candidate.exists() else []
     if sub_files and (not files or looks_like_stacked_outputs(files)):
         print(f"Using subframe directory: {sub_candidate}", file=sys.stderr)
         return sub_candidate
@@ -1542,7 +1546,7 @@ def is_failed_frame(path: Path) -> bool:
 
 def choose_files(source_dir: Path, pattern: str, count: int | None, include_failed_frames: bool = False) -> list[Path]:
     source_dir = resolve_source_dir(source_dir, pattern)
-    files = sorted(source_dir.glob(pattern), key=lambda p: p.name)
+    files = sorted((path for path in source_dir.glob(pattern) if is_fits_frame(path)), key=lambda p: p.name)
     if not include_failed_frames:
         original_count = len(files)
         files = [path for path in files if not is_failed_frame(path)]
@@ -1663,7 +1667,7 @@ def main() -> int:
     parser.add_argument("--work-dir", type=Path, help="Use this exact work directory instead of creating one under --work-root")
     parser.add_argument("--work-root", type=Path, default=REPO_ROOT / "metcalf_output")
     parser.add_argument("--work-name", help="Work directory stem. Defaults to '<OBJECT>_<method>'.")
-    parser.add_argument("--pattern", default="*.fit")
+    parser.add_argument("--pattern", default="*.fit*")
     parser.add_argument("--count", type=int)
     parser.add_argument("--after", help="Keep frames at or after this UTC ISO timestamp")
     parser.add_argument("--before", help="Keep frames at or before this UTC ISO timestamp")

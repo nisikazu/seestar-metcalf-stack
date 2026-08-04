@@ -18,7 +18,14 @@
 - Sirilが登録途中で非ゼロ終了した場合も、出力の `Found N stars in reference` を解析して基準星不足を明示する。
 - CLIではPython Tracebackを直接表示せず、原因と復旧操作を示す短い`Error:`を表示する。Tracebackは公開版ランチャーの実行ログだけに残し、子処理の`ERROR:`を親処理が一度だけ表示する。
 
-最終更新: 2026-08-04
+## 2026-08-05: 一般FITSとSharpCap対応
+
+- 入力の既定パターンを`*.fit*`とし、実際には拡張子が`.fit`または`.fits`の通常ファイルだけを採用する。これによりSharpCapの`.fits`を扱いつつ、`.fits.invalid`などを除外する。
+- Horizonsの観測地はCLIの`--site-longitude`/`--site-latitude`を優先し、次にFITSの`SITELONG`/`SITELAT`を使う。どちらもない場合はgeocenterへフォールバックする。
+- Astrometry.netへ送る画素スケールはFITSの焦点距離・画素サイズから推定し、欠落時は`--pixel-scale-arcsec`を使う。Astrometry側の検索範囲だけに使い、画像の実データを変換しない。
+- WCSダウンロードは`SIMPLE`と`END`カードを確認してから保存する。HTMLログインページなどが返った場合も、JSON calibrationで処理を継続できる。
+
+最終更新: 2026-08-05
 
 この文書は、Seestar Metcalf Stackを改造する人、保守する人、または開発を
 引き継ぐ人のための技術記録です。一般利用者向けの操作方法は`README.md`、
@@ -27,7 +34,7 @@ macOSの導入方法は`README-macOS.md`、リリース作業は`PUBLISHING.md`�
 
 ## 現在の状態
 
-- 最新の公開Releaseは`v0.5.5`です。
+- 最新の公開Releaseは`v0.6.0`です。
 - `v0.5.1`にはHorizons復旧手順、座標CSVの補間・外挿説明、
   Astrometry.net APIキー取得手順の改善、飽和警告、開発文書の配布同梱が
   含まれます。
@@ -181,6 +188,7 @@ CSVにはフレームごとの最大値、判定閾値、飽和画素数を、su
 | v0.5.1 / 2026-07-25 | 上記のREADME改善と飽和警告を公開。`DEVELOPMENT.md`、`PUBLISHING.md`、`README-Siril-CLI.md`を両配布ZIPへ同梱 |
 | v0.5.4 / 2026-08-02 | 有効画素だけを画素別枚数で正規化する平均スタック、登録診断CSV、利用者向けエラー表示を追加 |
 | v0.5.5 / 2026-08-04 | 登録が全面失敗した場合も全デベイヤ画像を個別に星検出し、診断CSVへ検出星数、FWHM、roundnessを残す処理を追加 |
+| v0.6.0 / 2026-08-05 | SharpCapなどの一般FITS対応、観測地と画素スケールのCLI指定、geocenterフォールバック、Astrometry.net不正WCS応答の検証を追加 |
 
 初回公開時点ですでに含まれていた重要な試作改良には、次のものがあります。
 

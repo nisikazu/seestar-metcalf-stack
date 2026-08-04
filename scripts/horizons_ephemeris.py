@@ -84,6 +84,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Required with --center fits-site to acknowledge sending FITS site coordinates to JPL Horizons.",
     )
+    parser.add_argument("--site-longitude", type=float, help="Observer longitude in degrees east; overrides FITS SITELONG.")
+    parser.add_argument("--site-latitude", type=float, help="Observer latitude in degrees north; overrides FITS SITELAT.")
     parser.add_argument("--elevation-km", type=float, help="Override site elevation in km for --center fits-site")
     parser.add_argument("--chunk-size", type=int, default=50, help="Number of timestamps per Horizons request")
     parser.add_argument("--retries", type=int, default=3, help="Retries per Horizons request")
@@ -200,6 +202,25 @@ def load_frames(source_dir: Path, limit: int | None = None) -> list[FitsFrame]:
 
 def is_failed_frame(path: Path) -> bool:
     return "_failed_" in path.name.lower()
+
+
+def resolve_site_coordinates(args: argparse.Namespace, frame: FitsFrame) -> tuple[str, float | None, float | None, float | None]:
+    """Resolve CLI-overridden or FITS site coordinates and apply geocenter fallback."""
+    if (args.site_longitude is None) != (args.site_latitude is None):
+        raise SystemExit("--site-longitude and --site-latitude must be supplied together")
+    site_long = args.site_longitude if args.site_longitude is not None else frame.site_long_deg
+    site_lat = args.site_latitude if args.site_latitude is not None else frame.site_lat_deg
+    site_elev_km = args.elevation_km
+    if site_elev_km is None and frame.site_elevation_m is not None:
+        site_elev_km = frame.site_elevation_m / 1000.0
+    center = args.center
+    if center == "fits-site" and (site_long is None or site_lat is None):
+        print("FITS site coordinates are unavailable; falling back to geocenter.", file=sys.stderr)
+        center = "geocenter"
+        site_long = None
+        site_lat = None
+        site_elev_km = None
+    return center, site_long, site_lat, site_elev_km
 
 
 def filter_frames(args: argparse.Namespace, frames: list[FitsFrame]) -> list[FitsFrame]:
@@ -565,11 +586,7 @@ def main() -> int:
     object_name = args.object or frames[0].object_name
     if not object_name and not args.command:
         raise SystemExit("Target object was not provided and FITS OBJECT header is missing")
-    site_long = frames[0].site_long_deg
-    site_lat = frames[0].site_lat_deg
-    site_elev_km = args.elevation_km
-    if site_elev_km is None and frames[0].site_elevation_m is not None:
-        site_elev_km = frames[0].site_elevation_m / 1000.0
+    args.center, site_long, site_lat, site_elev_km = resolve_site_coordinates(args, frames[0])
 
     if args.center == "fits-site" and not args.allow_site_upload:
         raise SystemExit(

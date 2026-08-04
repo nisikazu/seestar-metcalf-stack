@@ -27,6 +27,37 @@ Before using it, observe a comet or asteroid and keep the original frame files.
 4. Drag the subframe directory onto `seestar-metcalf-stack.cmd`, or run the
    command shown below.
 
+The default input pattern is `*.fit*`, so both `.fit` and `.fits` files are
+accepted. Other files in the directory are not sent to Siril. This also allows
+FITS frames exported by SharpCap to be used. If the FITS files do not contain
+an observing site, Horizons automatically falls back to the geocenter. You can
+provide a site explicitly, with east-positive longitude and north-positive
+latitude:
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --site-longitude 139.6 --site-latitude 35.9
+```
+
+The command-line site coordinates take precedence over `SITELONG` and `SITELAT`
+in the FITS headers. If the FITS camera metadata does not provide a pixel
+scale, provide the approximate scale in **arcseconds per pixel**. With effective
+focal length in mm and pixel pitch in micrometers, calculate it as:
+
+```text
+pixel scale [arcsec/pixel] = 206.265 * pixel pitch [um] / effective focal length [mm]
+```
+
+For binned images, multiply the physical pixel pitch by the binning factor.
+For example, 250 mm and 2.9 um gives `206.265 * 2.9 / 250 = 2.392` arcsec/pixel.
+
+```bat
+seestar-metcalf-stack.cmd "C:\path\to\frames" --pixel-scale-arcsec 2.392
+```
+
+Astrometry.net's JSON calibration is sufficient for stacking. If its optional
+WCS download returns an HTML error page or another non-FITS response, the tool
+rejects that response and continues with the valid JSON calibration instead.
+
 ## External tools
 
 The raw subframes do not by themselves provide the complete answer to three
