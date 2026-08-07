@@ -12,6 +12,14 @@ $PackageRoot = Join-Path $DistRoot $PackageName
 $SirilSource = Join-Path $Root "tools\siril-1.4.1\siril"
 $SirilTarget = Join-Path $PackageRoot "tools\siril-1.4.1\siril"
 $ExeSource = Join-Path $Root "build\seestar-metcalf-stack.exe"
+$CaBundleSource = Join-Path $Root "cacert.pem"
+
+if (-not (Test-Path -LiteralPath $CaBundleSource)) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "get-cacert.ps1")
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $CaBundleSource)) {
+        throw "CA bundle was not downloaded: $CaBundleSource"
+    }
+}
 
 if (-not (Test-Path $SirilSource)) {
     throw "Bundled Siril was not found: $SirilSource"
@@ -63,6 +71,8 @@ Copy-Item -LiteralPath (Join-Path $Root "setup-python-deps.cmd") -Destination (J
 Copy-Item -LiteralPath (Join-Path $Root "setup-macos.sh") -Destination (Join-Path $PackageRoot "setup-macos.sh")
 Copy-Item -LiteralPath (Join-Path $Root "set-astrometry-api-key.cmd") -Destination (Join-Path $PackageRoot "set-astrometry-api-key.cmd")
 Copy-Item -LiteralPath (Join-Path $Root "set-astrometry-api-key.sh") -Destination (Join-Path $PackageRoot "set-astrometry-api-key.sh")
+Copy-Item -LiteralPath (Join-Path $Root "get-cacert.ps1") -Destination (Join-Path $PackageRoot "get-cacert.ps1")
+Copy-Item -LiteralPath (Join-Path $Root "get-cacert.sh") -Destination (Join-Path $PackageRoot "get-cacert.sh")
 Copy-Item -LiteralPath (Join-Path $Root "macos\SeestarMetcalfStackLauncher.applescript") -Destination (Join-Path $PackageRoot "macos\SeestarMetcalfStackLauncher.applescript")
 Copy-Item -LiteralPath (Join-Path $Root "macos\build-droplet.sh") -Destination (Join-Path $PackageRoot "macos\build-droplet.sh")
 Copy-Item -LiteralPath (Join-Path $Root "siril-cli.cmd") -Destination (Join-Path $PackageRoot "siril-cli.cmd")
@@ -75,6 +85,7 @@ Copy-Item -LiteralPath (Join-Path $Root ".gitignore") -Destination (Join-Path $P
 Copy-Item -LiteralPath (Join-Path $Root ".github\workflows\tests.yml") -Destination (Join-Path $PackageRoot ".github\workflows\tests.yml")
 Copy-Item -LiteralPath (Join-Path $Root ".github\ISSUE_TEMPLATE\bug_report.md") -Destination (Join-Path $PackageRoot ".github\ISSUE_TEMPLATE\bug_report.md")
 Copy-Item -LiteralPath $ExeSource -Destination (Join-Path $PackageRoot "seestar-metcalf-stack.exe")
+Copy-Item -LiteralPath $CaBundleSource -Destination (Join-Path $PackageRoot "cacert.pem")
 
 Copy-Item -LiteralPath $SirilSource -Destination $SirilTarget -Recurse
 

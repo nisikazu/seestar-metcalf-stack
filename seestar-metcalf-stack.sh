@@ -3,6 +3,11 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
+if [ -f "$ROOT/cacert.pem" ]; then
+    export SSL_CERT_FILE="$ROOT/cacert.pem"
+    export REQUESTS_CA_BUNDLE="$ROOT/cacert.pem"
+fi
+
 if [ -x "$ROOT/seestar-metcalf-stack-macos" ]; then
     exec "$ROOT/seestar-metcalf-stack-macos" "$@"
 fi

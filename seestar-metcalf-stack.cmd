@@ -2,6 +2,11 @@
 setlocal EnableExtensions
 set "ROOT=%~dp0"
 
+if exist "%ROOT%cacert.pem" (
+  set "SSL_CERT_FILE=%ROOT%cacert.pem"
+  set "REQUESTS_CA_BUNDLE=%ROOT%cacert.pem"
+)
+
 if exist "%ROOT%seestar-metcalf-stack.exe" (
   "%ROOT%seestar-metcalf-stack.exe" %*
   exit /b %ERRORLEVEL%

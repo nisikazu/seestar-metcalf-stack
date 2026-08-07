@@ -10,6 +10,14 @@ $PackageName = "seestar-metcalf-stack-v$Version"
 $DistRoot = Join-Path $Root "dist"
 $PackageRoot = Join-Path $DistRoot $PackageName
 $ExeSource = Join-Path $Root "build\seestar-metcalf-stack.exe"
+$CaBundleSource = Join-Path $Root "cacert.pem"
+
+if (-not (Test-Path -LiteralPath $CaBundleSource)) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "get-cacert.ps1")
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $CaBundleSource)) {
+        throw "CA bundle was not downloaded: $CaBundleSource"
+    }
+}
 
 if (-not (Test-Path -LiteralPath $ExeSource)) {
     throw "Bundled executable was not found: $ExeSource. Run build-seestar-metcalf-stack-exe.ps1 first."
@@ -56,6 +64,8 @@ $Files = @(
     @("setup-macos.sh", "setup-macos.sh"),
     @("set-astrometry-api-key.cmd", "set-astrometry-api-key.cmd"),
     @("set-astrometry-api-key.sh", "set-astrometry-api-key.sh"),
+    @("get-cacert.ps1", "get-cacert.ps1"),
+    @("get-cacert.sh", "get-cacert.sh"),
     @("macos\SeestarMetcalfStackLauncher.applescript", "macos\SeestarMetcalfStackLauncher.applescript"),
     @("macos\build-droplet.sh", "macos\build-droplet.sh"),
     @("siril-cli.cmd", "siril-cli.cmd"),
@@ -77,6 +87,7 @@ foreach ($Pair in $Files) {
 }
 
 Copy-Item -LiteralPath $ExeSource -Destination (Join-Path $PackageRoot "seestar-metcalf-stack.exe")
+Copy-Item -LiteralPath $CaBundleSource -Destination (Join-Path $PackageRoot "cacert.pem")
 
 if (-not $NoZip) {
     $ZipPath = Join-Path $DistRoot "$PackageName.zip"

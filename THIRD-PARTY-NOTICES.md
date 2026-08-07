@@ -33,3 +33,11 @@ PyInstaller. Their own licenses continue to apply to those embedded copies.
 The Windows executable contains the Python runtime and is assembled with
 PyInstaller. Python and PyInstaller remain subject to their respective upstream
 licenses. Node.js is not required or bundled by this project.
+
+## Public CA bundle
+
+Release packages include `cacert.pem`, a public CA certificate bundle used by
+the bundled Python runtime for HTTPS verification. It is downloaded from the
+curl CA bundle endpoint by `get-cacert.ps1` or `get-cacert.sh` during packaging.
+The PEM file is intentionally excluded from the source repository and should
+be refreshed when preparing a new release.
