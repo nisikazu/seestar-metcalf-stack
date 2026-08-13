@@ -15,13 +15,13 @@ This document explains recent Seestar Metcalf Stack behavior, common failures, a
 The first frame is the default. For a long session, choose the temporal midpoint with:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
 ```
 
 To select a specific subframe, pass its filename, not the folder path:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
 ```
 
 Quote paths and filenames containing spaces. On Windows, do not put a trailing `\` immediately before the closing quote.
@@ -41,6 +41,32 @@ Inspect `*_shifts.csv` in the output folder:
 For example, `Stacked 53/64 frames; skipped 11` means that 53 of 64 selected frames were used. If too many frames are skipped, choose another session with `--session-index` or `--session-at`, or make a folder containing only a good continuous interval.
 
 ## Common problems
+
+### Downloaded `.cmd` or `.exe` files do not run
+
+Windows may have blocked files extracted from a ZIP downloaded from the
+Internet. Right-click the ZIP downloaded from the official
+[GitHub Releases](https://github.com/nisikazu/seestar-metcalf-stack/releases)
+page, open `Properties`, and select `Unblock` on the `General` tab if that
+option is shown. Click `OK`, then extract the ZIP.
+
+If the package has already been extracted, unblock the original ZIP and extract
+it again into a new empty directory. Do not unblock ZIP files from an unknown
+source.
+
+### PowerShell says the command is not recognized
+
+PowerShell does not search the current directory for commands by default. Open
+the installation directory in Explorer, right-click an empty area, choose
+`Open in Terminal`, and prefix local commands with `.\`:
+
+```bat
+.\set-astrometry-api-key.cmd YOUR_API_KEY
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --list-sessions
+```
+
+No terminal command is needed for the basic workflow of dragging a subframe
+folder onto `seestar-metcalf-stack.cmd`.
 
 ### `--reference-frame-file was not found`
 

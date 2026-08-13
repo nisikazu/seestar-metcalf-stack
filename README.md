@@ -28,7 +28,7 @@ SharpCapのFITSを使う場合は、撮影前に次の設定を確認してく�
 通常はSharpCapで設定した焦点距離と観測地がFITSへ記録され、それを利用できます。FITSに観測地が記録されていない場合は、東経を正、北緯を正としてコマンドから指定できます。コマンド指定はFITSの値より優先されます。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\SharpCap\frames" --site-longitude 139.6 --site-latitude +35.9
+.\seestar-metcalf-stack.cmd "C:\path\to\SharpCap\frames" --site-longitude 139.6 --site-latitude +35.9
 ```
 
 FITSに焦点距離や画素サイズが記録されていない場合は、画素あたりの角度を**秒角/画素（arcsec/pixel）**で指定します。値は、実効焦点距離をmm、画素ピッチをµmとして、次の式で計算できます。
@@ -40,7 +40,7 @@ FITSに焦点距離や画素サイズが記録されていない場合は、画�
 ビニングを行っている場合は、画素ピッチにビニング倍率を掛けた実効画素ピッチを使います。例えば、実効焦点距離250 mm、画素ピッチ2.9 µmなら、`206.265 × 2.9 ÷ 250 = 2.392` 秒角/画素です。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\SharpCap\frames" --pixel-scale-arcsec 2.392
+.\seestar-metcalf-stack.cmd "C:\path\to\SharpCap\frames" --pixel-scale-arcsec 2.392
 ```
 
 FITSにもコマンドにも観測地がない場合は、JPL Horizonsの計算中心を自動的に地心へ切り替えます。
@@ -79,27 +79,29 @@ Pythonコードを改造した場合は、古いEXEが優先実行されない�
 
 ## 初回セットアップ
 
-1. Siril未導入なら、Siril同梱版を展開します。通常のEXE実行だけなら、これでPython依存パッケージのインストールは不要です。
-2. Sirilを別途利用する場合は、Sirilをインストールし、`siril-cli.exe` をPATHへ追加するか `SIRIL_CLI` を設定します。Sirilなし版を使う場合も同じです。
-3. Pythonコードを実行・改造する場合だけ、展開したフォルダで依存パッケージを準備します。
+1. [GitHub Releases](https://github.com/nisikazu/seestar-metcalf-stack/releases)から使用するZIPをダウンロードします。
+2. ZIPを展開する前に右クリックして`プロパティ`を開きます。`全般`タブ下部の`セキュリティ`に「このファイルは他のコンピューターから取得したものです」と表示されている場合は、`許可する`をチェックして`OK`を押してから展開します。この欄がなければ、そのまま展開できます。この操作は公式GitHub Releasesから取得したZIPにだけ行ってください。
+3. Siril未導入なら、Siril同梱版を展開します。通常のEXE実行だけなら、これでPython依存パッケージのインストールは不要です。
+4. Sirilを別途利用する場合は、Sirilをインストールし、`siril-cli.exe` をPATHへ追加するか `SIRIL_CLI` を設定します。Sirilなし版を使う場合も同じです。
+5. Pythonコードを実行・改造する場合だけ、展開したフォルダで依存パッケージを準備します。
 
    ```bat
-   setup-python-deps.cmd
+   .\setup-python-deps.cmd
    ```
 
-4. Astrometry.netのAPIキーを次の手順で取得します。
+6. Astrometry.netのAPIキーを次の手順で取得します。
 
    1. ブラウザで[Astrometry.netのログイン画面](https://nova.astrometry.net/signin)を開きます。
    2. Googleアカウントなど、画面に表示される外部認証を使ってログイン、または新規登録します。
    3. ログイン後、画面上部の `API` または `API Help` を開きます。[API Helpを直接開く](https://nova.astrometry.net/api_help)こともできます。
    4. ページに表示される `Your API key is xxxxxx...` の英数字部分をコピーします。
 
-5. Windowsで展開したSeestar Metcalf Stackのフォルダをエクスプローラーで開きます。ファイルではなくフォルダ内の空いている場所を右クリックし、`ターミナルで開く`を選びます。
+7. Windowsで展開したSeestar Metcalf Stackのフォルダをエクスプローラーで開きます。ファイルではなくフォルダ内の空いている場所を右クリックし、`ターミナルで開く`を選びます。
 
-6. 開いたターミナルで、`YOUR_API_KEY`を手順4でコピーした文字列に置き換えて実行します。
+8. 開いたターミナルで、`YOUR_API_KEY`を手順6でコピーした文字列に置き換えて実行します。PowerShellでは現在のフォルダにあるコマンドを実行するとき、先頭に`.\`が必要です。
 
    ```bat
-   set-astrometry-api-key.cmd YOUR_API_KEY
+   .\set-astrometry-api-key.cmd YOUR_API_KEY
    ```
 
 キーはツールと同じフォルダの `.astrometry_api_key` に保存されます。
@@ -109,7 +111,7 @@ Pythonコードを改造した場合は、古いEXEが優先実行されない�
 まずサブフレームフォルダ内の撮影セッションを一覧表示できます。この操作はローカルだけで完結し、Astrometry.net、Horizons、Sirilを呼びません。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\98943 Torifune_sub" --list-sessions
+.\seestar-metcalf-stack.cmd "C:\path\to\98943 Torifune_sub" --list-sessions
 ```
 
 一覧には1から始まるセッション番号、フレーム数、ローカル時刻とUTCの開始・終了時刻が表示されます。連続するFITSの間隔が60分を超えたところで別セッションになります。何も指定しなければ最新セッションを処理します。
@@ -117,13 +119,13 @@ seestar-metcalf-stack.cmd "C:\path\to\98943 Torifune_sub" --list-sessions
 一覧の番号で選ぶ場合:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --session-index 2
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --session-index 2
 ```
 
 指定したローカル日時以後に開始する最初のセッションを選ぶ場合:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --session-at 20260709-195000
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --session-at 20260709-195000
 ```
 
 `--session-at` は `YYYYMMDD` または `YYYYMMDD-hhmmss` 形式です。時刻はPCのローカル時刻として解釈されます。省略した時刻桁は `00`、時分秒の1桁指定や範囲外値も `00`、範囲外の月日は `01` として扱います。
@@ -133,7 +135,7 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --session-at 20260709-195000
 最新セッションを平均処理し、先頭フレームを基準にする基本実行:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\C2025 R2 (SWAN)_sub"
+.\seestar-metcalf-stack.cmd "C:\path\to\C2025 R2 (SWAN)_sub"
 ```
 
 基本的な使い方は、処理したいサブフレームフォルダを `seestar-metcalf-stack.cmd`へドラッグ&ドロップするだけです。成功すると出力フォルダが開きます。セッション、処理方式、天体名などを指定する場合は、インストールフォルダの空いている場所を右クリックして`ターミナルで開く`を選び、上記の例のようにオプションを付けて実行してください。
@@ -161,31 +163,31 @@ Sirilの背景星位置合わせでは、デベイヤ済み画像と登録済み
 デフォルトの平均は、入力が良好なら一般に最も高いS/Nを得やすい方式です。Sirilの位置合わせやメトカーフシフトによって画像外になった画素は加算せず、画素ごとの整数の寄与枚数で割ります。補間に必要な4近傍がすべて実画像内にある場合だけ採用するため、外挿を行わず、重なり枚数が少ない周辺部でも平均輝度が暗くなりません。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean
 ```
 
 以前の版と同じpadding処理を再現して比較する場合だけ、`--padding-policy legacy`を指定します。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean --padding-policy legacy
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean --padding-policy legacy
 ```
 
 画素ごとのメジアンは、人工衛星、飛行機、ホットピクセルなど少数フレームだけに現れる外れ値に強い方式です。メジアンはメトカーフスタッキング像において星の軌跡を低減し、彗星光度の精度向上を図ります。一方で平均より遅く、大きなディスク上の一時配列を使い、統計的な効率も通常は平均より低くなります。メジアンでは登録・シフト境界に現れる完全な0をデフォルトで母集団から除外します。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median
 ```
 
 厳密な0も中央値の母集団に含めて従来処理と比較する場合は、`--zero-sample-policy include`を追加します。この指定はランクフィットにも適用されます。ただし、重なりの少ない領域ではpaddingの0が中央値を占め、真っ黒な領域が広く発生するため、通常のスタックには非推奨です。旧版との比較など、0を含める必要が明確な場合だけ使用してください。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median --zero-sample-policy include
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median --zero-sample-policy include
 ```
 
 ランクフィットは、各画素の非0サンプルを明るさ順に並べ、中央の指定割合を採用し、正規化順位に対する明るさを5次多項式でフィットして中央値順位での関数値を返します。既定の採用率は50%です。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method rankfit --rankfit-fraction 50
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method rankfit --rankfit-fraction 50
 ```
 
 `--rankfit-fraction` は1〜100の整数です。出力名と実行フォルダには `rankfit5_p50` のように採用率を記録します。中央候補が7点未満の画素は非0メジアンへフォールバックします。
@@ -197,13 +199,13 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method rankfit --rankfit-f
 デフォルトは先頭フレームです。長時間セッションでは、撮影開始と終了の時刻中間に最も近いフレームを基準にすると、最大の位置合わせ量や天体シフト量を抑えられます。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
 ```
 
 任意のサブフレームを基準にする場合は、番号ではなくファイル名を指定します。空白を含む名前は引用符で囲みます。選んだ基準フレームで `--registration-minpairs`（既定6）以上の背景星対を取得できない場合は、警告して処理を中止します。雲の通過などで登録できない他のフレームは、shifts CSVに理由を記録して除外し、利用可能なフレームだけをスタックします。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
 ```
 
 選ばれたフレームがAstrometry.netへ送られ、Sirilの位置合わせ基準にも明示設定されます。最終FITSの `DATE-OBS` とWCS座標はこの基準フレームを反映します。`REFMODE`、`REFINDEX`、`MTREFRA`、`MTREFDEC` にも基準情報を残します。
@@ -213,13 +215,13 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C202
 彗星や比較星の測光では、スタック画像だけを見ると元サブフレームの飽和を見落とすことがあります。次の指定で、いずれかのサブフレームが飽和レベルの90%を超えた画素を赤く示す警告PNGを追加生成できます。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable
 ```
 
 既定は `--saturation-warning disable` です。判定割合と警告色は変更できます。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable --saturation-threshold-percent 90 --saturation-color FF0000
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable --saturation-threshold-percent 90 --saturation-color FF0000
 ```
 
 `--saturation-threshold-percent` は0より大きく100以下、`--saturation-color` は6桁のRGB 16進数です。Seestarのunsigned 16-bit FITSでは通常65535を飽和レベルとし、既定では58981.5を超えた画素を検出します。FITSに `SATURATE` または `SATLEVEL` があれば、その値を優先します。画像内の実測最大値を表すことがある `DATAMAX` は飽和レベルとして使いません。
@@ -272,7 +274,7 @@ Could not identify target '...' in JPL Horizons.
 [JPL Horizons](https://ssd.jpl.nasa.gov/horizons/)または[Horizons Lookup API](https://ssd-api.jpl.nasa.gov/doc/horizons_lookup.html)で正式名称、彗星符号、小惑星番号を確認し、`--horizons-object`でFITSの `OBJECT` を上書きします。この指定でも名称の正規化と複数候補の検索を行います。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-object "C/2025 R2 (SWAN)"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-object "C/2025 R2 (SWAN)"
 ```
 
 ### 2. HorizonsのCOMMANDを直接指定する
@@ -280,7 +282,7 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-object "C/2025 R2 (SWAN
 Horizonsで使える検索式やIDが分かっている場合は、`--horizons-command`でその値をそのまま渡します。これは名称の自動変換を行わないため、より確実です。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "DES=24P;CAP;NOFRAG"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "DES=24P;CAP;NOFRAG"
 ```
 
 - `DES=24P`: 正式符号24Pを検索
@@ -290,13 +292,13 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "DES=24P;CAP;NO
 番号付き小惑星は、番号と末尾のセミコロンを指定できます。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "98943;"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "98943;"
 ```
 
 検索結果に複数の軌道解が表示された場合は、目的のEpochに対応する `Record #` を直接指定できます。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "90001033;"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "90001033;"
 ```
 
 HorizonsのRecord番号は将来変わる可能性があります。通常は正式符号と `CAP` / `NOFRAG`を優先し、古い観測などで特定の歴史的軌道解が必要な場合だけRecord番号を使います。PowerShellではセミコロンがコマンド区切りになるため、COMMAND全体を必ず引用符で囲んでください。
@@ -306,7 +308,7 @@ HorizonsのRecord番号は将来変わる可能性があります。通常は正
 Horizonsで別途作成した時刻・赤経・赤緯のCSVがある場合は、検索処理を行わずそのファイルを使用できます。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --ephemeris-csv "C:\path\to\horizons.csv"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --ephemeris-csv "C:\path\to\horizons.csv"
 ```
 
 各サブフレームと完全に同じ時刻の座標を用意する必要はありません。本ツールはFITSの観測時刻ごとに、CSV内の前後2点から赤経・赤緯を時間に対して線形補間します。CSVの時刻範囲より前または後のフレームには、先頭または末尾の2点を使った線形外挿を行います。
@@ -332,19 +334,19 @@ Astrometry.net APIキー、観測地点、個人情報、FITS本体を公開す�
 ファイル名に `_failed_` を含むSeestarフレームも使う:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --include-failed-frames
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --include-failed-frames
 ```
 
 既存のAstrometry.net解を再利用する:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --astrometry-json "C:\path\to\solution.json"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --astrometry-json "C:\path\to\solution.json"
 ```
 
 観測地をHorizonsへ送らず地心座標を使う:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-center geocenter
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-center geocenter
 ```
 
 Windowsの `.cmd` に引用符付きパスを渡す場合、閉じ引用符直前の末尾バックスラッシュは付けないでください。`"C:\path\to\frames"` は正しく、`"C:\path\to\frames\"` は避けます。

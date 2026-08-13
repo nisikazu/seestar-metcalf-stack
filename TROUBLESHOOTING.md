@@ -15,23 +15,23 @@
 通常は最初のフレームが基準です。長時間セッションでは時刻中央のフレームを選べます。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
 ```
 
 任意の画像を指定する場合は、フォルダ全体のパスではなく、そのフォルダ内のFITSファイル名を渡します。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
 ```
 
 ファイル名またはフォルダ名に空白がある場合は、必ず引用符で囲みます。Windowsでは、引用符の直前にフォルダ末尾の `\` を置かないでください。
 
 ```bat
 rem Correct
-seestar-metcalf-stack.cmd "C:\data\C2025 R2 (SWAN)_sub"
+.\seestar-metcalf-stack.cmd "C:\data\C2025 R2 (SWAN)_sub"
 
 rem Avoid: the trailing backslash can consume the closing quote in some shells
-seestar-metcalf-stack.cmd "C:\data\C2025 R2 (SWAN)_sub\"
+.\seestar-metcalf-stack.cmd "C:\data\C2025 R2 (SWAN)_sub\"
 ```
 
 ## 背景星の登録と除外
@@ -50,12 +50,29 @@ seestar-metcalf-stack.cmd "C:\data\C2025 R2 (SWAN)_sub\"
 
 ## よくある問題
 
+### ダウンロードした`.cmd`や`.exe`を実行できない
+
+Windowsがインターネットから取得したZIP内のファイルを保護している可能性があります。公式の[GitHub Releases](https://github.com/nisikazu/seestar-metcalf-stack/releases)からダウンロードしたZIPを右クリックして`プロパティ`を開き、`全般`タブ下部に`許可する`が表示されていればチェックして`OK`を押してから展開してください。
+
+すでに展開済みの場合は、元のZIPを`許可する`にしてから別の空フォルダへ展開し直すのが確実です。出所が不明なZIPではブロックを解除しないでください。
+
+### PowerShellで「コマンドとして認識されません」と表示される
+
+PowerShellは安全上、現在のフォルダをコマンド検索対象にしません。エクスプローラーでインストールフォルダを開き、空いている場所を右クリックして`ターミナルで開く`を選んだ後、ファイル名の先頭に`.\`を付けて実行します。
+
+```bat
+.\set-astrometry-api-key.cmd YOUR_API_KEY
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --list-sessions
+```
+
+サブフレームフォルダを`seestar-metcalf-stack.cmd`へドラッグ&ドロップする基本操作では、ターミナル入力は不要です。
+
 ### `--reference-frame-file was not found`
 
 指定したファイルが、選択されたセッションまたは時刻範囲に含まれていません。`--list-sessions` で対象セッションを確認し、拡張子を含む正確なファイル名を指定してください。
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --list-sessions
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --list-sessions
 ```
 
 ### `The selected reference frame has insufficient background stars`

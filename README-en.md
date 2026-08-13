@@ -35,7 +35,7 @@ provide a site explicitly, with east-positive longitude and north-positive
 latitude:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --site-longitude 139.6 --site-latitude 35.9
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --site-longitude 139.6 --site-latitude 35.9
 ```
 
 The command-line site coordinates take precedence over `SITELONG` and `SITELAT`
@@ -51,7 +51,7 @@ For binned images, multiply the physical pixel pitch by the binning factor.
 For example, 250 mm and 2.9 um gives `206.265 * 2.9 / 250 = 2.392` arcsec/pixel.
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --pixel-scale-arcsec 2.392
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --pixel-scale-arcsec 2.392
 ```
 
 Astrometry.net's JSON calibration is sufficient for stacking. If its optional
@@ -134,31 +134,39 @@ installs PyInstaller into `.build`, which requires network access.
 
 ## First-time setup
 
-1. If Siril is not installed, extract the Siril-bundled package. Normal EXE
+1. Download the ZIP you want from [GitHub Releases](https://github.com/nisikazu/seestar-metcalf-stack/releases).
+2. Before extracting it, right-click the ZIP and open `Properties`. If the
+   `General` tab shows a `Security` message saying that the file came from
+   another computer, select `Unblock`, click `OK`, and then extract the ZIP.
+   If that option is absent, extract it normally. Only unblock ZIP files
+   downloaded from the official GitHub Releases page.
+3. If Siril is not installed, extract the Siril-bundled package. Normal EXE
    execution then needs no separate Python dependency installation.
-2. If using the Siril-free package, install Siril separately and make
+4. If using the Siril-free package, install Siril separately and make
    `siril-cli.exe` available on `PATH`, or set `SIRIL_CLI`.
-3. Run the Python dependency installer only if you plan to use or modify the
+5. Run the Python dependency installer only if you plan to use or modify the
    Python fallback:
 
    ```bat
-   setup-python-deps.cmd
+   .\setup-python-deps.cmd
    ```
 
-4. Obtain an Astrometry.net API key:
+6. Obtain an Astrometry.net API key:
 
    1. Open the [Astrometry.net sign-in page](https://nova.astrometry.net/signin).
    2. Sign in or create an account with one of the external identity providers shown on the page, such as a Google account.
    3. After signing in, open `API` or `API Help` in the top menu. You can also open the [API Help page directly](https://nova.astrometry.net/api_help).
    4. Copy the alphanumeric value shown after `Your API key is xxxxxx...`.
 
-5. In Windows Explorer, open the extracted Seestar Metcalf Stack directory.
+7. In Windows Explorer, open the extracted Seestar Metcalf Stack directory.
    Right-click an empty area inside the directory and choose `Open in Terminal`.
 
-6. In that terminal, replace `YOUR_API_KEY` with the value copied above:
+8. In that terminal, replace `YOUR_API_KEY` with the value copied in step 6.
+   PowerShell requires the `.\` prefix when running a command from the current
+   directory:
 
    ```bat
-   set-astrometry-api-key.cmd YOUR_API_KEY
+   .\set-astrometry-api-key.cmd YOUR_API_KEY
    ```
 
 The key is stored in `.astrometry_api_key` beside the scripts.
@@ -169,7 +177,7 @@ Start by listing the sessions detected in a Seestar subframe folder. Listing is
 local-only: it does not contact Astrometry.net, Horizons, or Siril.
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\98943 Torifune_sub" --list-sessions
+.\seestar-metcalf-stack.cmd "C:\path\to\98943 Torifune_sub" --list-sessions
 ```
 
 The output shows a 1-based session number, frame count, and local/UTC start and
@@ -179,13 +187,13 @@ greater than 60 minutes. With no selector, the latest session is used.
 Select a listed session by number:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --session-index 2
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --session-index 2
 ```
 
 Or select the first session starting at or after a local date/time:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --session-at 20260709-195000
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --session-at 20260709-195000
 ```
 
 `--session-at` accepts `YYYYMMDD` or `YYYYMMDD-hhmmss`. It is interpreted in
@@ -199,7 +207,7 @@ The simplest run uses the latest session, arithmetic mean, and its first frame
 as the reference:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\C2025 R2 (SWAN)_sub"
+.\seestar-metcalf-stack.cmd "C:\path\to\C2025 R2 (SWAN)_sub"
 ```
 
 For normal use, simply drag the subframe folder onto
@@ -263,14 +271,14 @@ extrapolation and prevents low-coverage borders from becoming artificially
 dark:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean
 ```
 
 Use `--padding-policy legacy` only to reproduce the padding behavior of an
 older release for comparison:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean --padding-policy legacy
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean --padding-policy legacy
 ```
 
 Median is more resistant to satellites, airplanes, hot pixels, and other
@@ -280,7 +288,7 @@ temporary disk-backed arrays, and usually has lower statistical efficiency.
 Exact-zero padding is excluded from the median samples by default:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median
 ```
 
 Use `--zero-sample-policy include` to include exact zeros for comparison with
@@ -290,7 +298,7 @@ the median and produce large completely black regions. Use it only when exact
 zeros must intentionally be included, such as for a legacy comparison:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median --zero-sample-policy include
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median --zero-sample-policy include
 ```
 
 Rank-fit sorts the nonzero samples at each pixel, keeps the central percentage,
@@ -298,7 +306,7 @@ fits a fifth-degree polynomial to brightness versus normalized rank, and returns
 the fitted value at the median rank. The default central percentage is 50:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method rankfit --rankfit-fraction 50
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method rankfit --rankfit-fraction 50
 ```
 
 `--rankfit-fraction` is an integer from 1 through 100. Output names and run
@@ -316,13 +324,13 @@ reference. For a long session, the frame nearest the temporal midpoint can
 reduce the largest registration and moving-target offsets:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame middle
 ```
 
 To use a particular subframe as the reference, specify its filename rather than its filtered index. Quote names containing spaces. The selected reference must have at least `--registration-minpairs` background-star pairs (default: 6), or the run stops with a warning. Other frames that cannot be registered, for example during cloud passage, are skipped and recorded in the shifts CSV; the remaining usable frames are stacked.
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
 ```
 
 The selected frame is sent to Astrometry.net and is explicitly set as Siril's
@@ -336,14 +344,14 @@ that occurred in an individual subframe. Enable separate warning PNGs that mark
 pixels exceeding 90 percent of the subframe saturation level in red:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable
 ```
 
 The default is `--saturation-warning disable`. The threshold and warning color
 can be selected explicitly:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable --saturation-threshold-percent 90 --saturation-color FF0000
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --saturation-warning enable --saturation-threshold-percent 90 --saturation-color FF0000
 ```
 
 `--saturation-threshold-percent` must be greater than 0 and no greater than 100.
@@ -427,7 +435,7 @@ A returned list of multiple matches also means that the target and orbit solutio
 Find the official name, comet designation, or asteroid number with [JPL Horizons](https://ssd.jpl.nasa.gov/horizons/) or the [Horizons Lookup API](https://ssd-api.jpl.nasa.gov/doc/horizons_lookup.html), then override the FITS `OBJECT` value with `--horizons-object`. This option still applies name normalization and candidate fallback searches.
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-object "C/2025 R2 (SWAN)"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-object "C/2025 R2 (SWAN)"
 ```
 
 ### 2. Pass a raw Horizons COMMAND
@@ -435,7 +443,7 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-object "C/2025 R2 (SWAN
 If you know a working Horizons search expression or ID, pass it unchanged with `--horizons-command`. This bypasses automatic name conversion and is therefore more deterministic.
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "DES=24P;CAP;NOFRAG"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "DES=24P;CAP;NOFRAG"
 ```
 
 - `DES=24P`: search for the official designation 24P
@@ -445,13 +453,13 @@ seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "DES=24P;CAP;NO
 For a numbered asteroid, use its number followed by a semicolon:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "98943;"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "98943;"
 ```
 
 When Horizons lists several orbit solutions, you can select the `Record #` corresponding to the required epoch:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "90001033;"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-command "90001033;"
 ```
 
 Horizons record numbers can change. Prefer an official designation with `CAP` / `NOFRAG` for normal use, and use a record number when processing historical observations that require a specific orbit solution. In PowerShell, quote the entire COMMAND because an unquoted semicolon separates commands.
@@ -461,7 +469,7 @@ Horizons record numbers can change. Prefer an official designation with `CAP` / 
 If you generated a timestamp/RA/Dec CSV separately, bypass target lookup and use that file directly:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --ephemeris-csv "C:\path\to\horizons.csv"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --ephemeris-csv "C:\path\to\horizons.csv"
 ```
 
 The CSV does not need a coordinate row at every subframe timestamp. For each FITS observation time, the tool linearly interpolates RA and Dec between the surrounding CSV rows. Frames before or after the CSV time range are linearly extrapolated from the first or last two rows.
@@ -487,19 +495,19 @@ Do not publish your Astrometry.net API key, observing location, personal informa
 Include Seestar files whose names contain `_failed_`:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --include-failed-frames
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --include-failed-frames
 ```
 
 Use an existing Astrometry.net result:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --astrometry-json "C:\path\to\solution.json"
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --astrometry-json "C:\path\to\solution.json"
 ```
 
 Use geocentric Horizons coordinates instead of sending the FITS observing site:
 
 ```bat
-seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-center geocenter
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-center geocenter
 ```
 
 When quoting a Windows path for a `.cmd` file, omit the trailing backslash:
