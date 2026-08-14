@@ -21,7 +21,7 @@ SeestarのサブフレームFITS、またはSharpCap Live Stackのraw frameか�
 
 SharpCap 4.1.10745以降のLive Stackで、raw frame保存、`Create CSV log of frame information for each stack`、背景星位置合わせを有効にします。採用フレームすべてのX/Y offsetとrotationが`stacklog.csv`にそろっていれば、本ツールはその情報を利用し、Sirilを起動せずに背景星固定・メトカーフスタックを作成します。デフォルトでは`Frame Stacked?`が成功のraw frameだけを使います。
 
-SharpCap Live Stackのraw frameは、Live Stack側のdark、flat、ホットピクセル除去が適用される前のデータとして扱ってください。本ツール自身はdark/flat補正やホットピクセル除去を行いません。必要な場合は別ソフトで各raw frameをあらかじめ補正し、**元と同じファイル名、画像サイズ、向き、切り抜き範囲**で保存してください。リサイズ、回転、反転、クロップを行うとStackLogの位置合わせ量を利用できません。
+SharpCap Live Stackのサブフレームが、Live Stack側のdark、flat、ホットピクセル除去が適用される前の生データである場合、本ツール自身はdark/flat補正やホットピクセル除去を行いません。必要な場合は別ソフトで各raw frameをあらかじめ補正し、**元と同じファイル名、画像サイズ、向き、切り抜き範囲**で保存してください。リサイズ、回転、反転、クロップを行うとStackLogの位置合わせ量を利用できません。
 
 推奨構造は次のとおりです。セッションフォルダを丸ごとコピーし、コピー側の`rawframes`だけを同名の補正済み画像へ置き換えます。
 
