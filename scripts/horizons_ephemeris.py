@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from sharpcap_stacklog import load_manifest
+
 
 API_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
 SBDB_API_URL = "https://ssd-api.jpl.nasa.gov/sbdb.api"
@@ -70,6 +72,7 @@ class EphemerisRow:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create RA/Dec CSV from JPL Horizons for Seestar FITS frames")
     parser.add_argument("--source-dir", required=True, type=Path, help="Directory containing Seestar .fit/.fits frames")
+    parser.add_argument("--frame-manifest", type=Path, help="Normalized SharpCap Live Stack frame manifest")
     parser.add_argument("--output", required=True, type=Path, help="Output CSV path")
     parser.add_argument("--object", help="Target name/designation. Defaults to the FITS OBJECT header")
     parser.add_argument("--command", help="Raw Horizons COMMAND value. Overrides --object normalization")
@@ -198,6 +201,30 @@ def load_frames(source_dir: Path, limit: int | None = None) -> list[FitsFrame]:
         )
     frames.sort(key=lambda frame: frame.date_obs)
     return frames
+
+
+def load_manifest_frames(path: Path, limit: int | None = None) -> tuple[list[FitsFrame], str | None]:
+    payload = load_manifest(path)
+    rows = payload["frames"]
+    if limit is not None:
+        rows = rows[:limit]
+    frames: list[FitsFrame] = []
+    for row in rows:
+        frame_path = Path(str(row["path"]))
+        header = read_fits_header(frame_path) if frame_path.suffix.lower() in {".fit", ".fits"} else {}
+        frames.append(
+            FitsFrame(
+                path=frame_path,
+                date_obs=parse_fits_datetime(row["time"]),
+                object_name=str(payload.get("object") or "").strip() or None,
+                site_long_deg=as_float(header.get("SITELONG") or header.get("OBSLONG")),
+                site_lat_deg=as_float(header.get("SITELAT") or header.get("OBSLAT")),
+                site_elevation_m=as_float(header.get("SITEELEV") or header.get("ELEVATIO") or header.get("ELEVATION")),
+                ra_deg=as_float(header.get("RA") or header.get("OBJCTRA")),
+                dec_deg=as_float(header.get("DEC") or header.get("OBJCTDEC")),
+            )
+        )
+    return frames, str(payload.get("object") or "").strip() or None
 
 
 def is_failed_frame(path: Path) -> bool:
@@ -579,11 +606,15 @@ def main() -> int:
         if reconfigure:
             reconfigure(line_buffering=True, write_through=True)
     args = parse_args()
-    frames = filter_frames(args, load_frames(args.source_dir, args.limit))
+    if args.frame_manifest:
+        frames, manifest_object = load_manifest_frames(args.frame_manifest, args.limit)
+    else:
+        frames, manifest_object = load_frames(args.source_dir, args.limit), None
+    frames = filter_frames(args, frames)
     if not frames:
         raise SystemExit(f"No FITS frames with DATE-OBS found in {args.source_dir}")
 
-    object_name = args.object or frames[0].object_name
+    object_name = args.object or manifest_object or frames[0].object_name
     if not object_name and not args.command:
         raise SystemExit("Target object was not provided and FITS OBJECT header is missing")
     args.center, site_long, site_lat, site_elev_km = resolve_site_coordinates(args, frames[0])

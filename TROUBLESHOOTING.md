@@ -52,20 +52,38 @@ rem Avoid: the trailing backslash can consume the closing quote in some shells
 
 ### ダウンロードした`.cmd`や`.exe`を実行できない
 
-Windowsがインターネットから取得したZIP内のファイルを保護している可能性があります。公式の[GitHub Releases](https://github.com/nisikazu/seestar-metcalf-stack/releases)からダウンロードしたZIPを右クリックして`プロパティ`を開き、`全般`タブ下部に`許可する`が表示されていればチェックして`OK`を押してから展開してください。
+Windowsはインターネットから取得したファイルにダウンロード元を示す情報を付けるため、`.cmd`、`.exe`、または内部から呼び出すPowerShellスクリプトの実行を止める場合があります。[GitHubの公式Release](https://github.com/nisikazu/seestar-metcalf-stack/releases)から取得したZIPであることを確認し、**展開前のZIP**を右クリックして`プロパティ`を開きます。`全般`タブの下部に`許可する`が表示された場合はチェックを入れて`OK`を押し、その後でZIPを展開してください。表示がなければ解除操作は不要です。
 
-すでに展開済みの場合は、元のZIPを`許可する`にしてから別の空フォルダへ展開し直すのが確実です。出所が不明なZIPではブロックを解除しないでください。
+すでに展開している場合は、展開したフォルダを削除し、元のZIPを`許可する`にしてから再度展開するのが確実です。`seestar-metcalf-stack.cmd`だけを許可しても、同梱EXEや内部スクリプトにブロック情報が残る可能性があります。配布元を確認できないファイルでは解除しないでください。
 
 ### PowerShellで「コマンドとして認識されません」と表示される
 
-PowerShellは安全上、現在のフォルダをコマンド検索対象にしません。エクスプローラーでインストールフォルダを開き、空いている場所を右クリックして`ターミナルで開く`を選んだ後、ファイル名の先頭に`.\`を付けて実行します。
+PowerShellは安全上、現在のフォルダを自動的には実行ファイルの検索対象にしません。エクスプローラーの`ターミナルで開く`から実行するときは、現在のフォルダを表す`.\`を付けます。
 
-```bat
+```powershell
 .\set-astrometry-api-key.cmd YOUR_API_KEY
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --list-sessions
 ```
 
-サブフレームフォルダを`seestar-metcalf-stack.cmd`へドラッグ&ドロップする基本操作では、ターミナル入力は不要です。
+コマンドプロンプトでは`.\`なしでも動きますが、READMEのWindows例はPowerShellでも確実に動く`.\`付きで統一しています。
+
+サブフレームフォルダを`seestar-metcalf-stack.cmd`へドラッグ&ドロップする基本操作では、ターミナル入力は不要です。SharpCap PNG/TIFFのように天体名や画素スケールを指定する場合は、READMEの例に従ってターミナルから実行します。
+
+### SharpCapの`stacklog.csv`またはraw frameが見つからない
+
+本ツールは、指定したフォルダ内の`stacklog.csv`を最初に探し、なければ1つ上を探します。`stacklog.csv`自体を第1引数に指定した場合は、その親フォルダを処理対象にします。CSVと同じセッションの`*.CameraSettings.txt`も、指定したフォルダまたはその親に置いてください。
+
+CSV内の`Raw frame file`がコピー前の絶対パスでも、ドロップしたフォルダ内に同名画像があればそちらを優先します。下処理後にファイル名を変えた場合は対応付けできません。元と同じ名前へ戻してください。同名ファイルが複数のサブフォルダにある場合は曖昧性エラーになるため、処理対象だけを1フォルダへ整理します。
+
+### SharpCap PNG/TIFFで対象天体または画素スケールを要求される
+
+PNG/TIFFにはHorizons検索に使える天体名や、プレートソルブの画素スケールが確実には入りません。`--horizons-object`または`--horizons-command`と、`--pixel-scale-arcsec`を指定してください。作成済みの座標CSVがある場合は、天体名の代わりに`--ephemeris-csv`を使えます。
+
+観測地は`--site-longitude`と`--site-latitude`で指定できますが、省略時は地心座標へフォールバックします。地球へ近接中の天体では視差が大きくなるため省略しないでください。
+
+### SharpCap Live Stack入力なのにSirilが起動する
+
+`LiveStack.AlignFrames=True`で、選択した全フレームにX/Y offsetとrotationが必要です。位置合わせ情報が欠ける場合、位置合わせがOFFの場合、または`--include-sharpcap-rejected`で失敗行を含めた場合はSirilへフォールバックします。ログの`registration=`表示を確認してください。
 
 ### `--reference-frame-file was not found`
 

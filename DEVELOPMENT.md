@@ -2,6 +2,19 @@
 
 利用者に影響する変更は[変更履歴](CHANGELOG.md)と[改訂内容とトラブルシュート](TROUBLESHOOTING.md)にまとめています。この文書は実装判断、検証、引き継ぎを目的とした開発者向け資料です。
 
+## 2026-08-13: SharpCap Live StackログによるSiril省略
+
+- `stacklog.csv`が入力フォルダ内またはその1つ上にある場合、SharpCap 4.1.10745以降のLive Stackセッションとして自動認識する。raw frameフォルダ名を`rawframes`へ固定しない。
+- CSVは列番号ではなくヘッダ名で読み、`Raw frame file`のbasenameをコピー先へ照合する。入力フォルダ内の同名画像をCSVの旧絶対パスより優先し、複数候補はエラーにする。既定では`Frame Stacked? = 1`だけを採用する。
+- FITSは`DATE-AVG`、次に`DATE-OBS + EXPTIME/2`を露光中央時刻に使う。PNG/TIFFはStackLog時刻からCameraSettingsのExposure/2を引く。
+- `LiveStack.AlignFrames=True`かつ全採用行にX/Y offsetとrotationがある場合、Pythonが線形デベイヤと中心回転・平行移動を適用して登録FITSを生成し、Sirilを起動しない。
+- SharpCap offsetは実データとの相関比較で、そのまま画像へ加える符号が基準像と一致することを確認した。任意基準フレームではStackLog基準からの相対変換へ合成する。
+- offset不完全、alignment OFF、失敗行を明示的に含める場合は従来Siril経路へフォールバックする。
+- 非FITSのSharpCap入力では、対象を`--horizons-object`/`--horizons-command`/既存CSVのいずれかで、画素スケールを`--pixel-scale-arcsec`で明示させる。観測地は任意で、欠落時はgeocenterを使う。
+- 下処理済み画像へ差し替える場合もStackLog変換を有効に保つため、ファイル名、寸法、向き、切り抜き範囲を維持する。CameraSettingsはバージョン検査とPNG/TIFFのExposure補正に必要である。
+- 3枚のSharpCap 4.1.13800.0 RAW16 FITSで、wrapperからSiril未起動、3/3枚スタック、星固定/Metcalf/比較FITS・PNG生成を確認した。
+- 時刻仕様・バージョン差・parser検証項目は`SHARPCAP-TIMESTAMPS.md`を正本とする。
+
 ## 2026-08-04: 登録失敗時の全フレーム診断
 
 - Sirilの並列登録ログでは`Found N stars`行に画像番号がなく、登録が全面失敗すると`.seq`にも品質情報が残らないため、ログだけから星数を各FITSへ対応付けることはできない。
@@ -96,7 +109,9 @@ Pythonが読み、メトカーフスタックと星固定スタックを同じ�
 | `scripts/astrometry_solve.py` | APIログイン、FITS送信、再試行、ジョブ待機、WCS/JSON取得、submission再開 |
 | `scripts/moving_target_stack.py` | FITS入出力、WCS、Siril登録、画素シフト、平均・メジアン・ランクフィット、成果物生成 |
 | `tests/test_moving_target_options.py` | 名称解決、セッション、スタック方式、プレビュー、キャッシュ、Siril失敗判定、OS差の単体テスト |
-| `package-seestar-metcalf-stack*.ps1` | Sirilなし版とSiril同梱版の配布物作成 |
+| `build-release-packages.ps1` | 通常版とSiril同梱版の生成・内容検証・SHA-256作成 |
+| `release-package-manifest.psd1` | 両配布ZIPに含めるファイルとSiril検証条件の唯一の定義 |
+| `verify-release-packages.ps1` | 完成したZIPを開き直して配布範囲とSiril実体を検証 |
 | `build-seestar-metcalf-stack-exe.ps1` | PyInstallerによるWindows one-file EXE作成 |
 
 `README-Siril-CLI.md`は開発初期の実験記録です。現在は存在しない補助スクリプトや
@@ -348,8 +363,7 @@ PyInstaller one-file EXEは`build\seestar-metcalf-stack.exe`へ生成されま�
 ### 配布ZIP
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\package-seestar-metcalf-stack.ps1 -Version X.Y.Z
-powershell -NoProfile -ExecutionPolicy Bypass -File .\package-seestar-metcalf-stack-siril.ps1 -Version X.Y.Z
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-release-packages.ps1 -Version X.Y.Z
 ```
 
 両パッケージに`DEVELOPMENT.md`、`PUBLISHING.md`、`README-Siril-CLI.md`を含めます。

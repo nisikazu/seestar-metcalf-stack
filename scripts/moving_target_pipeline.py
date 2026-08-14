@@ -31,6 +31,7 @@ from moving_target_stack import (
     read_fits_header,
     select_reference_index,
 )
+from sharpcap_stacklog import load_sharpcap_session, write_manifest
 
 
 REPO_ROOT = (
@@ -44,6 +45,8 @@ PRIVACY_FITS_KEYS = {
     "SITEELEV",
     "ELEVATIO",
     "ELEVATION",
+    "OBSLONG",
+    "OBSLAT",
 }
 
 
@@ -74,8 +77,8 @@ def parse_args() -> argparse.Namespace:
         "source_dir_arg",
         nargs="?",
         type=Path,
-        metavar="SOURCE_DIR",
-        help="Directory containing Seestar subframe FITS files",
+        metavar="SOURCE",
+        help="Subframe directory, or a SharpCap stacklog.csv file",
     )
     parser.add_argument("--source-dir", dest="source_dir_option", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
@@ -91,6 +94,17 @@ def parse_args() -> argparse.Namespace:
         "--include-failed-frames",
         action="store_true",
         help="Include Seestar files whose names contain '_failed_'. They are skipped by default.",
+    )
+    parser.add_argument(
+        "--include-sharpcap-rejected",
+        action="store_true",
+        help="Include SharpCap StackLog rows whose Frame Stacked? value is false. Defaults to successful frames only.",
+    )
+    parser.add_argument("--frame-manifest", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--bayer-pattern",
+        choices=("RGGB", "BGGR", "GRBG", "GBRG"),
+        help="Bayer pattern for SharpCap RAW PNG/TIFF when the image itself does not record one.",
     )
     parser.add_argument(
         "--session-gap-min",
@@ -245,10 +259,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-open-output", dest="open_output", action="store_false", help="Do not open the output directory after success.")
     args = parser.parse_args()
     if args.source_dir_arg and args.source_dir_option:
-        parser.error("specify the source folder either as the first argument or with --source-dir, not both")
+        parser.error("specify the source path either as the first argument or with --source-dir, not both")
     args.source_dir = args.source_dir_arg or args.source_dir_option
     if args.source_dir is None:
-        parser.error("source folder is required")
+        parser.error("source directory or SharpCap stacklog.csv is required")
     delattr(args, "source_dir_arg")
     delattr(args, "source_dir_option")
     if not 1 <= args.rankfit_fraction <= 100:
@@ -414,6 +428,21 @@ def load_dated_files(source_dir: Path, pattern: str, include_failed_frames: bool
 
 
 def load_sessions(args: argparse.Namespace) -> list[list[tuple[datetime, Path]]]:
+    sharpcap = load_sharpcap_session(
+        args.source_dir,
+        include_rejected=getattr(args, "include_sharpcap_rejected", False),
+    )
+    if sharpcap is not None:
+        args.sharpcap_session = sharpcap
+        args.source_dir = sharpcap.root
+        dated = [(frame.time, frame.path) for frame in sharpcap.frames]
+        if args.after:
+            after_time = parse_time(args.after)
+            dated = [item for item in dated if item[0] >= after_time]
+        if args.before:
+            before_time = parse_time(args.before)
+            dated = [item for item in dated if item[0] <= before_time]
+        return split_sessions_by_gap(dated, args.session_gap_min)
     args.source_dir = resolve_source_dir(args.source_dir, args.pattern)
     dated = load_dated_files(args.source_dir, args.pattern, args.include_failed_frames)
     if args.after:
@@ -499,16 +528,59 @@ def resolve_session(args: argparse.Namespace) -> tuple[int, list[Path], dict[str
     return session_index, files, session_info
 
 
+def select_pipeline_reference_index(args: argparse.Namespace, files: list[Path]) -> int:
+    sharpcap = getattr(args, "sharpcap_session", None)
+    if sharpcap is None:
+        return select_reference_index(files, args.reference_frame, args.reference_frame_file)
+    if args.reference_frame_file:
+        requested = Path(args.reference_frame_file).name.casefold()
+        matches = [index for index, path in enumerate(files, start=1) if path.name.casefold() == requested]
+        if len(matches) != 1:
+            raise ValueError(f"--reference-frame-file matched {len(matches)} selected SharpCap frame(s): {requested}")
+        return matches[0]
+    if args.reference_frame == "first":
+        return 1
+    frame_times = {
+        frame.path.resolve(): frame.time for frame in sharpcap.frames
+    }
+    dated = [(frame_times[path.resolve()], index) for index, path in enumerate(files, start=1)]
+    midpoint = dated[0][0] + (dated[-1][0] - dated[0][0]) / 2
+    return min(dated, key=lambda item: (abs((item[0] - midpoint).total_seconds()), item[0]))[1]
+
+
 def read_object_name(frame: Path) -> str:
+    if not is_fits_frame(frame):
+        return frame.parent.parent.parent.name or frame.parent.name
     header, _cards, _offset = read_fits_header(frame)
     value = header.get("OBJECT")
     return str(value).strip() if value else frame.parent.name
 
 
+def validate_sharpcap_inputs(args: argparse.Namespace, reference_frame: Path) -> None:
+    if getattr(args, "sharpcap_session", None) is None or is_fits_frame(reference_frame):
+        return
+    has_existing_ephemeris = args.ephemeris_csv is not None and args.ephemeris_csv.is_file()
+    if not (has_existing_ephemeris or args.horizons_object or args.horizons_command):
+        raise ValueError(
+            "SharpCap PNG/TIFF input requires the moving target to be specified with "
+            "--horizons-object, --horizons-command, or --ephemeris-csv."
+        )
+    if args.pixel_scale_arcsec is None:
+        raise ValueError(
+            "SharpCap PNG/TIFF input requires --pixel-scale-arcsec because the image does not "
+            "provide a reliable plate-solve scale."
+        )
+
+
 def default_ephemeris_path(args: argparse.Namespace, first_frame: Path, session_index: int) -> Path:
-    object_name = read_object_name(first_frame)
-    header, _cards, _offset = read_fits_header(first_frame)
-    when = parse_time(header["DATE-OBS"]) if "DATE-OBS" in header else datetime.now(timezone.utc)
+    sharpcap = getattr(args, "sharpcap_session", None)
+    object_name = sharpcap.object_name if sharpcap is not None else read_object_name(first_frame)
+    if sharpcap is not None:
+        frame = next(item for item in sharpcap.frames if item.path.resolve() == first_frame.resolve())
+        when = frame.time
+    else:
+        header, _cards, _offset = read_fits_header(first_frame)
+        when = parse_time(header["DATE-OBS"]) if "DATE-OBS" in header else datetime.now(timezone.utc)
     stem = f"{safe_name(object_name)}_{iso_compact(when)}_session{session_index}_horizons_{args.horizons_center}.csv"
     return args.work_dir / stem
 
@@ -538,7 +610,12 @@ def make_work_dir(base: Path, name: str) -> Path:
 
 def prepare_work_dir(args: argparse.Namespace, first_frame: Path) -> Path:
     if not args.work_name:
-        args.work_name = default_work_name(first_frame, args.stack_method, args.rankfit_fraction)
+        sharpcap = getattr(args, "sharpcap_session", None)
+        if sharpcap is not None:
+            method = processing_method_token(args.stack_method, args.rankfit_fraction)
+            args.work_name = f"{safe_name(sharpcap.object_name)}_{method}"
+        else:
+            args.work_name = default_work_name(first_frame, args.stack_method, args.rankfit_fraction)
     if args.work_dir:
         args.work_dir.mkdir(parents=True, exist_ok=True)
         return args.work_dir
@@ -583,11 +660,13 @@ def ensure_ephemeris(args: argparse.Namespace, first_frame: Path, session_index:
         cmd.extend(["--command", args.horizons_command])
     if args.include_failed_frames:
         cmd.append("--include-failed-frames")
+    if args.frame_manifest:
+        cmd.extend(["--frame-manifest", str(args.frame_manifest)])
     if args.after:
         cmd.extend(["--after", args.after])
     if args.before:
         cmd.extend(["--before", args.before])
-    if args.session_gap_min is not None:
+    if args.session_gap_min is not None and not args.frame_manifest:
         cmd.extend(["--session-gap-min", str(args.session_gap_min), "--session-index", str(session_index)])
     print(
         "Auto-generating Horizons ephemeris CSV. "
@@ -738,10 +817,13 @@ def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path
         raise SystemExit("--skip-solve requested, but no valid explicit or cached Astrometry.net solution was found")
 
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    upload_frame = sanitize_fits_for_upload(
-        first_frame,
-        args.work_dir / f"{first_frame.stem}_upload_sanitized.fit",
-    )
+    if is_fits_frame(first_frame):
+        upload_frame = sanitize_fits_for_upload(
+            first_frame,
+            args.work_dir / f"{first_frame.stem}_upload_sanitized.fit",
+        )
+    else:
+        upload_frame = stage_file(first_frame, args.work_dir)
     solve_command = child_command(
         "astrometry_solve.py",
         [str(upload_frame), str(json_path), str(wcs_path)],
@@ -821,6 +903,10 @@ def run_stack(
     )
     if args.pattern:
         cmd.extend(["--pattern", args.pattern])
+    if args.frame_manifest:
+        cmd.extend(["--frame-manifest", str(args.frame_manifest)])
+    if args.bayer_pattern:
+        cmd.extend(["--bayer-pattern", args.bayer_pattern])
     if args.output_prefix:
         cmd.extend(["--output-prefix", args.output_prefix])
     if wcs_fits:
@@ -835,7 +921,7 @@ def run_stack(
         cmd.extend(["--after", args.after])
     if args.before:
         cmd.extend(["--before", args.before])
-    if args.session_gap_min is not None:
+    if args.session_gap_min is not None and not args.frame_manifest:
         cmd.extend(["--session-gap-min", str(args.session_gap_min), "--session-index", str(args.session_index)])
     if args.preview_flip_vertical:
         cmd.append("--preview-flip-vertical")
@@ -878,9 +964,10 @@ def main(args: argparse.Namespace) -> Path | None:
         return None
     session_index, files, session_info = resolve_session(args)
     args.session_index = session_index
-    reference_index = select_reference_index(files, args.reference_frame, args.reference_frame_file)
+    reference_index = select_pipeline_reference_index(args, files)
     reference_mode = "file" if args.reference_frame_file else args.reference_frame
     reference_frame = files[reference_index - 1]
+    validate_sharpcap_inputs(args, reference_frame)
     verbose(
         args,
         f"Selected session {session_index}: {len(files)} frames; reference {reference_index}/{len(files)} "
@@ -888,6 +975,21 @@ def main(args: argparse.Namespace) -> Path | None:
     )
     args.work_dir = prepare_work_dir(args, reference_frame)
     verbose(args, f"Work directory: {args.work_dir}")
+    sharpcap = getattr(args, "sharpcap_session", None)
+    if sharpcap is not None:
+        args.frame_manifest = write_manifest(args.work_dir / "sharpcap_frame_manifest.json", sharpcap, files)
+        alignment_mode = "SharpCap offsets; Siril will be skipped" if sharpcap.alignment_complete else "incomplete offsets; Siril fallback"
+        verbose(
+            args,
+            f"SharpCap Live Stack detected: version={sharpcap.version_text or 'unknown'}; "
+            f"selected={len(files)}; rejected={sharpcap.rejected_rows}; missing raw={sharpcap.missing_raw_rows}; "
+            f"registration={alignment_mode}",
+        )
+        verbose(
+            args,
+            f"SharpCap metadata: stacklog={sharpcap.stacklog}; "
+            f"CameraSettings={sharpcap.settings_file or 'not found'}",
+        )
     verbose(args, "Stage 1/3: obtaining target ephemeris")
     ephemeris_csv = ensure_ephemeris(args, reference_frame, session_index)
     verbose(args, "Stage 2/3: resolving reference-frame sky coordinates")
@@ -904,6 +1006,8 @@ def main(args: argparse.Namespace) -> Path | None:
         "reference_frame": str(reference_frame),
         "stack_method": args.stack_method,
         "stack_method_token": processing_method_token(args.stack_method, args.rankfit_fraction),
+        "input_mode": "sharpcap-live-stack" if getattr(args, "sharpcap_session", None) is not None else "fits-subframes",
+        "frame_manifest": str(args.frame_manifest) if args.frame_manifest else None,
         "padding_policy": args.padding_policy,
         "zero_sample_policy": args.zero_sample_policy if args.stack_method != "mean" else None,
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,

@@ -42,31 +42,53 @@ For example, `Stacked 53/64 frames; skipped 11` means that 53 of 64 selected fra
 
 ## Common problems
 
-### Downloaded `.cmd` or `.exe` files do not run
+### A downloaded `.cmd` or `.exe` will not run
 
-Windows may have blocked files extracted from a ZIP downloaded from the
-Internet. Right-click the ZIP downloaded from the official
-[GitHub Releases](https://github.com/nisikazu/seestar-metcalf-stack/releases)
-page, open `Properties`, and select `Unblock` on the `General` tab if that
-option is shown. Click `OK`, then extract the ZIP.
+Windows marks files obtained from the internet with source-zone information and may block a `.cmd`, `.exe`, or a PowerShell script called internally. Verify that the ZIP came from the [official GitHub Releases page](https://github.com/nisikazu/seestar-metcalf-stack/releases). Before extracting it, right-click the ZIP, open `Properties`, and select `Unblock` at the bottom of the `General` tab if that option is shown. Click `OK`, then extract the ZIP. If `Unblock` is not shown, no action is required.
 
-If the package has already been extracted, unblock the original ZIP and extract
-it again into a new empty directory. Do not unblock ZIP files from an unknown
-source.
+If the ZIP was already extracted, delete the extracted directory, unblock the original ZIP, and extract it again. Unblocking only `seestar-metcalf-stack.cmd` may leave the bundled EXE or internal scripts blocked. Never unblock files whose source you cannot verify.
 
 ### PowerShell says the command is not recognized
 
-PowerShell does not search the current directory for commands by default. Open
-the installation directory in Explorer, right-click an empty area, choose
-`Open in Terminal`, and prefix local commands with `.\`:
+PowerShell does not search the current directory for executables by default. When using Explorer's `Open in Terminal`, prefix commands stored in the installation directory with `.\`:
 
-```bat
+```powershell
 .\set-astrometry-api-key.cmd YOUR_API_KEY
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --list-sessions
 ```
 
-No terminal command is needed for the basic workflow of dragging a subframe
-folder onto `seestar-metcalf-stack.cmd`.
+Command Prompt can run the same files without `.\`, but the documentation consistently uses the form that also works in PowerShell.
+
+No terminal command is needed for the basic workflow of dropping a subframe directory onto `seestar-metcalf-stack.cmd`. Use the terminal examples when options such as the SharpCap PNG/TIFF target and pixel scale are required.
+
+### SharpCap `stacklog.csv` or raw frames are not found
+
+The tool looks for `stacklog.csv` inside the supplied directory first and then
+one level above it. If `stacklog.csv` itself is the first argument, its parent
+directory becomes the source. Keep the matching `*.CameraSettings.txt` file in
+the supplied directory or its parent as well.
+
+An old absolute path in `Raw frame file` is allowed: a same-name image under
+the dropped directory takes priority. A renamed calibrated frame cannot be
+joined, so restore the original filename. If duplicate same-name images exist
+under multiple subdirectories, remove the ambiguity by keeping only the intended
+input set together.
+
+### SharpCap PNG/TIFF requires a target or pixel scale
+
+PNG/TIFF does not reliably contain a Horizons target name or plate-solve scale.
+Specify `--horizons-object` or `--horizons-command` together with
+`--pixel-scale-arcsec`. An existing `--ephemeris-csv` can replace the target
+name. The observing site is optional through `--site-longitude` and
+`--site-latitude`; omission uses the geocenter. Do not omit the site for a close
+Earth approach where topocentric parallax can be significant.
+
+### Siril starts for SharpCap Live Stack input
+
+Skipping Siril requires `LiveStack.AlignFrames=True` and complete X/Y offsets
+and rotation for every selected frame. Missing alignment, disabled alignment,
+or `--include-sharpcap-rejected` causes the intentional Siril fallback. Inspect
+the `registration=` message in the run log.
 
 ### `--reference-frame-file was not found`
 

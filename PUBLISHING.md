@@ -22,6 +22,9 @@ Use the Siril-free package contents as the GitHub repository root:
 - `seestar-metcalf-stack.sh`
 - `seestar-metcalf-stack.exe`
 - `build-seestar-metcalf-stack-exe.ps1`
+- `build-release-packages.ps1`
+- `release-package-manifest.psd1`
+- `verify-release-packages.ps1`
 - `setup-python-deps.cmd`
 - `setup-macos.sh`
 - `set-astrometry-api-key.cmd`
@@ -60,18 +63,42 @@ Confirm that no observing data, API key, FITS/PNG output, log, or local Siril
 installation is included in the staged files. The bug-report template under
 `.github/ISSUE_TEMPLATE/` should remain available in the public repository.
 
-Create both release zips:
+Before packaging a SharpCap Live Stack release, run one complete aligned
+StackLog fixture with the Siril-free package and verify all of the following:
+
+- the log reports `registration=SharpCap offsets; Siril will be skipped`;
+- no Siril executable or launcher is invoked;
+- copied/calibrated same-name frames are selected instead of stale absolute CSV paths;
+- Metcalf, star-fixed, and side-by-side FITS/PNG products are created.
+
+Build both release zips through the single release entry point. The package
+scope is defined only in `release-package-manifest.psd1`:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\package-seestar-metcalf-stack.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\package-seestar-metcalf-stack-siril.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-release-packages.ps1 -Version X.Y.Z
 ```
 
-Upload both files from `dist/` to the GitHub Release:
+This command rebuilds the Windows EXE, creates both directory trees and ZIPs,
+and then verifies their contents. The Siril copy is checked against the pinned
+source by exact file count and total byte count. The completed ZIP is opened
+again and checked for required executables, licenses, minimum Siril file count,
+and uncompressed size. The standard ZIP is checked to ensure that Siril was not
+included accidentally. Any mismatch stops the build with a non-zero exit code.
+
+Successful verification writes `dist/SHA256SUMS-vX.Y.Z.txt`. Upload the two ZIPs
+and this checksum file. Do not upload an asset if this command did not finish
+with both `Verifying ... OK` messages.
+
+For a deliberate fast rebuild using an already current EXE, add
+`-SkipExeBuild`. `build-release-packages.ps1` is the only supported release
+package entry point, so package contents cannot diverge between two scripts.
+
+Upload all three files from `dist/` to the GitHub Release:
 
 - `seestar-metcalf-stack-vX.Y.Z.zip`: Siril-free package with Windows EXE and macOS source launchers
 - `seestar-metcalf-stack-siril-vX.Y.Z.zip`: recommended Windows convenience package with Siril bundled
   and `seestar-metcalf-stack.exe` containing the Python runtime
+- `SHA256SUMS-vX.Y.Z.txt`: SHA-256 checksums produced only after both ZIPs pass validation
 
 The Siril-bundled zip must retain:
 
@@ -104,7 +131,8 @@ Assets:
 - seestar-metcalf-stack-vX.Y.Z.zip: Siril-free package and macOS source launchers.
 
 Requirements:
-- Siril CLI
+- Siril CLI for Seestar, ordinary images, or incomplete SharpCap alignment logs
+- no Siril requirement for complete SharpCap Live Stack alignment logs
 - Astrometry.net API key
 - Network access to Astrometry.net and JPL Horizons
 

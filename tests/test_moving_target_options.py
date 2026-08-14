@@ -1,4 +1,5 @@
 import io
+import csv
 import tempfile
 import unittest
 from argparse import Namespace
@@ -17,6 +18,7 @@ import moving_target_stack as stacker
 import moving_target_pipeline as pipeline
 import astrometry_solve
 import horizons_ephemeris as horizons
+import sharpcap_stacklog as sharpcap
 
 
 class FitsPatternTests(unittest.TestCase):
@@ -57,6 +59,184 @@ class FitsPatternTests(unittest.TestCase):
         self.assertEqual(args.site_longitude, 139.6)
         self.assertEqual(args.site_latitude, 35.9)
         self.assertAlmostEqual(args.pixel_scale_arcsec, 0.959)
+
+
+class SharpCapStackLogTests(unittest.TestCase):
+    def write_session(self, root: Path, version: str = "4.1.13800.0") -> None:
+        (root / "rawframes").mkdir(parents=True)
+        (root / "Stack.CameraSettings.txt").write_text(
+            "\n".join(
+                [
+                    "Exposure=20.000s",
+                    f"SharpCapVersion={version}",
+                    "LiveStack.AlignFrames=True",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        for name in ("frame_00001.png", "frame_00002.png"):
+            Image.fromarray(np.zeros((4, 6), dtype=np.uint16)).save(root / "rawframes" / name)
+        with (root / "stacklog.csv").open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "Frame Index",
+                    "Raw frame file",
+                    "Date/Time",
+                    "Frame Stacked?",
+                    "Frame Rotation (degrees)",
+                    "Frame Offset Y (pixels)",
+                    "Frame Offset X (pixels)",
+                    "Detected Star Count",
+                    "Frame Star FWHM",
+                ]
+            )
+            writer.writerow([1, r"C:\old\rawframes\frame_00001.png", "2026-08-07T01:00:20+09:00", 1, 0.1, 2, 3, 8, 3.5])
+            writer.writerow([2, r"C:\old\rawframes\frame_00002.png", "2026-08-07T01:00:40+09:00", 0, 0, 0, 0, 2, 9.0])
+
+    def test_stacklog_uses_headers_and_defaults_to_stacked_rows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "target" / "2026-08-06" / "session"
+            self.write_session(root)
+
+            session = sharpcap.load_sharpcap_session(root)
+
+            self.assertIsNotNone(session)
+            self.assertEqual(len(session.frames), 1)
+            self.assertEqual(session.rejected_rows, 1)
+            self.assertEqual(session.frames[0].frame_index, 1)
+            self.assertEqual(session.frames[0].path.name, "frame_00001.png")
+            self.assertEqual(session.frames[0].time, datetime(2026, 8, 6, 16, 0, 10, tzinfo=timezone.utc))
+            self.assertTrue(session.alignment_complete)
+
+    def test_stacklog_can_be_stored_inside_rawframe_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "target" / "2026-08-06" / "session"
+            self.write_session(root)
+            (root / "stacklog.csv").replace(root / "rawframes" / "stacklog.csv")
+
+            session = sharpcap.load_sharpcap_session(root / "rawframes")
+
+            self.assertIsNotNone(session)
+            self.assertEqual(session.stacklog.parent, (root / "rawframes").resolve())
+            self.assertEqual(session.settings_file, root / "Stack.CameraSettings.txt")
+            self.assertEqual(session.frames[0].path.parent, (root / "rawframes").resolve())
+
+    def test_stacklog_file_itself_can_be_used_as_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "target" / "2026-08-06" / "session"
+            self.write_session(root)
+
+            session = sharpcap.load_sharpcap_session(root / "stacklog.csv")
+
+            self.assertIsNotNone(session)
+            self.assertEqual(session.root, root.resolve())
+            self.assertEqual(session.stacklog, (root / "stacklog.csv").resolve())
+
+    def test_non_stacklog_file_is_not_treated_as_session_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "target" / "2026-08-06" / "session"
+            self.write_session(root)
+
+            session = sharpcap.load_sharpcap_session(root / "rawframes" / "frame_00001.png")
+
+            self.assertIsNone(session)
+
+    def test_parent_stacklog_is_found_for_renamed_frame_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "target" / "2026-08-06" / "session"
+            self.write_session(root)
+            processed = root / "processed_frames"
+            (root / "rawframes").replace(processed)
+
+            session = sharpcap.load_sharpcap_session(processed)
+
+            self.assertIsNotNone(session)
+            self.assertEqual(session.frames[0].path.parent, processed.resolve())
+
+    def test_relocated_local_frame_wins_over_existing_recorded_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "target" / "2026-08-06" / "session"
+            self.write_session(root)
+            legacy = Path(temporary) / "legacy" / "frame_00001.png"
+            legacy.parent.mkdir()
+            Image.fromarray(np.full((4, 6), 123, dtype=np.uint16)).save(legacy)
+            stacklog = root / "stacklog.csv"
+            content = stacklog.read_text(encoding="utf-8")
+            content = content.replace(r"C:\old\rawframes\frame_00001.png", str(legacy))
+            stacklog.write_text(content, encoding="utf-8")
+
+            session = sharpcap.load_sharpcap_session(root / "rawframes")
+
+            self.assertIsNotNone(session)
+            self.assertEqual(session.frames[0].path, (root / "rawframes" / "frame_00001.png").resolve())
+
+    def test_nonfits_sharpcap_requires_target_and_pixel_scale(self):
+        args = Namespace(
+            sharpcap_session=object(),
+            ephemeris_csv=None,
+            horizons_object=None,
+            horizons_command=None,
+            pixel_scale_arcsec=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires the moving target"):
+            pipeline.validate_sharpcap_inputs(args, Path("frame.png"))
+
+        args.horizons_object = "10P/Tempel 2"
+        with self.assertRaisesRegex(ValueError, "requires --pixel-scale-arcsec"):
+            pipeline.validate_sharpcap_inputs(args, Path("frame.png"))
+
+        args.pixel_scale_arcsec = 2.392
+        pipeline.validate_sharpcap_inputs(args, Path("frame.png"))
+
+    def test_nonexistent_ephemeris_does_not_replace_target_name(self):
+        args = Namespace(
+            sharpcap_session=object(),
+            ephemeris_csv=Path("not-created-yet.csv"),
+            horizons_object=None,
+            horizons_command=None,
+            pixel_scale_arcsec=2.392,
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires the moving target"):
+            pipeline.validate_sharpcap_inputs(args, Path("frame.png"))
+
+    def test_rejected_rows_force_siril_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "target" / "2026-08-06" / "session"
+            self.write_session(root)
+
+            session = sharpcap.load_sharpcap_session(root, include_rejected=True)
+
+            self.assertEqual(len(session.frames), 2)
+            self.assertFalse(session.alignment_complete)
+
+    def test_old_sharpcap_version_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "target" / "2026-08-06" / "session"
+            self.write_session(root, version="4.1.10000.0")
+
+            with self.assertRaisesRegex(RuntimeError, "older than supported"):
+                sharpcap.load_sharpcap_session(root)
+
+    def test_relative_transform_rebases_offsets(self):
+        frame = {"offset_x_px": 8.0, "offset_y_px": 5.0, "rotation_deg": 2.0}
+        reference = {"offset_x_px": 3.0, "offset_y_px": 1.0, "rotation_deg": 0.0}
+
+        tx, ty, rotation = stacker.relative_sharpcap_transform(frame, reference)
+
+        self.assertAlmostEqual(tx, 5.0)
+        self.assertAlmostEqual(ty, 4.0)
+        self.assertAlmostEqual(rotation, 2.0)
+
+    def test_debayer_preserves_known_rggb_samples(self):
+        mosaic = np.arange(16, dtype=np.float32).reshape(4, 4)
+
+        rgb = stacker.debayer_bilinear(mosaic, "RGGB")
+
+        np.testing.assert_array_equal(rgb[0, 0::2, 0::2], mosaic[0::2, 0::2])
+        np.testing.assert_array_equal(rgb[2, 1::2, 1::2], mosaic[1::2, 1::2])
 
 
 class HorizonsObjectResolutionTests(unittest.TestCase):

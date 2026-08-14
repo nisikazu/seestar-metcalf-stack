@@ -4,7 +4,7 @@
 
 [English](README-en.md) | [macOSセットアップ](README-macOS.md)
 
-Seestar のサブフレームFITSから、彗星や小惑星を追跡したメトカーフスタックを作るWindows/macOS向けツールです。同じフレームから背景星固定スタックと、両者を左右に並べた比較FITSも作成します。
+SeestarのサブフレームFITS、またはSharpCap Live Stackのraw frameから、彗星や小惑星を追跡したメトカーフスタックを作るWindows/macOS向けツールです。同じフレームから背景星固定スタックと、両者を左右に並べた比較FITSも作成します。
 
 これは撮影後の画像処理専用ツールです。Seestar本体は制御せず、Seestar通信用のPEMや秘密キーも必要ありません。
 
@@ -19,19 +19,48 @@ Seestar のサブフレームFITSから、彗星や小惑星を追跡したメ�
 
 ### SharpCapで撮影する場合
 
-SharpCapのFITSを使う場合は、撮影前に次の設定を確認してください。
+SharpCap 4.1.10745以降のLive Stackで、raw frame保存、`Create CSV log of frame information for each stack`、背景星位置合わせを有効にします。採用フレームすべてのX/Y offsetとrotationが`stacklog.csv`にそろっていれば、本ツールはその情報を利用し、Sirilを起動せずに背景星固定・メトカーフスタックを作成します。デフォルトでは`Frame Stacked?`が成功のraw frameだけを使います。
 
-1. `File` - `SharpCapの設定` - `プレートソルブ` タブで、使用する望遠鏡・カメラの焦点距離を設定します。
-2. `極軸合わせ` タブで、観測地の経度・緯度を設定します。
-3. 撮影したFITSファイルを保存し、フォルダを本ツールで処理します。
+SharpCap Live Stackのraw frameは、Live Stack側のdark、flat、ホットピクセル除去が適用される前のデータとして扱ってください。本ツール自身はdark/flat補正やホットピクセル除去を行いません。必要な場合は別ソフトで各raw frameをあらかじめ補正し、**元と同じファイル名、画像サイズ、向き、切り抜き範囲**で保存してください。リサイズ、回転、反転、クロップを行うとStackLogの位置合わせ量を利用できません。
 
-通常はSharpCapで設定した焦点距離と観測地がFITSへ記録され、それを利用できます。FITSに観測地が記録されていない場合は、東経を正、北緯を正としてコマンドから指定できます。コマンド指定はFITSの値より優先されます。
+推奨構造は次のとおりです。セッションフォルダを丸ごとコピーし、コピー側の`rawframes`だけを同名の補正済み画像へ置き換えます。
 
-```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\SharpCap\frames" --site-longitude 139.6 --site-latitude +35.9
+```text
+10P_processed_session\
+  stacklog.csv
+  Stack.CameraSettings.txt
+  rawframes\
+    frame_00001.png
+    frame_00002.png
 ```
 
-FITSに焦点距離や画素サイズが記録されていない場合は、画素あたりの角度を**秒角/画素（arcsec/pixel）**で指定します。値は、実効焦点距離をmm、画素ピッチをµmとして、次の式で計算できます。
+`rawframes`フォルダだけをコピーする場合は、`stacklog.csv`と`*.CameraSettings.txt`もその中へコピーできます。本ツールはドロップしたフォルダ内を先に探し、次に1つ上のフォルダを探します。CameraSettingsはSharpCapのバージョン確認と、PNG/TIFFの露光中央時刻を求めるために必要です。
+
+フォルダの代わりに、その中の`stacklog.csv`を`seestar-metcalf-stack.cmd`へドラッグ&ドロップしても実行できます。この場合は`stacklog.csv`の親フォルダを処理対象とし、同じフォルダまたはその配下からCSVに記録された同名フレームを探します。
+
+```text
+10P_processed_rawframes\
+  stacklog.csv
+  Stack.CameraSettings.txt
+  frame_00001.png
+  frame_00002.png
+```
+
+コピー後はCSV内の旧絶対パスが存在しなくても構いません。`Raw frame file`のファイル名を使い、ドロップしたフォルダ内の同名画像を旧パスより優先して対応付けます。同名画像が複数ある場合は誤対応を避けるため停止します。
+
+PNG/TIFFのLive Stack raw frameでは、次をコマンドで指定します。
+
+- 対象天体: `--horizons-object`、`--horizons-command`、または作成済みの`--ephemeris-csv`
+- 画素スケール: `--pixel-scale-arcsec`（秒角/画素）
+- 観測地: `--site-longitude`（東経を正）と`--site-latitude`（北緯を正）。省略可能
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\10P_processed_rawframes" --horizons-object "10P/Tempel 2" --pixel-scale-arcsec 2.392 --site-longitude 139.6 --site-latitude +35.9
+```
+
+観測地を省略した場合はJPL Horizonsの地心座標を使います。通常の彗星・小惑星を数時間処理する用途では差が小さいことが多い一方、地球へ近接中の天体では地心視差が無視できないため、正確な観測地を指定してください。
+
+画素スケールは、実効焦点距離をmm、画素ピッチをµmとして次の式で計算できます。
 
 ```text
 画素スケール [秒角/画素] = 206.265 × 画素ピッチ [µm] ÷ 実効焦点距離 [mm]
@@ -40,10 +69,16 @@ FITSに焦点距離や画素サイズが記録されていない場合は、画�
 ビニングを行っている場合は、画素ピッチにビニング倍率を掛けた実効画素ピッチを使います。例えば、実効焦点距離250 mm、画素ピッチ2.9 µmなら、`206.265 × 2.9 ÷ 250 = 2.392` 秒角/画素です。
 
 ```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\SharpCap\frames" --pixel-scale-arcsec 2.392
+.\seestar-metcalf-stack.cmd "C:\path\to\SharpCap\frames" --horizons-object "10P/Tempel 2" --pixel-scale-arcsec 2.392
 ```
 
-FITSにもコマンドにも観測地がない場合は、JPL Horizonsの計算中心を自動的に地心へ切り替えます。
+SharpCap Live StackのPNG/TIFFが2D Bayer RAWで、画像自身にBayer patternが記録されていない場合は、CameraSettingsとカメラ仕様を確認して明示します。
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\SharpCap\session" --horizons-object "10P/Tempel 2" --pixel-scale-arcsec 2.392 --bayer-pattern RGGB
+```
+
+PNGでは画像内に撮影時刻がほぼ残らないため、`stacklog.csv`の時刻からCameraSettingsの露光時間の半分を引いて露光中央時刻を求めます。FITSに`DATE-AVG`がある場合はそれを優先します。記録が不完全、位置合わせがOFF、または`--include-sharpcap-rejected`で失敗フレームも含めた場合はSirilへフォールバックします。詳細な根拠は[SharpCap時刻設計資料](SHARPCAP-TIMESTAMPS.md)を参照してください。
 
 ## 必要な外部ツール一覧
 
@@ -51,7 +86,7 @@ FITSにもコマンドにも観測地がない場合は、JPL Horizonsの計算�
 
 - **Astrometry.net** は基準フレームをプレートソルブし、その画像が空のどこを、どの画角と向きで撮影したかを確定します。これにより天体の赤経・赤緯を画像上の画素位置へ変換できます。アカウントとAPIキーが必要ですが、同梱の `set-astrometry-api-key.cmd` で設定できます。
 - **JPL Horizons** は各露光時刻における対象天体の赤経・赤緯を返します。この固有運動から、フレームごとに追加すべき移動量を求めます。JPLのAPIキーは不要です。
-- **Siril** は背景星を検出し、各フレームの平行移動・回転・倍率を基準フレームに対して推定します。本ツールはその結果にHorizons由来の天体移動量を加え、最後の画素スタックを行います。
+- **Siril** は背景星を検出し、各フレームの平行移動・回転・倍率を基準フレームに対して推定します。本ツールはその結果にHorizons由来の天体移動量を加え、最後の画素スタックを行います。SharpCap Live StackのX/Y offsetとrotationが完全に記録されている場合だけ、この役割をStackLogで代替してSirilを自動省略します。
 - **Python、NumPy、Pillow** はソースコードを実行・改造する場合に必要です。配布版の `seestar-metcalf-stack.exe` には実行に必要なPythonランタイムが含まれているため、通常の利用者はPythonやライブラリを別途インストールする必要はありません。
 
 処理の分担は、Astrometry.netが「画像がどこを向いているか」、Horizonsが「対象がどう動いたか」、Sirilが「背景星の写り方がフレーム間でどうずれたか」を決めます。Sirilは背景星の検出とフレーム間の平行移動・回転・倍率の推定を担当します。最終的なメトカーフスタック、星固定スタック、線形FITSの書き出しはPython側で行います。
@@ -61,11 +96,13 @@ FITSにもコマンドにも観測地がない場合は、JPL Horizonsの計算�
 - Windows 10/11、またはPythonソース版を実行するmacOS 13以降
 - Astrometry.netとJPL Horizonsへ接続できるネットワーク
 - Astrometry.net APIキー
-- Siril 1.4以降
+- Siril 1.4以降（Seestar、通常撮影、またはSharpCapのalignment情報が不完全な場合。完全なSharpCap Live Stackログでは自動省略）
 
 Sirilをまだインストールしていない利用者には、容量の大きい `seestar-metcalf-stack-siril-vX.Y.Z.zip` を標準版として推奨します。Sirilと実行用EXEを含むため、PythonやSirilを別途インストールする必要がありません。同梱されるSiril部分にはGPLv3が適用されます。
 
 すでにSirilをインストール済みの場合や、配布サイズを小さくしたい場合は `seestar-metcalf-stack-vX.Y.Z.zip` を使います。この版も `seestar-metcalf-stack.exe` を含むため、通常の実行にPythonの別途インストールは不要です。Sirilは別途インストールし、`siril-cli.exe` にPATHを通すか、環境変数 `SIRIL_CLI` にフルパスを設定します。
+
+SharpCap Live StackのX/Y offsetとrotationが全採用フレームにそろっている処理だけを行う場合は、Sirilなし版だけで実行できます。ログに`registration=SharpCap offsets; Siril will be skipped`と表示されることを確認してください。
 
 バージョンアップ時は、Sirilなし版を展開して新しいファイルへ更新できます。旧版から次のものを新しいフォルダへコピーすると、SirilやAPIキー、過去の出力を引き継げます。
 
@@ -79,26 +116,25 @@ Pythonコードを改造した場合は、古いEXEが優先実行されない�
 
 ## 初回セットアップ
 
-1. [GitHub Releases](https://github.com/nisikazu/seestar-metcalf-stack/releases)から使用するZIPをダウンロードします。
-2. ZIPを展開する前に右クリックして`プロパティ`を開きます。`全般`タブ下部の`セキュリティ`に「このファイルは他のコンピューターから取得したものです」と表示されている場合は、`許可する`をチェックして`OK`を押してから展開します。この欄がなければ、そのまま展開できます。この操作は公式GitHub Releasesから取得したZIPにだけ行ってください。
-3. Siril未導入なら、Siril同梱版を展開します。通常のEXE実行だけなら、これでPython依存パッケージのインストールは不要です。
-4. Sirilを別途利用する場合は、Sirilをインストールし、`siril-cli.exe` をPATHへ追加するか `SIRIL_CLI` を設定します。Sirilなし版を使う場合も同じです。
-5. Pythonコードを実行・改造する場合だけ、展開したフォルダで依存パッケージを準備します。
+1. [GitHubの公式Release](https://github.com/nisikazu/seestar-metcalf-stack/releases)からZIPをダウンロードします。WindowsでZIPを右クリックして`プロパティ`を開き、`全般`タブの下部に`セキュリティ: このファイルは他のコンピューターから取得したものです`と`許可する`が表示された場合は、`許可する`にチェックを入れて`OK`を押してから展開します。この表示がなければ、そのまま展開できます。配布元を確認できないZIPではブロックを解除しないでください。
+2. Seestar画像、通常撮影画像、または位置合わせ情報が不完全なSharpCapデータを処理し、Sirilをまだ導入していない場合は、Siril同梱版を展開します。通常のEXE実行だけならPython依存パッケージのインストールは不要です。
+3. Sirilなし版を使う場合、完全なX/Y offsetとrotationを持つSharpCap Live StackデータだけならSirilは不要です。それ以外のデータを処理する場合はSirilを別途インストールし、`siril-cli.exe`をPATHへ追加するか`SIRIL_CLI`を設定します。
+4. Pythonコードを実行・改造する場合だけ、展開したフォルダで依存パッケージを準備します。
 
    ```bat
    .\setup-python-deps.cmd
    ```
 
-6. Astrometry.netのAPIキーを次の手順で取得します。
+5. Astrometry.netのAPIキーを次の手順で取得します。
 
    1. ブラウザで[Astrometry.netのログイン画面](https://nova.astrometry.net/signin)を開きます。
    2. Googleアカウントなど、画面に表示される外部認証を使ってログイン、または新規登録します。
    3. ログイン後、画面上部の `API` または `API Help` を開きます。[API Helpを直接開く](https://nova.astrometry.net/api_help)こともできます。
    4. ページに表示される `Your API key is xxxxxx...` の英数字部分をコピーします。
 
-7. Windowsで展開したSeestar Metcalf Stackのフォルダをエクスプローラーで開きます。ファイルではなくフォルダ内の空いている場所を右クリックし、`ターミナルで開く`を選びます。
+6. Windowsで展開したSeestar Metcalf Stackのフォルダをエクスプローラーで開きます。ファイルではなくフォルダ内の空いている場所を右クリックし、`ターミナルで開く`を選びます。
 
-8. 開いたターミナルで、`YOUR_API_KEY`を手順6でコピーした文字列に置き換えて実行します。PowerShellでは現在のフォルダにあるコマンドを実行するとき、先頭に`.\`が必要です。
+7. 開いたターミナルで、`YOUR_API_KEY`を手順5でコピーした文字列に置き換えて実行します。PowerShellでは現在のフォルダにあるコマンドを実行するとき、先頭に`.\`が必要です。
 
    ```bat
    .\set-astrometry-api-key.cmd YOUR_API_KEY

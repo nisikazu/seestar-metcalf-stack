@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Moving-target stack for Seestar/Siril FITS subframes.
+"""Moving-target stack for Seestar or SharpCap subframes.
 
 Pipeline:
 1. Copy a clean subset of source FITS files into a work directory.
@@ -9,7 +9,7 @@ Pipeline:
 4. Shift each registered frame so the target lands on the selected reference
    pixel, then mean- or median-stack the shifted frames.
 
-The script intentionally depends only on numpy and Pillow in addition to Siril.
+SharpCap Live Stack offsets can replace Siril registration when complete.
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+from sharpcap_stacklog import load_manifest
 
 
 REPO_ROOT = (
@@ -306,6 +308,61 @@ def read_fits(path: Path) -> FitsImage:
     return FitsImage(header=header, cards=cards, data=data)
 
 
+def read_raster(path: Path) -> FitsImage:
+    with Image.open(path) as image:
+        array = np.asarray(image)
+    original_dtype = array.dtype
+    if array.ndim == 3:
+        if array.shape[2] < 3:
+            array = array[:, :, 0]
+        else:
+            array = np.moveaxis(array[:, :, :3], 2, 0)
+    header: dict[str, object] = {"NAXIS1": int(array.shape[-1]), "NAXIS2": int(array.shape[-2])}
+    if np.issubdtype(original_dtype, np.integer):
+        header["SATURATE"] = int(np.iinfo(original_dtype).max)
+    return FitsImage(header=header, cards=[], data=array.astype(np.float32))
+
+
+def debayer_bilinear(data: np.ndarray, pattern: str) -> np.ndarray:
+    """Convert a 2D Bayer mosaic to CHW RGB while preserving known samples."""
+    if data.ndim != 2:
+        return data
+    pattern = pattern.strip().upper()
+    if pattern not in {"RGGB", "BGGR", "GRBG", "GBRG"}:
+        raise ValueError(f"Unsupported Bayer pattern: {pattern}")
+    height, width = data.shape
+    colors = np.asarray(list(pattern)).reshape(2, 2)
+    kernel = np.asarray([[1.0, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]], dtype=np.float64)
+    planes: list[np.ndarray] = []
+    for color in "RGB":
+        mask = np.zeros((height, width), dtype=np.float64)
+        for y in range(2):
+            for x in range(2):
+                if colors[y, x] == color:
+                    mask[y::2, x::2] = 1.0
+        padded_data = np.pad(data.astype(np.float64) * mask, 1, mode="edge")
+        padded_mask = np.pad(mask, 1, mode="edge")
+        numerator = np.zeros((height, width), dtype=np.float64)
+        denominator = np.zeros((height, width), dtype=np.float64)
+        for ky in range(3):
+            for kx in range(3):
+                weight = kernel[ky, kx]
+                numerator += padded_data[ky : ky + height, kx : kx + width] * weight
+                denominator += padded_mask[ky : ky + height, kx : kx + width] * weight
+        plane = np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0)
+        plane[mask.astype(bool)] = data[mask.astype(bool)]
+        planes.append(plane.astype(np.float32))
+    return np.stack(planes, axis=0)
+
+
+def read_source_image(path: Path, bayer_pattern: str | None = None) -> FitsImage:
+    image = read_fits(path) if path.suffix.lower() in {".fit", ".fits"} else read_raster(path)
+    pattern = bayer_pattern or str(image.header.get("BAYERPAT") or image.header.get("COLORTYP") or "").strip()
+    if image.data.ndim == 2 and pattern:
+        image = FitsImage(header=image.header, cards=image.cards, data=debayer_bilinear(image.data, pattern))
+    return image
+
+
 def unsigned_uint16_full_scale(header: dict[str, object]) -> float | None:
     try:
         bitpix = int(header.get("BITPIX", 0))
@@ -462,6 +519,25 @@ def write_fits_float32(path: Path, data: np.ndarray, source_header: dict[str, ob
     data_bytes += b"\0" * ((-len(data_bytes)) % 2880)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(header_bytes + data_bytes)
+
+
+def write_registered_float(
+    path: Path,
+    image: FitsImage,
+    date_obs: datetime,
+    object_name: str,
+    exposure_seconds: float | None = None,
+) -> None:
+    header = dict(image.header)
+    header.setdefault("OBJECT", object_name)
+    header["DATE-OBS"] = date_obs.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if exposure_seconds is not None:
+        header["EXPOSURE"] = exposure_seconds
+    saturation = fits_saturation_level(header)
+    if saturation is not None:
+        header["SATURATE"] = saturation
+    extra = {key: header[key] for key in ("SATURATE", "SATLEVEL") if key in header}
+    write_fits_float32(path, image.data.astype(np.float32), header, extra)
 
 
 def scale_to_uint16(
@@ -652,6 +728,73 @@ def shift_image(
         planes.append(shifted)
         common_mask = mask if common_mask is None else (common_mask & mask)
     return np.stack(planes, axis=0), common_mask
+
+
+def transform_image(
+    data: np.ndarray,
+    tx: float,
+    ty: float,
+    rotation_deg: float,
+    source_valid: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply a forward center-based rotation and translation using inverse sampling."""
+    if abs(rotation_deg) < 1.0e-12:
+        return shift_image(data, tx, ty, source_valid)
+    planes = data[np.newaxis, :, :] if data.ndim == 2 else data
+    _channels, height, width = planes.shape
+    if source_valid is not None and source_valid.shape != (height, width):
+        raise ValueError(f"Validity mask shape changed: {source_valid.shape} != {(height, width)}")
+    yy, xx = np.indices((height, width), dtype=np.float64)
+    cx = (width - 1.0) / 2.0
+    cy = (height - 1.0) / 2.0
+    angle = math.radians(rotation_deg)
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    out_x = xx - cx - tx
+    out_y = yy - cy - ty
+    src_x = cosine * out_x + sine * out_y + cx
+    src_y = -sine * out_x + cosine * out_y + cy
+    x0 = np.floor(src_x).astype(np.int32)
+    y0 = np.floor(src_y).astype(np.int32)
+    x1 = x0 + 1
+    y1 = y0 + 1
+    valid = (x0 >= 0) & (y0 >= 0) & (x1 < width) & (y1 < height)
+    if source_valid is not None and np.any(valid):
+        positions = np.flatnonzero(valid)
+        py = positions // width
+        px = positions % width
+        kernel_valid = (
+            source_valid[y0[py, px], x0[py, px]]
+            & source_valid[y0[py, px], x1[py, px]]
+            & source_valid[y1[py, px], x0[py, px]]
+            & source_valid[y1[py, px], x1[py, px]]
+        )
+        valid[py, px] = kernel_valid
+    output = np.zeros_like(planes, dtype=np.float32)
+    if np.any(valid):
+        wx = src_x[valid] - x0[valid]
+        wy = src_y[valid] - y0[valid]
+        for channel, plane in enumerate(planes):
+            output[channel][valid] = (
+                (1.0 - wx) * (1.0 - wy) * plane[y0[valid], x0[valid]]
+                + wx * (1.0 - wy) * plane[y0[valid], x1[valid]]
+                + (1.0 - wx) * wy * plane[y1[valid], x0[valid]]
+                + wx * wy * plane[y1[valid], x1[valid]]
+            )
+    return (output[0] if data.ndim == 2 else output), valid
+
+
+def relative_sharpcap_transform(frame: dict[str, object], reference: dict[str, object]) -> tuple[float, float, float]:
+    """Convert StackLog transforms-to-stack-reference into a transform-to-selected-reference."""
+    frame_angle = float(frame["rotation_deg"])
+    reference_angle = float(reference["rotation_deg"])
+    delta_angle = frame_angle - reference_angle
+    delta_x = float(frame["offset_x_px"]) - float(reference["offset_x_px"])
+    delta_y = float(frame["offset_y_px"]) - float(reference["offset_y_px"])
+    inverse_reference = math.radians(-reference_angle)
+    tx = math.cos(inverse_reference) * delta_x - math.sin(inverse_reference) * delta_y
+    ty = math.sin(inverse_reference) * delta_x + math.cos(inverse_reference) * delta_y
+    return tx, ty, delta_angle
 
 
 def shift_plane(
@@ -909,20 +1052,14 @@ def write_siril_script(
     transform: str,
     minpairs: int | None,
     reference_index: int,
+    debayer: bool = True,
 ) -> None:
     register = f"register {basename} -prefix=r_ -transf={transform}"
     if minpairs:
         register += f" -minpairs={minpairs}"
+    convert = f"convert {basename} -debayer" if debayer else f"convert {basename}"
     path.write_text(
-        "\n".join(
-            [
-                "requires 1.4.0",
-                f"convert {basename} -debayer",
-                f"setref {basename}_ {reference_index}",
-                register,
-                "",
-            ]
-        ),
+        "\n".join(["requires 1.4.0", convert, f"setref {basename}_ {reference_index}", register, ""]),
         encoding="ascii",
     )
 
@@ -1024,6 +1161,18 @@ def select_reference_index(files: list[Path], mode: str, explicit_name: str | No
     for index, path in enumerate(files, start=1):
         header, _cards, _offset = read_fits_header(path)
         dated.append((parse_time(header["DATE-OBS"]), index))
+    midpoint = dated[0][0] + (dated[-1][0] - dated[0][0]) / 2
+    return min(dated, key=lambda item: (abs((item[0] - midpoint).total_seconds()), item[0]))[1]
+
+
+def select_manifest_reference_index(
+    files: list[Path], rows: list[dict[str, object]], mode: str, explicit_name: str | None = None
+) -> int:
+    if explicit_name:
+        return select_reference_index(files, "first", explicit_name)
+    if mode == "first":
+        return 1
+    dated = [(parse_time(row["time"]), index) for index, row in enumerate(rows, start=1)]
     midpoint = dated[0][0] + (dated[-1][0] - dated[0][0]) / 2
     return min(dated, key=lambda item: (abs((item[0] - midpoint).total_seconds()), item[0]))[1]
 
@@ -1661,6 +1810,12 @@ def filter_files_by_time(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Stack Seestar frames on a moving target")
     parser.add_argument("--source-dir", required=True, type=Path)
+    parser.add_argument("--frame-manifest", type=Path, help="Normalized SharpCap Live Stack frame manifest")
+    parser.add_argument(
+        "--bayer-pattern",
+        choices=("RGGB", "BGGR", "GRBG", "GBRG"),
+        help="Bayer pattern for SharpCap RAW PNG/TIFF when metadata is unavailable.",
+    )
     parser.add_argument("--ephemeris-csv", required=True, type=Path)
     parser.add_argument("--wcs-fits", type=Path)
     parser.add_argument("--astrometry-json", type=Path)
@@ -1791,41 +1946,87 @@ def main() -> int:
     if not args.wcs_fits and not args.astrometry_json:
         parser.error("--wcs-fits or --astrometry-json is required")
 
-    args.source_dir = resolve_source_dir(args.source_dir, args.pattern)
-    files = filter_files_by_time(
-        choose_files(args.source_dir, args.pattern, None, args.include_failed_frames),
-        args.after,
-        args.before,
-        args.session_gap_min,
-        args.session_index,
-        args.session_at,
-    )
+    manifest: dict[str, object] | None = load_manifest(args.frame_manifest) if args.frame_manifest else None
+    manifest_rows: list[dict[str, object]] = list(manifest["frames"]) if manifest else []
+    if manifest is not None:
+        files = [Path(str(row["path"])) for row in manifest_rows]
+        args.source_dir = Path(str(manifest["root"]))
+    else:
+        args.source_dir = resolve_source_dir(args.source_dir, args.pattern)
+        files = filter_files_by_time(
+            choose_files(args.source_dir, args.pattern, None, args.include_failed_frames),
+            args.after,
+            args.before,
+            args.session_gap_min,
+            args.session_index,
+            args.session_at,
+        )
     if args.count:
         files = files[: args.count]
+        if manifest is not None:
+            manifest_rows = manifest_rows[: args.count]
     if not files:
         raise FileNotFoundError("No files remain after time/session filtering")
-    reference_index = select_reference_index(files, args.reference_frame, args.reference_frame_file)
+    reference_index = (
+        select_manifest_reference_index(files, manifest_rows, args.reference_frame, args.reference_frame_file)
+        if manifest is not None
+        else select_reference_index(files, args.reference_frame, args.reference_frame_file)
+    )
     reference_mode = "file" if args.reference_frame_file else args.reference_frame
     reference_source = files[reference_index - 1]
     ephemeris = load_ephemeris(args.ephemeris_csv)
     if not args.work_name:
-        reference_header, _cards, _offset = read_fits_header(reference_source)
-        target = safe_name(str(reference_header.get("OBJECT") or reference_source.parent.name))
+        reference_header = read_source_image(reference_source, args.bayer_pattern).header
+        target = safe_name(str(reference_header.get("OBJECT") or (manifest or {}).get("object") or reference_source.parent.name))
         args.work_name = f"{target}_{processing_method_token(args.stack_method, args.rankfit_fraction)}"
     work_dir = prepare_work_dir(args.work_dir, args.work_root, args.work_name)
     registration_dir = work_dir / "registration_images"
     registration_dir.mkdir(parents=True, exist_ok=True)
+    use_sharpcap_registration = bool(manifest and manifest.get("alignment_complete"))
+    manifest_reference = manifest_rows[reference_index - 1] if use_sharpcap_registration else None
 
     copied: list[Path] = []
     try:
         if args.verbose:
-            print(f"[prepare] Copying {len(files)} source frames for Siril registration", flush=True)
+            action = "Preparing SharpCap-aligned frames" if use_sharpcap_registration else "Copying source frames for Siril registration"
+            print(f"[prepare] {action}: {len(files)} frames", flush=True)
         for i, source in enumerate(files, start=1):
             if args.verbose:
                 print(f"[prepare] frame {i}/{len(files)}: {source.name}", flush=True)
             destination = registration_dir / f"{args.basename}_src_{i:05d}.fit"
             copied.append(destination)
-            shutil.copy2(source, destination)
+            if use_sharpcap_registration:
+                row = manifest_rows[i - 1]
+                image = read_source_image(source, args.bayer_pattern)
+                tx, ty, angle = relative_sharpcap_transform(row, manifest_reference)
+                aligned, _valid = transform_image(image.data, tx, ty, angle)
+                registered = registration_dir / f"r_{args.basename}_{i:05d}.fit"
+                write_registered_float(
+                    registered,
+                    FitsImage(header=image.header, cards=image.cards, data=aligned),
+                    parse_time(row["time"]),
+                    str(manifest.get("object") or source.parent.name),
+                    float(manifest["exposure_seconds"]) if manifest.get("exposure_seconds") is not None else None,
+                )
+                write_registered_float(
+                    destination,
+                    image,
+                    parse_time(row["time"]),
+                    str(manifest.get("object") or source.parent.name),
+                    float(manifest["exposure_seconds"]) if manifest.get("exposure_seconds") is not None else None,
+                )
+            elif manifest is not None:
+                row = manifest_rows[i - 1]
+                image = read_source_image(source, args.bayer_pattern)
+                write_registered_float(
+                    destination,
+                    image,
+                    parse_time(row["time"]),
+                    str(manifest.get("object") or source.parent.name),
+                    float(manifest["exposure_seconds"]) if manifest.get("exposure_seconds") is not None else None,
+                )
+            else:
+                shutil.copy2(source, destination)
     except Exception:
         if not args.no_cleanup:
             cleanup_intermediate_images(registration_dir, args.basename, copied, len(copied))
@@ -1838,53 +2039,84 @@ def main() -> int:
         args.registration_transform,
         args.registration_minpairs,
         reference_index,
+        debayer=manifest is None,
     )
     registration_seq = registration_dir / f"{args.basename}_.seq"
     try:
-        if args.verbose:
+        if use_sharpcap_registration:
+            print("[registration] Using SharpCap StackLog alignment; Siril was not called", flush=True)
+            star_registrations = {}
+            reference_stack_index = int(manifest_reference["frame_index"])
+            for index, row in enumerate(manifest_rows, start=1):
+                tx, ty, angle = relative_sharpcap_transform(row, manifest_reference)
+                radians = math.radians(angle)
+                star_registrations[index] = SirilRegistration(
+                    index=index,
+                    selected=True,
+                    reference_index=reference_index,
+                    detected_stars=int(row["detected_stars"]) if row.get("detected_stars") is not None else None,
+                    fwhm_px=float(row["fwhm_px"]) if row.get("fwhm_px") is not None else None,
+                    matrix=(math.cos(radians), -math.sin(radians), tx, math.sin(radians), math.cos(radians), ty, 0.0, 0.0, 1.0),
+                )
+            match_diagnostics = {}
+            registration_issues = {}
+            registration_diagnostic_rows = build_registration_diagnostic_rows(
+                files, reference_index, star_registrations, match_diagnostics, registration_issues
+            )
+            registration_snapshot_csv = work_dir / "registration_diagnostics.csv"
+            write_registration_diagnostics(registration_snapshot_csv, registration_diagnostic_rows)
+            print(f"[registration] Diagnostics: {registration_snapshot_csv}", flush=True)
+            if args.verbose:
+                print(
+                    f"[registration] SharpCap produced {len(copied)}/{len(copied)} registered frames; "
+                    f"StackLog reference index={reference_stack_index}",
+                    flush=True,
+                )
+        elif args.verbose:
             print(f"[registration] Siril background-star registration: {len(copied)} frames", flush=True)
-        siril_output = run_siril(args.siril, registration_dir, siril_script, args.verbose)
-        star_registrations = parse_siril_registration(registration_seq)
-        match_diagnostics = parse_siril_match_diagnostics(siril_output)
-        registration_issues = registration_validation_issues(
-            files,
-            registration_dir,
-            args.basename,
-            star_registrations,
-            args.registration_minpairs,
-        )
-        registration_diagnostic_rows = build_registration_diagnostic_rows(
-            files,
-            reference_index,
-            star_registrations,
-            match_diagnostics,
-            registration_issues,
-        )
-        registration_snapshot_csv = work_dir / "registration_diagnostics.csv"
-        write_registration_diagnostics(registration_snapshot_csv, registration_diagnostic_rows)
-        print(f"[registration] Diagnostics: {registration_snapshot_csv}", flush=True)
-        reference_issues = registration_issues.get(reference_index)
-        if reference_issues:
-            details = "; ".join(reference_issues)
-            print(
-                "[warning] The selected reference frame has insufficient background stars; "
-                "no stack will be created.\n"
-                f"  - {reference_index}/{len(files)} {reference_source.name}: {details}",
-                file=sys.stderr,
-                flush=True,
+        if not use_sharpcap_registration:
+            siril_output = run_siril(args.siril, registration_dir, siril_script, args.verbose)
+            star_registrations = parse_siril_registration(registration_seq)
+            match_diagnostics = parse_siril_match_diagnostics(siril_output)
+            registration_issues = registration_validation_issues(
+                files,
+                registration_dir,
+                args.basename,
+                star_registrations,
+                args.registration_minpairs,
             )
-            raise RuntimeError("Selected reference frame cannot support background-star registration; see warning above")
-        registered_count = sum(
-            (registration_dir / f"r_{args.basename}_{i:05d}.fit").exists()
-            for i in range(1, len(copied) + 1)
-        )
-        if args.verbose:
-            usable_count = len(copied) - len(registration_issues)
-            print(
-                f"[registration] Siril produced {registered_count}/{len(copied)} registered frames; "
-                f"{usable_count}/{len(copied)} will be stacked",
-                flush=True,
+            registration_diagnostic_rows = build_registration_diagnostic_rows(
+                files,
+                reference_index,
+                star_registrations,
+                match_diagnostics,
+                registration_issues,
             )
+            registration_snapshot_csv = work_dir / "registration_diagnostics.csv"
+            write_registration_diagnostics(registration_snapshot_csv, registration_diagnostic_rows)
+            print(f"[registration] Diagnostics: {registration_snapshot_csv}", flush=True)
+            reference_issues = registration_issues.get(reference_index)
+            if reference_issues:
+                details = "; ".join(reference_issues)
+                print(
+                    "[warning] The selected reference frame has insufficient background stars; "
+                    "no stack will be created.\n"
+                    f"  - {reference_index}/{len(files)} {reference_source.name}: {details}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise RuntimeError("Selected reference frame cannot support background-star registration; see warning above")
+            registered_count = sum(
+                (registration_dir / f"r_{args.basename}_{i:05d}.fit").exists()
+                for i in range(1, len(copied) + 1)
+            )
+            if args.verbose:
+                usable_count = len(copied) - len(registration_issues)
+                print(
+                    f"[registration] Siril produced {registered_count}/{len(copied)} registered frames; "
+                    f"{usable_count}/{len(copied)} will be stacked",
+                    flush=True,
+                )
     except SirilRegistrationError as error:
         star_registrations = parse_siril_registration(registration_seq)
         star_registrations = merge_registration_diagnostics(
@@ -2384,6 +2616,8 @@ def main() -> int:
         "wcs_fits": str(args.wcs_fits) if args.wcs_fits else None,
         "astrometry_json": str(args.astrometry_json) if args.astrometry_json else None,
         "registration_transform": args.registration_transform,
+        "registration_source": "sharpcap-stacklog" if use_sharpcap_registration else "siril",
+        "frame_manifest": str(args.frame_manifest) if args.frame_manifest else None,
         "registration_minpairs": args.registration_minpairs,
         "registration_seq": str(registration_seq),
         "preview_flip_vertical": args.preview_flip_vertical,

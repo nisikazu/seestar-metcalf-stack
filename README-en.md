@@ -4,9 +4,9 @@
 
 [日本語](README.md) | [macOS setup (Japanese)](README-macOS.md)
 
-Seestar Metcalf Stack turns Seestar subframe FITS files into a stack that
-follows a moving comet or asteroid. It also creates a star-aligned stack from
-the same frames, plus a side-by-side comparison FITS.
+Seestar Metcalf Stack turns Seestar subframe FITS files or SharpCap Live Stack
+raw frames into a stack that follows a moving comet or asteroid. It also creates
+a star-aligned stack from the same frames, plus a side-by-side comparison FITS.
 
 This is a post-processing tool. It does not control a Seestar and does not need
 the Seestar PEM/private communication key.
@@ -30,13 +30,71 @@ Before using it, observe a comet or asteroid and keep the original frame files.
 The default input pattern is `*.fit*`, so both `.fit` and `.fits` files are
 accepted. Other files in the directory are not sent to Siril. This also allows
 FITS frames exported by SharpCap to be used. If the FITS files do not contain
-an observing site, Horizons automatically falls back to the geocenter. You can
-provide a site explicitly, with east-positive longitude and north-positive
-latitude:
+an observing site, Horizons automatically falls back to the geocenter.
+
+### SharpCap Live Stack input
+
+For SharpCap 4.1.10745 or later, enable Live Stack raw-frame saving, `Create CSV
+log of frame information for each stack`, and alignment. When every selected
+row has X/Y offsets and rotation, the pipeline applies those transforms directly
+and does not launch Siril. Only rows whose `Frame Stacked?` value is true are
+used by default.
+
+Treat Live Stack raw frames as data saved before the Live Stack dark, flat, and
+hot-pixel corrections. This tool does not perform those calibration steps. If
+calibration is required, process every raw frame first and save it with the
+**same filename, dimensions, orientation, and crop**. Resizing, rotating,
+flipping, or cropping invalidates the StackLog alignment values.
+
+The recommended approach is to copy the complete session and replace only the
+images inside the copied `rawframes` directory:
+
+```text
+10P_processed_session\
+  stacklog.csv
+  Stack.CameraSettings.txt
+  rawframes\
+    frame_00001.png
+    frame_00002.png
+```
+
+If only the raw-frame directory is copied, `stacklog.csv` and the
+`*.CameraSettings.txt` file may instead be copied into that directory. The tool
+searches the dropped directory first and then its parent. CameraSettings is
+needed to verify the SharpCap version and to estimate PNG/TIFF exposure
+midpoints.
+
+Instead of a folder, you may drag and drop `stacklog.csv` itself onto
+`seestar-metcalf-stack.cmd`. Its parent directory becomes the session source,
+and matching frame basenames are resolved from that directory or its descendants.
+
+```text
+10P_processed_rawframes\
+  stacklog.csv
+  Stack.CameraSettings.txt
+  frame_00001.png
+  frame_00002.png
+```
+
+The old absolute paths stored in the CSV may be broken after copying. Files are
+matched by the `Raw frame file` basename, and a same-name image under the
+dropped directory takes priority over the recorded old path. Ambiguous duplicate
+filenames stop the run instead of silently selecting the wrong image.
+
+For PNG/TIFF Live Stack raw frames, specify the target and pixel scale. The
+observing site is optional:
 
 ```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\frames" --site-longitude 139.6 --site-latitude 35.9
+.\seestar-metcalf-stack.cmd "C:\path\to\10P_processed_rawframes" --horizons-object "10P/Tempel 2" --pixel-scale-arcsec 2.392 --site-longitude 139.6 --site-latitude 35.9
 ```
+
+Use `--horizons-object`, `--horizons-command`, or an existing
+`--ephemeris-csv` for the target. `--pixel-scale-arcsec` is in arcseconds per
+pixel. Longitude is east-positive and latitude is north-positive. If the site
+is omitted, Horizons uses the geocenter. This is often a small difference for
+ordinary comet or asteroid sessions lasting a few hours, but accurate site
+coordinates are important for a close Earth approach where topocentric parallax
+is significant.
 
 The command-line site coordinates take precedence over `SITELONG` and `SITELAT`
 in the FITS headers. If the FITS camera metadata does not provide a pixel
@@ -51,12 +109,18 @@ For binned images, multiply the physical pixel pitch by the binning factor.
 For example, 250 mm and 2.9 um gives `206.265 * 2.9 / 250 = 2.392` arcsec/pixel.
 
 ```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\frames" --pixel-scale-arcsec 2.392
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --horizons-object "10P/Tempel 2" --pixel-scale-arcsec 2.392
 ```
 
 Astrometry.net's JSON calibration is sufficient for stacking. If its optional
 WCS download returns an HTML error page or another non-FITS response, the tool
 rejects that response and continues with the valid JSON calibration instead.
+
+A two-dimensional Bayer PNG/TIFF without embedded Bayer metadata can be
+specified with `--bayer-pattern RGGB` (or `BGGR`, `GRBG`, `GBRG`). FITS
+`DATE-AVG` is preferred; PNG/TIFF exposure midpoint is estimated from StackLog
+and CameraSettings. Incomplete or disabled StackLog alignment falls back to
+Siril. See [SharpCap timestamp design](SHARPCAP-TIMESTAMPS.md).
 
 ## External tools
 
@@ -74,6 +138,7 @@ and how the background stars shifted. These tools provide those separate answers
 - **Siril** detects background stars and estimates each frame's translation,
   rotation, and scale relative to the reference frame. This tool then adds the
   Horizons-derived moving-target offset and performs the final pixel combine.
+  Complete SharpCap Live Stack offsets and rotation can replace this step.
 - **Python, NumPy, and Pillow** are needed when running or modifying the source
   scripts. The distributed `seestar-metcalf-stack.exe` contains the Python
   runtime needed for normal use, so ordinary users do not need to install Python
@@ -90,7 +155,7 @@ the final Metcalf stack, star-fixed stack, linear FITS writing, and previews.
 - Windows 10/11, or macOS 13 or newer when running the Python source
 - Internet access for Astrometry.net and JPL Horizons
 - An Astrometry.net API key
-- Siril 1.4 or newer
+- Siril 1.4 or newer for Seestar, ordinary captures, or incomplete SharpCap alignment data; complete SharpCap Live Stack logs skip it automatically
 
 The standard `seestar-metcalf-stack-vX.Y.Z.zip` includes
 `seestar-metcalf-stack.exe`, so normal execution does not require a separate
@@ -108,6 +173,10 @@ If Siril is already installed, or a smaller download is preferred, use
 `seestar-metcalf-stack-vX.Y.Z.zip`. It also includes `seestar-metcalf-stack.exe`,
 so Python is not required for normal execution. Install Siril separately and put
 `siril-cli.exe` on `PATH`, or set `SIRIL_CLI` to its full path.
+
+The Siril-free package is sufficient when processing only SharpCap Live Stack
+sessions whose selected frames all contain X/Y offsets and rotation. Confirm
+that the log reports `registration=SharpCap offsets; Siril will be skipped`.
 
 For an upgrade, the Siril-free package can replace the application files. Copy
 these items from the previous installation into the new folder to retain the
@@ -134,36 +203,27 @@ installs PyInstaller into `.build`, which requires network access.
 
 ## First-time setup
 
-1. Download the ZIP you want from [GitHub Releases](https://github.com/nisikazu/seestar-metcalf-stack/releases).
-2. Before extracting it, right-click the ZIP and open `Properties`. If the
-   `General` tab shows a `Security` message saying that the file came from
-   another computer, select `Unblock`, click `OK`, and then extract the ZIP.
-   If that option is absent, extract it normally. Only unblock ZIP files
-   downloaded from the official GitHub Releases page.
-3. If Siril is not installed, extract the Siril-bundled package. Normal EXE
-   execution then needs no separate Python dependency installation.
-4. If using the Siril-free package, install Siril separately and make
-   `siril-cli.exe` available on `PATH`, or set `SIRIL_CLI`.
-5. Run the Python dependency installer only if you plan to use or modify the
+1. Download a ZIP from the [official GitHub Releases page](https://github.com/nisikazu/seestar-metcalf-stack/releases). Before extracting it on Windows, right-click the ZIP and open `Properties`. If the bottom of the `General` tab says that the file came from another computer and shows an `Unblock` checkbox, select `Unblock`, click `OK`, and then extract the ZIP. If the checkbox is absent, no action is needed. Do not unblock a ZIP whose source you cannot verify.
+2. If you will process Seestar frames, ordinary captures, or SharpCap data with incomplete alignment information and Siril is not installed, extract the Siril-bundled package. Normal EXE execution then needs no separate Python dependency installation.
+3. With the Siril-free package, complete SharpCap Live Stack X/Y offsets and rotation need no Siril installation. For other input, install Siril separately and make `siril-cli.exe` available on `PATH`, or set `SIRIL_CLI`.
+4. Run the Python dependency installer only if you plan to use or modify the
    Python fallback:
 
    ```bat
    .\setup-python-deps.cmd
    ```
 
-6. Obtain an Astrometry.net API key:
+5. Obtain an Astrometry.net API key:
 
    1. Open the [Astrometry.net sign-in page](https://nova.astrometry.net/signin).
    2. Sign in or create an account with one of the external identity providers shown on the page, such as a Google account.
    3. After signing in, open `API` or `API Help` in the top menu. You can also open the [API Help page directly](https://nova.astrometry.net/api_help).
    4. Copy the alphanumeric value shown after `Your API key is xxxxxx...`.
 
-7. In Windows Explorer, open the extracted Seestar Metcalf Stack directory.
+6. In Windows Explorer, open the extracted Seestar Metcalf Stack directory.
    Right-click an empty area inside the directory and choose `Open in Terminal`.
 
-8. In that terminal, replace `YOUR_API_KEY` with the value copied in step 6.
-   PowerShell requires the `.\` prefix when running a command from the current
-   directory:
+7. In that terminal, replace `YOUR_API_KEY` with the value copied in step 5. PowerShell requires `.\`, which means the current directory, before a `.cmd` or `.exe` stored in that directory:
 
    ```bat
    .\set-astrometry-api-key.cmd YOUR_API_KEY

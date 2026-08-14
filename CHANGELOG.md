@@ -4,6 +4,30 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## v0.7.0 - 2026-08-14
+
+### 追加
+
+- SharpCap 4.1.10745以降のLive Stackセッションを`stacklog.csv`から自動認識し、`Raw frame file`でraw frameを対応付けられるようにしました。
+- 既定ではSharpCapがスタック成功と記録したフレームだけを採用し、StackLogの時刻、検出星数、FWHM、X/Y offset、rotationを利用します。
+- SharpCapの背景星位置合わせ情報が全採用フレームにそろっている場合、Pythonで登録してSirilを自動的に省略します。
+- SharpCap RAW PNG/TIFF用に`--bayer-pattern RGGB|BGGR|GRBG|GBRG`を追加しました。
+- `stacklog.csv`をraw frameフォルダ内または1つ上から検出し、コピー後にCSVの旧絶対パスが壊れていても、ドロップしたフォルダ内の同名画像を優先して対応付けるようにしました。
+- `stacklog.csv`自体を入力パスとして受け取り、その親フォルダをコピー済みセッションの処理対象として扱えるようにしました。
+- SharpCap PNG/TIFF入力では、対象天体または座標CSVと`--pixel-scale-arcsec`の明示を必須にしました。観測地は省略可能で、地心座標へフォールバックします。
+
+### 安全性
+
+- SharpCapVersionをCameraSettingsから確認し、既知の古いStackLog時刻問題を避けるため4.1.10745未満またはバージョン不明のセッションを停止します。
+- SharpCap FITSの`OBSLONG`と`OBSLAT`もAstrometry.netアップロード用コピーから除去します。
+- コピー先に同名raw frameが複数ある場合は、誤った画像を選ばず曖昧性エラーで停止します。CSVに記録された元の絶対パスは、コピー先の同名画像より後に評価します。
+
+## v0.6.1 - 2026-08-08
+
+### 修正
+
+- 配布パッケージへCA証明書セットを同梱し、同梱Pythonが利用可能な証明書ストアを見つけられないWindows環境でもJPL HorizonsとAstrometry.netへHTTPS接続できるようにしました。
+
 ## v0.6.0 - 2026-08-05
 
 ### 追加

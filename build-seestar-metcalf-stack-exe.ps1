@@ -34,6 +34,7 @@ $env:PYTHONPATH = $PyInstallerPath
     --hidden-import astrometry_solve `
     --hidden-import horizons_ephemeris `
     --hidden-import moving_target_stack `
+    --hidden-import sharpcap_stacklog `
     (Join-Path $Root "scripts\moving_target_pipeline.py")
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"

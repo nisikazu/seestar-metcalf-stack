@@ -6,18 +6,18 @@ macOSではPythonソース版を使用します。Windows版と共通のPython �
 `seestar-metcalf-stack.sh`は実行環境を判定するランチャーです。
 セットアップ後は、Finderでサブフレームフォルダを
 `Seestar Metcalf Stack.app`へドロップしてスタックを実行できます。処理中はTerminalでログを表示し、
-Windows版と同様にセッション一覧、処理段階、Siril出力、枚数進捗を確認できます。
+Windows版と同様にセッション一覧、処理段階、SirilまたはSharpCap位置合わせの状態、枚数進捗を確認できます。
 
 ## 必要なもの
 
 - macOS 13以降を推奨
 - Python 3.10以降
-- Siril 1.4以降
+- Siril 1.4以降（Seestar、通常画像、またはSharpCapの位置合わせ情報が不完全な場合）
 - Astrometry.netとJPL Horizonsへ接続できるネットワーク
 - Astrometry.net APIキー
 
 Pythonは[python.orgのmacOS版](https://www.python.org/downloads/macos/)または
-Homebrewでインストールできます。Sirilは
+Homebrewでインストールできます。完全なX/Y offsetとrotationを持つSharpCap Live Stackログだけを処理する場合、Sirilは不要です。それ以外ではSirilを
 [公式macOSインストール手順](https://siril.readthedocs.io/en/stable/installation/macos.html)
 に従ってアプリケーションフォルダへインストールしてください。Homebrewを使う場合は
 次のコマンドでも導入できます。
@@ -77,6 +77,16 @@ Terminalで`YOUR_API_KEY`をコピーした文字列に置き換えて実行し�
 
 詳細な進行表示は標準で有効です。抑制するときは`--no-verbose`、正常終了時に
 Finderを開かないときは`--no-open-output`を追加します。
+
+SharpCap Live StackのPNG/TIFFは対象天体と画素スケールの明示が必要なため、FinderへのドロップではなくTerminalから実行します。フォルダ構造と下処理の制限はメインREADMEの「SharpCapで撮影する場合」を先に確認してください。
+
+第1引数にはフレームフォルダの代わりに`stacklog.csv`を指定できます。その場合はCSVの親フォルダを処理対象にします。
+
+```sh
+./seestar-metcalf-stack.sh "/path/to/10P_processed_rawframes" --horizons-object "10P/Tempel 2" --pixel-scale-arcsec 2.392 --site-longitude 139.6 --site-latitude 35.9
+```
+
+観測地は省略可能で、その場合は地心座標を使います。地球へ近接中の天体では視差が大きくなるため、正確な観測地を指定してください。ログに`registration=SharpCap offsets; Siril will be skipped`と表示されればSirilは呼ばれません。
 
 FITSの天体名をJPL Horizonsで特定できない場合は、メインREADMEの
 [「Horizonsで天体を特定できない場合」](README.md#horizonsで天体を特定できない場合)

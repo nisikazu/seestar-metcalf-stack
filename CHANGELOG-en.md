@@ -4,6 +4,30 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.7.0 - 2026-08-14
+
+### Added
+
+- Detect SharpCap 4.1.10745+ Live Stack sessions through `stacklog.csv` and join raw frames through `Raw frame file`.
+- Use only SharpCap-successful rows by default and retain timestamp, detected-star count, FWHM, X/Y offsets, and rotation.
+- Skip Siril automatically when every selected SharpCap frame has complete background-star alignment data; Python applies the recorded transforms.
+- Add `--bayer-pattern RGGB|BGGR|GRBG|GBRG` for SharpCap RAW PNG/TIFF frames.
+- Find `stacklog.csv` either inside the raw-frame directory or one level above it, and prefer relocated same-name images under the dropped directory over stale absolute CSV paths.
+- Accept `stacklog.csv` itself as the source path and use its parent directory as the copied session root.
+- Require a target or ephemeris CSV and `--pixel-scale-arcsec` for SharpCap PNG/TIFF input. The observing site remains optional and falls back to the geocenter.
+
+### Security
+
+- Require a known SharpCap version of 4.1.10745 or later to avoid early 4.1 StackLog timestamp bugs.
+- Remove SharpCap `OBSLONG` and `OBSLAT` cards from the Astrometry.net upload copy.
+- Stop on ambiguous duplicate raw-frame filenames instead of silently selecting the wrong file. The original absolute CSV path is considered only after relocated local candidates.
+
+## v0.6.1 - 2026-08-08
+
+### Fixed
+
+- Bundle a CA certificate set in release packages so HTTPS access to JPL Horizons and Astrometry.net works on Windows systems whose packaged Python runtime cannot discover a usable certificate store.
+
 ## v0.6.0 - 2026-08-05
 
 ### Added
