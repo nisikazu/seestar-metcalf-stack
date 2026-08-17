@@ -4,6 +4,14 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.7.2 - 2026-08-17
+
+### Changed
+
+- Removed benchmarks, unit tests, GitHub Actions, release automation, and legacy experiment notes from end-user Release ZIPs, leaving only runtime, setup, rebuilding, license, and user/handover documentation.
+- Collected plate-solve benchmark tools under `developer-tools/plate-solve-benchmark/` in the source repository and moved their default output under that directory's `results/` folder.
+- Added forbidden development-path validation so future package builds fail if source-only assets leak into either staging directories or ZIP archives.
+
 ## v0.7.1 - 2026-08-17
 
 ### Added

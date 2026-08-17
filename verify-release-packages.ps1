@@ -32,6 +32,23 @@ function Assert-True {
     }
 }
 
+function Test-ForbiddenPackagePath {
+    param([string]$RelativePath)
+    $Normalized = Get-NormalizedRelativePath $RelativePath
+    foreach ($ForbiddenPath in $Manifest.ForbiddenPackagePaths) {
+        $Forbidden = Get-NormalizedRelativePath $ForbiddenPath
+        if ($Forbidden.EndsWith("/")) {
+            if ($Normalized.StartsWith($Forbidden, [StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+        elseif ($Normalized.Equals($Forbidden, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Get-TreeStats {
     param([string]$Path)
     $Files = @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force)
@@ -68,6 +85,10 @@ function Test-ReleasePackage {
         $Ca = Get-Item -LiteralPath (Join-Path $PackageRoot "cacert.pem")
         Assert-True ($Exe.Length -ge $Manifest.ExecutableMinimumBytes) "Bundled executable is unexpectedly small: $($Exe.Length) bytes"
         Assert-True ($Ca.Length -ge $Manifest.CaBundleMinimumBytes) "CA bundle is unexpectedly small: $($Ca.Length) bytes"
+        foreach ($File in Get-ChildItem -LiteralPath $PackageRoot -Recurse -File -Force) {
+            $Relative = $File.FullName.Substring($PackageRoot.Length + 1)
+            Assert-True (-not (Test-ForbiddenPackagePath $Relative)) "Forbidden development file in package directory: $Relative"
+        }
     }
 
     $Zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
@@ -81,6 +102,13 @@ function Test-ReleasePackage {
         foreach ($Relative in @($Manifest.CommonFiles) + @($Manifest.GeneratedFiles)) {
             $Expected = $Prefix + (Get-NormalizedRelativePath $Relative)
             Assert-True $EntryMap.ContainsKey($Expected) "ZIP is missing required file: $Expected"
+        }
+        foreach ($Entry in $Entries) {
+            $FullName = Get-NormalizedRelativePath $Entry.FullName
+            if ($FullName.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)) {
+                $Relative = $FullName.Substring($Prefix.Length)
+                Assert-True (-not (Test-ForbiddenPackagePath $Relative)) "Forbidden development file in ZIP: $FullName"
+            }
         }
 
         $SirilPrefix = $Prefix + "tools/siril-$($Manifest.SirilVersion)/siril/"

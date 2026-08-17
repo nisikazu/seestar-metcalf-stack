@@ -4,6 +4,14 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## v0.7.2 - 2026-08-17
+
+### 変更
+
+- 利用者向けRelease ZIPからベンチマーク、単体テスト、GitHub Actions、Release作業用ファイル、古い実験資料を除外し、実行・セットアップ・再構築に必要なファイルへ配布範囲を整理しました。
+- Plate Solveベンチマーク一式をソースリポジトリの`developer-tools/plate-solve-benchmark/`へまとめ、出力も同フォルダの`results/`へ分離しました。
+- パッケージ検証へ開発専用ファイルの禁止リストを追加し、今後誤ってZIPへ混入した場合はビルドを失敗させるようにしました。
+
 ## v0.7.1 - 2026-08-17
 
 ### 追加

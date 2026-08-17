@@ -12,9 +12,14 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
+TOOL_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = TOOL_ROOT.parents[1]
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
 from moving_target_pipeline import sanitize_fits_for_upload
 from plate_solve_benchmark import (
-    REPO_ROOT,
     Trial,
     infer_center,
     infer_effective_pixel_size,
@@ -124,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     center = infer_center(header, args.ra_deg, args.dec_deg)
     siril = resolve_siril(args.siril)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    output = (args.output_dir or REPO_ROOT / "plate_solve_benchmark" / f"{source.stem}-siril-scale-{stamp}").resolve()
+    output = (args.output_dir or TOOL_ROOT / "results" / f"{source.stem}-siril-scale-{stamp}").resolve()
     output.mkdir(parents=True, exist_ok=True)
     benchmark_input = sanitize_fits_for_upload(source, output / "benchmark_input_sanitized.fit")
     config = {

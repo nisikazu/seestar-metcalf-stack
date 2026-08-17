@@ -4,7 +4,8 @@
 > moving-target experiments. Some absolute paths and helper commands are local
 > to the original workspace and are no longer part of the public package.
 > Current architecture, known limitations, tests, and handoff instructions are
-> documented in `DEVELOPMENT.md`.
+> documented in `../../DEVELOPMENT.md`. This historical note is not included
+> in end-user release archives.
 
 This workspace uses a local portable Siril install:
 

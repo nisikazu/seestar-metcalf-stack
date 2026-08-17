@@ -33,7 +33,7 @@
 - Astrometry.net API利用不能: 理由を認証、通信、サーバー応答に分け、Siril広域探索へ移る。
 - 中心座標不良の疑い: Sirilの画角探索では直らないことを明示する。Astrometry.netも利用不能ならRA/Decの明示指定を求める。
 
-Sirilのオンライン部分星表は中心座標、画角、限界等級に応じてディスクキャッシュされる。通常実行では自動再利用し、同じ候補を再取得しない。検証には`run-siril-scale-tolerance.cmd`を使い、毎回の初回取得を測る場合だけ`--siril-cache-mode cold-each`で通常キャッシュから隔離する。実測CSVは配布物へ含めず、設計根拠は[プレートソルブ・ベンチマーク](PLATE-SOLVE-BENCHMARK.md)に記録する。
+Sirilのオンライン部分星表は中心座標、画角、限界等級に応じてディスクキャッシュされる。通常実行では自動再利用し、同じ候補を再取得しない。検証にはソースリポジトリの`developer-tools/plate-solve-benchmark/run-siril-scale-tolerance.cmd`を使い、毎回の初回取得を測る場合だけ`--siril-cache-mode cold-each`で通常キャッシュから隔離する。実測CSVは配布物へ含めず、設計根拠は[プレートソルブ・ベンチマーク](https://github.com/nisikazu/seestar-metcalf-stack/tree/main/developer-tools/plate-solve-benchmark)に記録する。
 
 SharpCap入力では`*.CameraSettings.txt`を正規化して`PreprocessingPlan`を作る。master dark/flatはCLI明示を最優先し、次にCameraSettingsの記録パス、移動後はbasenameと近隣`darks`/`flats`を探索する。要求されたmasterが見つからない場合は未補正で続行せず停止する。`Hot Pixel Sensitivity != 0`はホット補正ONの信号としてのみ使い、SharpCapの尺度をSiril sigmaへ換算しない。既定sigmaは3である。
 
@@ -77,16 +77,16 @@ SharpCap入力では`*.CameraSettings.txt`を正規化して`PreprocessingPlan`�
 - Astrometry.netへ送る画素スケールはFITSの焦点距離・画素サイズから推定し、欠落時は`--pixel-scale-arcsec`を使う。Astrometry側の検索範囲だけに使い、画像の実データを変換しない。
 - WCSダウンロードは`SIMPLE`と`END`カードを確認してから保存する。HTMLログインページなどが返った場合も、JSON calibrationで処理を継続できる。
 
-最終更新: 2026-08-05
+最終更新: 2026-08-17
 
 この文書は、Seestar Metcalf Stackを改造する人、保守する人、または開発を
 引き継ぐ人のための技術記録です。一般利用者向けの操作方法は`README.md`、
-macOSの導入方法は`README-macOS.md`、リリース作業は`PUBLISHING.md`を参照して
+macOSの導入方法は`README-macOS.md`、リリース作業は[GitHub上のPUBLISHING.md](https://github.com/nisikazu/seestar-metcalf-stack/blob/main/PUBLISHING.md)を参照して
 ください。
 
 ## 現在の状態
 
-- 最新の公開Releaseは`v0.7.0`です。ここより上の「未リリース（0.7.x）」項目は次回版候補です。
+- 最新の公開Releaseは`v0.7.1`です。次の`v0.7.2`では利用者向けZIPから開発専用ファイルを除外します。
 - `v0.5.1`にはHorizons復旧手順、座標CSVの補間・外挿説明、
   Astrometry.net APIキー取得手順の改善、飽和警告、開発文書の配布同梱が
   含まれます。
@@ -147,13 +147,14 @@ Pythonが読み、メトカーフスタックと星固定スタックを同じ�
 | `scripts/astrometry_solve.py` | APIログイン、FITS送信、再試行、ジョブ待機、WCS/JSON取得、submission再開 |
 | `scripts/siril_preprocessing.py` | CameraSettingsとCLIから補正計画を解決し、master配置とSiril補正・デベイヤscriptを生成 |
 | `scripts/moving_target_stack.py` | FITS入出力、WCS、Siril登録、画素シフト、平均・メジアン・ランクフィット、成果物生成 |
-| `tests/test_moving_target_options.py` | 名称解決、セッション、スタック方式、プレビュー、キャッシュ、Siril失敗判定、OS差の単体テスト |
+| `tests/` | 名称解決、セッション、スタック方式、プレビュー、キャッシュ、Siril失敗判定、OS差、開発ツールの単体テスト |
+| `developer-tools/plate-solve-benchmark/` | Astrometry.netとSirilのPlate Solve性能・画角許容範囲を測る開発専用ツール。Release ZIPには含めない |
 | `build-release-packages.ps1` | 通常版とSiril同梱版の生成・内容検証・SHA-256作成 |
 | `release-package-manifest.psd1` | 両配布ZIPに含めるファイルとSiril検証条件の唯一の定義 |
 | `verify-release-packages.ps1` | 完成したZIPを開き直して配布範囲とSiril実体を検証 |
 | `build-seestar-metcalf-stack-exe.ps1` | PyInstallerによるWindows one-file EXE作成 |
 
-`README-Siril-CLI.md`は開発初期の実験記録です。現在は存在しない補助スクリプトや
+`developer-tools/legacy/README-Siril-CLI.md`は開発初期の実験記録です。現在は存在しない補助スクリプトや
 ローカル絶対パスも含むため、現行仕様の正本にはしないでください。
 
 ## 数値処理とデータの扱い
@@ -405,7 +406,7 @@ PyInstaller one-file EXEは`build\seestar-metcalf-stack.exe`へ生成されま�
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build-release-packages.ps1 -Version X.Y.Z
 ```
 
-両パッケージに`DEVELOPMENT.md`、`PUBLISHING.md`、`README-Siril-CLI.md`を含めます。
+両パッケージには利用者向け文書、`DEVELOPMENT.md`、実行・セットアップ・再構築に必要なファイルだけを含めます。`developer-tools/`、`tests/`、`.github/`、`PUBLISHING.md`、パッケージ生成・検証スクリプトはソースリポジトリだけに置きます。
 Siril同梱版ではGPLv3のlicenseとsource offerを必ず維持してください。
 
 ### 引き継ぎチェックリスト

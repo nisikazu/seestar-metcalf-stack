@@ -23,11 +23,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+TOOL_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = TOOL_ROOT.parents[1]
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
 from astrometry_solve import estimate_scale_hint, read_fits_header
 from moving_target_pipeline import sanitize_fits_for_upload
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 SCALE_CASES = (
     ("half", 0.5),
     ("correct", 1.0),
@@ -664,7 +669,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    output_root = (args.output_dir or REPO_ROOT / "plate_solve_benchmark" / f"{source.stem}-{stamp}").resolve()
+    output_root = (args.output_dir or TOOL_ROOT / "results" / f"{source.stem}-{stamp}").resolve()
     config = {
         "fits": str(source),
         "true_scale_arcsec": true_scale,

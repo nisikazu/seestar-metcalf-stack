@@ -1,6 +1,6 @@
 # Seestar Metcalf Stack
 
-[改訂内容とトラブルシュート](TROUBLESHOOTING.md) | [変更履歴](CHANGELOG.md) | [プレートソルブ・ベンチマーク](PLATE-SOLVE-BENCHMARK.md)
+[改訂内容とトラブルシュート](TROUBLESHOOTING.md) | [変更履歴](CHANGELOG.md)
 
 [English](README-en.md) | [macOSセットアップ](README-macOS.md)
 

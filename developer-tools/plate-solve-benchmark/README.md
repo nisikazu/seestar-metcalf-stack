@@ -2,6 +2,8 @@
 
 同じFITS画像をAstrometry.netとSirilで繰り返しプレートソルブし、与えた画角の正確さが処理時間と成功率へ与える影響を比較する開発・検証用ツールです。メトカーフスタック本体の実行には必要ありません。
 
+このフォルダはGitHubのソースリポジトリだけに置き、利用者向けRelease ZIPには同梱しません。以下のコマンドはリポジトリの`developer-tools\plate-solve-benchmark`をカレントディレクトリとして実行します。
+
 ## 測定条件
 
 正しいピクセル画角を基準として、次の6条件を各10回、合計60回実行します。
@@ -36,7 +38,7 @@ Sirilも選択した星カタログを取得するためにネットワークを
 最初に外部通信を行わないドライランを推奨します。
 
 ```powershell
-.\run-plate-solve-benchmark.cmd "C:\path\to\frame.fit" `
+.\run-benchmark.cmd "C:\path\to\frame.fit" `
   --pixel-scale-arcsec 3.99 `
   --effective-pixel-size-um 2.9 `
   --dry-run
@@ -45,7 +47,7 @@ Sirilも選択した星カタログを取得するためにネットワークを
 表示される中心座標、正しい画角、60試行の順番を確認した後に本測定します。
 
 ```powershell
-.\run-plate-solve-benchmark.cmd "C:\path\to\frame.fit" `
+.\run-benchmark.cmd "C:\path\to\frame.fit" `
   --pixel-scale-arcsec 3.99 `
   --effective-pixel-size-um 2.9 `
   --astrometry-key-file "C:\path\to\.astrometry_api_key" `
@@ -55,7 +57,7 @@ Sirilも選択した星カタログを取得するためにネットワークを
 正しいピクセル画角、実効ピクセルピッチ、概略中心座標は可能な限りFITSから推定します。推定できない項目や、意図的に固定したい項目は明示できます。
 
 ```powershell
-.\run-plate-solve-benchmark.cmd "C:\path\to\frame.fits" `
+.\run-benchmark.cmd "C:\path\to\frame.fits" `
   --pixel-scale-arcsec 0.959 `
   --effective-pixel-size-um 2.9 `
   --ra-deg 320.1234 `
@@ -84,7 +86,7 @@ Sirilも選択した星カタログを取得するためにネットワークを
 
 ## 出力
 
-既定では`plate_solve_benchmark\FITS名-実行時刻`へ保存します。
+既定ではこのフォルダ内の`results\FITS名-実行時刻`へ保存します。
 
 - `benchmark_config.json`: 入力条件と実際の試行順
 - `benchmark_runs.csv`: 全試行の時間、成否、解の中心・画角、ログへのパス

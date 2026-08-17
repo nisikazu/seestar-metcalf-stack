@@ -16,6 +16,7 @@ siril_work/
 metcalf_output/
 downloads/
 plate_solve/
+developer-tools/plate-solve-benchmark/results/
 plate_solve_benchmark/
 .tmp/
 *.fit

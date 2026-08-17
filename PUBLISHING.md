@@ -3,9 +3,10 @@
 This project should be published as a focused post-processing tool, not as the
 entire local Seestar research workspace.
 
-## Recommended GitHub Repository Contents
+## Source repository and release package boundary
 
-Use the Siril-free package contents as the GitHub repository root:
+The GitHub source repository contains the application, tests, developer tools,
+CI configuration, and release automation:
 
 - `README.md`
 - `README-en.md`
@@ -16,16 +17,11 @@ Use the Siril-free package contents as the GitHub repository root:
 - `CHANGELOG-en.md`
 - `DEVELOPMENT.md`
 - `PUBLISHING.md`
-- `PLATE-SOLVE-BENCHMARK.md`
-- `README-Siril-CLI.md`
 - `requirements.txt`
 - `seestar-metcalf-stack.cmd`
 - `seestar-metcalf-stack.sh`
-- `seestar-metcalf-stack.exe`
 - `build-seestar-metcalf-stack-exe.ps1`
 - `build-release-packages.ps1`
-- `run-plate-solve-benchmark.cmd`
-- `run-siril-scale-tolerance.cmd`
 - `release-package-manifest.psd1`
 - `verify-release-packages.ps1`
 - `setup-python-deps.cmd`
@@ -34,9 +30,9 @@ Use the Siril-free package contents as the GitHub repository root:
 - `set-astrometry-api-key.sh`
 - `macos/`
 - `siril-cli.cmd`
-- `scripts/astrometry_solve.py`
 - `scripts/`
 - `tests/`
+- `developer-tools/`
 - `.github/workflows/tests.yml`
 - `.gitignore`
 - `THIRD-PARTY-NOTICES.md`
@@ -51,6 +47,21 @@ error handling, and opening the output directory belong to the Python CLI.
 Do not publish local observing data, Seestar PEM files, API keys, logs, packaged
 zips, `downloads/`, `siril_work/`, `metcalf_output/`, `plate_solve/`, or the broader Seestar
 control/reverse-engineering workspace.
+
+Release ZIPs are intentionally smaller than the source repository. They contain
+only user documentation, licenses, runtime/setup files, the Windows executable,
+the runtime Python sources needed for fallback or rebuilding, and generated CA
+and checksum files. `DEVELOPMENT.md` remains included as the handover document.
+The following source-only content must not be shipped:
+
+- `.github/`, `.gitignore`, and `tests/`
+- `developer-tools/`, including plate-solve benchmarks and historical experiments
+- `PUBLISHING.md` and release build/verification files
+
+The allowlist and forbidden-path list in `release-package-manifest.psd1` are the
+only package-scope definition. `verify-release-packages.ps1` checks both the
+staging directories and completed ZIPs, so an accidental reintroduction stops
+the release build.
 
 ## Release Assets
 
