@@ -4,17 +4,28 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PyInstallerPath = Join-Path $Root ".build\pyinstaller"
+$PyInstallerPath = Join-Path $Root ".build\pyinstaller-runtime"
 $BuildRoot = Join-Path $Root "build\pyinstaller"
 $DistRoot = Join-Path $Root "build"
 
 if (-not (Test-Path -LiteralPath $Python)) {
     throw "Python executable was not found: $Python"
 }
-if (-not (Test-Path -LiteralPath $PyInstallerPath)) {
+$PyInstallerReady = $false
+if (Test-Path -LiteralPath $PyInstallerPath) {
+    $PreviousPythonPath = $env:PYTHONPATH
+    $env:PYTHONPATH = $PyInstallerPath
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $Python -c "import PyInstaller.__main__" 2>$null
+    $PyInstallerReady = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = $PreviousErrorActionPreference
+    $env:PYTHONPATH = $PreviousPythonPath
+}
+if (-not $PyInstallerReady) {
     Write-Host "Installing PyInstaller build dependencies into $PyInstallerPath"
     New-Item -ItemType Directory -Force -Path $PyInstallerPath | Out-Null
-    & $Python -m pip install --target $PyInstallerPath pyinstaller
+    & $Python -m pip install --upgrade --target $PyInstallerPath pyinstaller
     if ($LASTEXITCODE -ne 0) {
         throw "Installing PyInstaller failed with exit code $LASTEXITCODE"
     }
@@ -35,6 +46,7 @@ $env:PYTHONPATH = $PyInstallerPath
     --hidden-import horizons_ephemeris `
     --hidden-import moving_target_stack `
     --hidden-import sharpcap_stacklog `
+    --hidden-import siril_preprocessing `
     (Join-Path $Root "scripts\moving_target_pipeline.py")
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"

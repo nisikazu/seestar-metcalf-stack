@@ -1,27 +1,43 @@
 # Seestar Metcalf Stack
 
-[改訂内容とトラブルシュート](TROUBLESHOOTING.md) | [変更履歴](CHANGELOG.md)
+[改訂内容とトラブルシュート](TROUBLESHOOTING.md) | [変更履歴](CHANGELOG.md) | [プレートソルブ・ベンチマーク](PLATE-SOLVE-BENCHMARK.md)
 
 [English](README-en.md) | [macOSセットアップ](README-macOS.md)
 
-SeestarのサブフレームFITS、またはSharpCap Live Stackのraw frameから、彗星や小惑星を追跡したメトカーフスタックを作るWindows/macOS向けツールです。同じフレームから背景星固定スタックと、両者を左右に並べた比較FITSも作成します。
+SeestarやDWARFなどのサブフレームFITS、またはSharpCap Live Stackのraw frameから、彗星や小惑星を追跡したメトカーフスタックを作るWindows/macOS向けツールです。同じフレームから背景星固定スタックと、両者を左右に並べた比較FITSも作成します。
 
 これは撮影後の画像処理専用ツールです。Seestar本体は制御せず、Seestar通信用のPEMや秘密キーも必要ありません。
 
 ## このソフトを使う流れ
 
-このツールは、Seestarで撮影したサブフレームを後から処理するソフトです。まず彗星や小惑星をSeestarで観測し、元の1枚ごとの画像を保存しておきます。
+このツールは、Seestar、DWARF、SharpCapなどで撮影したサブフレームを後から処理するソフトです。まず彗星や小惑星を観測し、元の1枚ごとの画像を保存しておきます。
 
-1. Seestarアプリで彗星または小惑星を選び、観測を開始します。
+1. 撮影機器または撮影ソフトで彗星・小惑星を選び、観測を開始します。
 2. 撮影設定で**サブフレーム保存をON**にします。保存されていないスタック済み画像だけでは、このツールでフレームごとの移動を計算できません。
-3. 観測終了後、サブフレームのフォルダをPCへコピーします。USB経由で本体のファイルを取得する方法、またはSeestarをSTAモードにしてネットワークファイル共有経由で取得する方法があります。フォルダ名は通常 `*_sub` で、内部に `.fit` または `.fits` ファイルが入ります。
+3. 観測終了後、サブフレームのフォルダをPCへコピーします。SeestarではUSB経由、またはSTAモードのネットワークファイル共有を利用できます。フォルダ名は通常`*_sub`で、内部に`.fit`または`.fits`ファイルが入ります。
 4. Windowsでは `seestar-metcalf-stack.cmd`、macOSではセットアップ時に作る `Seestar Metcalf Stack.app` へサブフレームフォルダをドラッグ&ドロップするか、コマンドで処理します。
+
+### 入力ごとに必要な情報
+
+| 入力 | 対象天体 | 画素スケール | 観測地 | Astrometry.net APIキー |
+| --- | --- | --- | --- | --- |
+| Seestar/DWARFのFITS | FITSの`OBJECT`を優先。不足時だけ`--horizons-object`等で指定 | FITSの焦点距離・画素情報を優先。不足時だけ`--pixel-scale-arcsec` | FITSを優先。省略時は地心座標 | 通常は不要。Sirilで解けない場合のフォールバックにだけ使用 |
+| SharpCapのFITS | `OBJECT`がなければ指定 | SharpCapで焦点距離を記録するか、オプションで指定 | FITSまたはオプション。省略可能 | 通常は不要。Sirilで解けない場合のみ使用 |
+| SharpCapのPNG/TIFF | `--horizons-object`、`--horizons-command`、または`--ephemeris-csv`が必要 | `--pixel-scale-arcsec`が必要 | 省略可能。近接天体では指定を推奨 | 通常は不要。Sirilで解けない場合のみ使用 |
+
+SeestarやDWARFのFITSで天体名、撮影時刻、中心座標、ほぼ正しい画角が記録されていれば、サブフレームフォルダをランチャーへドロップするだけで処理できます。既定の`--plate-solver auto`は最初にSirilでローカル解決するため、Astrometry.net APIキーを設定していなくても最低限の処理が可能です。
+
+FITSの記録内容は機種や撮影ソフトによって異なります。不足している値があれば、本ツールは必要なオプションを示して停止します。推測のまま処理を続けることはありません。
 
 ### SharpCapで撮影する場合
 
-SharpCap 4.1.10745以降のLive Stackで、raw frame保存、`Create CSV log of frame information for each stack`、背景星位置合わせを有効にします。採用フレームすべてのX/Y offsetとrotationが`stacklog.csv`にそろっていれば、本ツールはその情報を利用し、Sirilを起動せずに背景星固定・メトカーフスタックを作成します。デフォルトでは`Frame Stacked?`が成功のraw frameだけを使います。
+SharpCap 4.1.10745以降のLive Stackで、raw frame保存、`Create CSV log of frame information for each stack`、背景星位置合わせを有効にします。採用フレームすべてのX/Y offsetとrotationが`stacklog.csv`にそろっていれば、本ツールはその変換を背景星位置合わせに再利用します。デフォルトでは`Frame Stacked?`が成功のraw frameだけを使います。
 
-SharpCap Live Stackのサブフレームが、Live Stack側のdark、flat、ホットピクセル除去が適用される前の生データである場合、本ツール自身はdark/flat補正やホットピクセル除去を行いません。必要な場合は別ソフトで各raw frameをあらかじめ補正し、**元と同じファイル名、画像サイズ、向き、切り抜き範囲**で保存してください。リサイズ、回転、反転、クロップを行うとStackLogの位置合わせ量を利用できません。
+本ツールは`*.CameraSettings.txt`を読み、撮影時に指定されていたmaster dark、master flat、ホットピクセル補正、クールピクセル補正をSirilでraw frameへ適用してからデベイヤします。`Hot Pixel Sensitivity`が0以外ならホットピクセル補正を有効にしますが、SharpCapとSirilで数値の尺度が異なるため、値そのものは変換せずSirilの既定sigma 3を使います。masterファイルを一緒に移動した場合は記録されたbasenameから近隣の`darks`/`flats`フォルダも探します。
+
+このためCameraSettingsがそろったSharpCapデータでは、ホットピクセル補正を個別に設定する必要はありません。Sirilが補正とデベイヤを行い、Seestarサブフレームと同じカラー画像の状態へそろえてからスタックします。ただし、PNG/TIFFには対象天体名や画角が通常入らないため、初回は下記のようにターミナルから追加情報を指定します。SharpCap FITSでこれらがヘッダーに記録されている場合は、フォルダのドラッグ&ドロップだけで実行できます。
+
+すでに別ソフトで補正済みの画像へ置き換えた場合は、二重補正を避けるため`--preprocessing disable`を指定してください。StackLog変換を再利用するには、補正後も**元と同じファイル名、画像サイズ、向き、切り抜き範囲**を保つ必要があります。リサイズ、回転、反転、クロップは行わないでください。
 
 推奨構造は次のとおりです。セッションフォルダを丸ごとコピーし、コピー側の`rawframes`だけを同名の補正済み画像へ置き換えます。
 
@@ -34,7 +50,7 @@ SharpCap Live Stackのサブフレームが、Live Stack側のdark、flat、ホ�
     frame_00002.png
 ```
 
-`rawframes`フォルダだけをコピーする場合は、`stacklog.csv`と`*.CameraSettings.txt`もその中へコピーできます。本ツールはドロップしたフォルダ内を先に探し、次に1つ上のフォルダを探します。CameraSettingsはSharpCapのバージョン確認と、PNG/TIFFの露光中央時刻を求めるために必要です。
+`rawframes`フォルダだけをコピーする場合は、`stacklog.csv`と`*.CameraSettings.txt`もその中へコピーできます。本ツールはドロップしたフォルダ内を先に探し、次に1つ上のフォルダを探します。CameraSettingsはSharpCapのバージョン、PNG/TIFFの露光時間、dark/flatとホット・クールピクセル補正の設定を得るために使います。記録されたmaster dark/flatもコピーするか、`--dark-file`/`--flat-file`で明示してください。
 
 フォルダの代わりに、その中の`stacklog.csv`を`seestar-metcalf-stack.cmd`へドラッグ&ドロップしても実行できます。この場合は`stacklog.csv`の親フォルダを処理対象とし、同じフォルダまたはその配下からCSVに記録された同名フレームを探します。
 
@@ -78,31 +94,43 @@ SharpCap Live StackのPNG/TIFFが2D Bayer RAWで、画像自身にBayer pattern�
 .\seestar-metcalf-stack.cmd "C:\path\to\SharpCap\session" --horizons-object "10P/Tempel 2" --pixel-scale-arcsec 2.392 --bayer-pattern RGGB
 ```
 
-PNGでは画像内に撮影時刻がほぼ残らないため、`stacklog.csv`の時刻からCameraSettingsの露光時間の半分を引いて露光中央時刻を求めます。FITSに`DATE-AVG`がある場合はそれを優先します。記録が不完全、位置合わせがOFF、または`--include-sharpcap-rejected`で失敗フレームも含めた場合はSirilへフォールバックします。詳細な根拠は[SharpCap時刻設計資料](SHARPCAP-TIMESTAMPS.md)を参照してください。
+PNGでは画像内に撮影時刻がほぼ残らないため、`stacklog.csv`の時刻からCameraSettingsの露光時間の半分を引いて露光中央時刻を求めます。FITSに`DATE-AVG`がある場合はそれを優先します。Sirilが補正とデベイヤを担当し、StackLogの位置合わせ記録が不完全、位置合わせがOFF、または`--include-sharpcap-rejected`で失敗フレームも含めた場合は、背景星位置合わせもSirilで行います。詳細な根拠は[SharpCap時刻設計資料](SHARPCAP-TIMESTAMPS.md)を参照してください。
+
+CameraSettingsよりコマンド指定を優先します。masterファイルが移動後に見つからない場合は、誤って未補正のまま続行せず、必要な`--dark-file`または`--flat-file`を示して停止します。
+
+```bat
+rem master dark/flatを明示して処理
+.\seestar-metcalf-stack.cmd "C:\path\to\SharpCap\session" --dark-file "C:\masters\dark.fit" --flat-file "C:\masters\flat.fit"
+
+rem 補正済みフレームなのでCameraSettingsの補正をすべて無効化
+.\seestar-metcalf-stack.cmd "C:\path\to\processed\frames" --preprocessing disable
+```
+
+個別には`--dark-correction`、`--flat-correction`、`--hot-pixel-correction`、`--cold-pixel-correction`へ`auto`、`enable`、`disable`を指定できます。ホット・クールピクセルのSiril閾値は`--hot-pixel-sigma`と`--cold-pixel-sigma`で変更できます。
 
 ## 必要な外部ツール一覧
 
 サブフレームを用意しただけでは、画像が空のどこを向いているか、撮影中に天体がどこへ動いたか、背景星をどう重ねるかが分かりません。次のツールがそれぞれ別の役割を担います。
 
-- **Astrometry.net** は基準フレームをプレートソルブし、その画像が空のどこを、どの画角と向きで撮影したかを確定します。これにより天体の赤経・赤緯を画像上の画素位置へ変換できます。アカウントとAPIキーが必要ですが、同梱の `set-astrometry-api-key.cmd` で設定できます。
+- **Siril** はdark/flat補正、ホット・クールピクセル補正、デベイヤ、基準フレームのプレートソルブ、必要な場合の背景星位置合わせを行います。Seestar FITSでは記録された中心座標と画素スケールを使うため、通常は短時間でローカル解決できます。
+- **Astrometry.net** はSirilで基準フレームを解決できない場合のフォールバックです。利用する場合だけアカウントとAPIキーが必要で、同梱の`set-astrometry-api-key.cmd`で設定できます。
 - **JPL Horizons** は各露光時刻における対象天体の赤経・赤緯を返します。この固有運動から、フレームごとに追加すべき移動量を求めます。JPLのAPIキーは不要です。
-- **Siril** は背景星を検出し、各フレームの平行移動・回転・倍率を基準フレームに対して推定します。本ツールはその結果にHorizons由来の天体移動量を加え、最後の画素スタックを行います。SharpCap Live StackのX/Y offsetとrotationが完全に記録されている場合だけ、この役割をStackLogで代替してSirilを自動省略します。
 - **Python、NumPy、Pillow** はソースコードを実行・改造する場合に必要です。配布版の `seestar-metcalf-stack.exe` には実行に必要なPythonランタイムが含まれているため、通常の利用者はPythonやライブラリを別途インストールする必要はありません。
 
-処理の分担は、Astrometry.netが「画像がどこを向いているか」、Horizonsが「対象がどう動いたか」、Sirilが「背景星の写り方がフレーム間でどうずれたか」を決めます。Sirilは背景星の検出とフレーム間の平行移動・回転・倍率の推定を担当します。最終的なメトカーフスタック、星固定スタック、線形FITSの書き出しはPython側で行います。
+処理の分担は、Sirilが「raw画像を補正・カラー化し、画像がどこを向いているか」を、Horizonsが「対象がどう動いたか」を決めます。背景星の平行移動・回転は、完全なSharpCap StackLogがあればその記録を使い、なければSirilが推定します。最終的なメトカーフスタック、星固定スタック、線形FITSの書き出しはPython側で行います。
 
 ## 必要なものと配布版の違い
 
 - Windows 10/11、またはPythonソース版を実行するmacOS 13以降
-- Astrometry.netとJPL Horizonsへ接続できるネットワーク
-- Astrometry.net APIキー
-- Siril 1.4以降（Seestar、通常撮影、またはSharpCapのalignment情報が不完全な場合。完全なSharpCap Live Stackログでは自動省略）
+- JPL Horizonsへ接続できるネットワーク
+- Siril 1.4以降
+- Astrometry.net APIキー（SirilでPlate Solveできない場合の任意のフォールバック）
 
 Sirilをまだインストールしていない利用者には、容量の大きい `seestar-metcalf-stack-siril-vX.Y.Z.zip` を標準版として推奨します。Sirilと実行用EXEを含むため、PythonやSirilを別途インストールする必要がありません。同梱されるSiril部分にはGPLv3が適用されます。
 
 すでにSirilをインストール済みの場合や、配布サイズを小さくしたい場合は `seestar-metcalf-stack-vX.Y.Z.zip` を使います。この版も `seestar-metcalf-stack.exe` を含むため、通常の実行にPythonの別途インストールは不要です。Sirilは別途インストールし、`siril-cli.exe` にPATHを通すか、環境変数 `SIRIL_CLI` にフルパスを設定します。
 
-SharpCap Live StackのX/Y offsetとrotationが全採用フレームにそろっている処理だけを行う場合は、Sirilなし版だけで実行できます。ログに`registration=SharpCap offsets; Siril will be skipped`と表示されることを確認してください。
+SharpCap Live StackのX/Y offsetとrotationが全採用フレームにそろっていても、0.7.xではSirilを補正・デベイヤとPlate Solveに使います。StackLogは背景星位置合わせだけを置き換えます。
 
 バージョンアップ時は、Sirilなし版を展開して新しいファイルへ更新できます。旧版から次のものを新しいフォルダへコピーすると、SirilやAPIキー、過去の出力を引き継げます。
 
@@ -117,15 +145,15 @@ Pythonコードを改造した場合は、古いEXEが優先実行されない�
 ## 初回セットアップ
 
 1. [GitHubの公式Release](https://github.com/nisikazu/seestar-metcalf-stack/releases)からZIPをダウンロードします。WindowsでZIPを右クリックして`プロパティ`を開き、`全般`タブの下部に`セキュリティ: このファイルは他のコンピューターから取得したものです`と`許可する`が表示された場合は、`許可する`にチェックを入れて`OK`を押してから展開します。この表示がなければ、そのまま展開できます。配布元を確認できないZIPではブロックを解除しないでください。
-2. Seestar画像、通常撮影画像、または位置合わせ情報が不完全なSharpCapデータを処理し、Sirilをまだ導入していない場合は、Siril同梱版を展開します。通常のEXE実行だけならPython依存パッケージのインストールは不要です。
-3. Sirilなし版を使う場合、完全なX/Y offsetとrotationを持つSharpCap Live StackデータだけならSirilは不要です。それ以外のデータを処理する場合はSirilを別途インストールし、`siril-cli.exe`をPATHへ追加するか`SIRIL_CLI`を設定します。
+2. Sirilをまだ導入していない場合はSiril同梱版を展開します。通常のEXE実行だけならPython依存パッケージのインストールは不要です。
+3. Sirilなし版を使う場合はSirilを別途インストールし、`siril-cli.exe`をPATHへ追加するか`SIRIL_CLI`を設定します。
 4. Pythonコードを実行・改造する場合だけ、展開したフォルダで依存パッケージを準備します。
 
    ```bat
    .\setup-python-deps.cmd
    ```
 
-5. Astrometry.netのAPIキーを次の手順で取得します。
+5. SirilでPlate Solveできない場合にも処理を継続したいときは、任意でAstrometry.netのAPIキーを次の手順で取得します。
 
    1. ブラウザで[Astrometry.netのログイン画面](https://nova.astrometry.net/signin)を開きます。
    2. Googleアカウントなど、画面に表示される外部認証を使ってログイン、または新規登録します。
@@ -176,7 +204,7 @@ Pythonコードを改造した場合は、古いEXEが優先実行されない�
 
 基本的な使い方は、処理したいサブフレームフォルダを `seestar-metcalf-stack.cmd`へドラッグ&ドロップするだけです。成功すると出力フォルダが開きます。セッション、処理方式、天体名などを指定する場合は、インストールフォルダの空いている場所を右クリックして`ターミナルで開く`を選び、上記の例のようにオプションを付けて実行してください。
 
-処理はHorizons座標取得、基準フレームのプレートソルブ、Sirilによる背景星位置合わせ、最終スタックまで自動で進みます。出力先は `metcalf_output\<target>_<処理方式>-YYYYMMDD-HHMMSS` です。方式部分は `mean`、`median`、または `rankfit5_p50` のようになります。
+処理はHorizons座標取得、Sirilによる基準フレームのPlate Solveと画像前処理、StackLogまたはSirilによる背景星位置合わせ、最終スタックまで自動で進みます。SirilでPlate Solveできなかった場合だけAstrometry.netへフォールバックします。出力先は `metcalf_output\<target>_<処理方式>-YYYYMMDD-HHMMSS` です。方式部分は `mean`、`median`、または `rankfit5_p50` のようになります。
 
 詳細表示はCMD、シェル、EXE、Pythonのどの入口でも標準で有効です。最初に全セッションと選択されたセッションを表示し、その後は処理段階、Sirilの出力、スタック方式、`現在枚数/総枚数`を表示します。同じ内容が実行中から `metcalf_output\metcalf-YYYYMMDD-HHMMSS.log` へ追記されます。正常終了時には成果物の出力フォルダをExplorerまたはFinderで開きます。詳細表示を抑制する場合は `--no-verbose`、成果物フォルダを開かない場合は `--no-open-output` を指定してください。macOSの準備とFinderドラッグ&ドロップについては [macOSセットアップ](README-macOS.md) を参照してください。
 
@@ -188,11 +216,12 @@ Sirilの背景星位置合わせでは、デベイヤ済み画像と登録済み
 
 最初に解決した結果は、サブフレームのソースフォルダへ基準FITS名を使って保存します。
 
+- `<基準FITSのstem>_siril_wcs.fits`
 - `<基準FITSのstem>_astrometry.json`
 - `<基準FITSのstem>_wcs.fits`
 - 送信途中または再開用の `<基準FITSのstem>_astrometry_submission.json`
 
-次回以降はWCSまたはJSON calibrationの内容を検証し、正常ならFITSをAstrometry.netへ再送せず利用します。アップロード後の結果待ち中に処理が中断した場合も、保存されたsubmission IDから既存ジョブを再開します。`--reference-frame`によって別の基準FITSが選ばれれば、そのFITS専用の別キャッシュになります。ソースフォルダ以外へ永続キャッシュを置きたい場合だけ `--solve-dir` を指定します。
+次回以降はSiril WCS、Astrometry.net WCS、JSON calibrationの順に検証して再利用します。Sirilで解決できれば画像をAstrometry.netへ送信しません。Astrometry.netへのアップロード後に処理が中断した場合も、保存されたsubmission IDから既存ジョブを再開します。`--reference-frame`によって別の基準FITSが選ばれれば、そのFITS専用の別キャッシュになります。ソースフォルダ以外へ永続キャッシュを置きたい場合だけ `--solve-dir` を指定します。
 
 ### 平均、メジアン、ランクフィット
 
@@ -244,7 +273,7 @@ Sirilの背景星位置合わせでは、デベイヤ済み画像と登録済み
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
 ```
 
-選ばれたフレームがAstrometry.netへ送られ、Sirilの位置合わせ基準にも明示設定されます。最終FITSの `DATE-OBS` とWCS座標はこの基準フレームを反映します。`REFMODE`、`REFINDEX`、`MTREFRA`、`MTREFDEC` にも基準情報を残します。
+選ばれたフレームをSirilでPlate Solveし、位置合わせ基準にも明示設定します。Sirilで解けなかった場合だけAstrometry.netへ送ります。最終FITSの`DATE-OBS`とWCS座標はこの基準フレームを反映します。`REFMODE`、`REFINDEX`、`MTREFRA`、`MTREFDEC`にも基準情報を残します。
 
 ### サブフレームの飽和警告
 
@@ -367,6 +396,19 @@ Astrometry.net APIキー、観測地点、個人情報、FITS本体を公開す�
 
 ## その他のオプション
 
+Plate Solveの選択:
+
+```bat
+rem 既定: Sirilを先に試し、失敗時だけAstrometry.netを使う
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --plate-solver auto
+
+rem ネットワークへ画像を送らずSirilだけで解く
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --plate-solver siril
+
+rem Astrometry.netを明示的に使う
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --plate-solver astrometry
+```
+
 ファイル名に `_failed_` を含むSeestarフレームも使う:
 
 ```bat
@@ -389,7 +431,7 @@ Windowsの `.cmd` に引用符付きパスを渡す場合、閉じ引用符直�
 
 ## プライバシー
 
-Astrometry.netへは基準FITSを1枚送ります。送信前に観測地を表すFITSカードを削除します。デフォルトではtopocentric座標を得るため、JPL HorizonsへFITSの観測地を送ります。送りたくない場合は `--horizons-center geocenter` または自分で用意した `--ephemeris-csv` を使ってください。
+SirilのローカルPlate Solveに成功すれば、基準FITSをAstrometry.netへ送りません。フォールバックでAstrometry.netを使う場合は基準FITSを1枚送信し、その前に観測地を表すFITSカードを削除します。デフォルトではtopocentric座標を得るため、JPL HorizonsへFITSの観測地を送ります。送りたくない場合は `--horizons-center geocenter` または自分で用意した `--ephemeris-csv` を使ってください。
 
 ## ライセンスと作者
 

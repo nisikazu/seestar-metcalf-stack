@@ -16,6 +16,7 @@ Use the Siril-free package contents as the GitHub repository root:
 - `CHANGELOG-en.md`
 - `DEVELOPMENT.md`
 - `PUBLISHING.md`
+- `PLATE-SOLVE-BENCHMARK.md`
 - `README-Siril-CLI.md`
 - `requirements.txt`
 - `seestar-metcalf-stack.cmd`
@@ -23,6 +24,8 @@ Use the Siril-free package contents as the GitHub repository root:
 - `seestar-metcalf-stack.exe`
 - `build-seestar-metcalf-stack-exe.ps1`
 - `build-release-packages.ps1`
+- `run-plate-solve-benchmark.cmd`
+- `run-siril-scale-tolerance.cmd`
 - `release-package-manifest.psd1`
 - `verify-release-packages.ps1`
 - `setup-python-deps.cmd`
@@ -64,10 +67,10 @@ installation is included in the staged files. The bug-report template under
 `.github/ISSUE_TEMPLATE/` should remain available in the public repository.
 
 Before packaging a SharpCap Live Stack release, run one complete aligned
-StackLog fixture with the Siril-free package and verify all of the following:
+StackLog fixture with the Siril-bundled package and verify all of the following:
 
-- the log reports `registration=SharpCap offsets; Siril will be skipped`;
-- no Siril executable or launcher is invoked;
+- Siril applies the CameraSettings calibration, cosmetic correction, and debayering plan;
+- the log reports `Using SharpCap StackLog alignment after Siril preprocessing`;
 - copied/calibrated same-name frames are selected instead of stale absolute CSV paths;
 - Metcalf, star-fixed, and side-by-side FITS/PNG products are created.
 
@@ -131,10 +134,9 @@ Assets:
 - seestar-metcalf-stack-vX.Y.Z.zip: Siril-free package and macOS source launchers.
 
 Requirements:
-- Siril CLI for Seestar, ordinary images, or incomplete SharpCap alignment logs
-- no Siril requirement for complete SharpCap Live Stack alignment logs
-- Astrometry.net API key
-- Network access to Astrometry.net and JPL Horizons
+- Siril CLI for preprocessing, local plate solving, and registration when needed
+- Astrometry.net API key is optional fallback when Siril cannot solve locally
+- Network access to JPL Horizons
 
 The Windows packages include `seestar-metcalf-stack.exe`; Python is only needed
 when rebuilding the executable or using the source fallback. macOS currently

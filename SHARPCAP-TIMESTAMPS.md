@@ -238,5 +238,5 @@ File mtime delta : -16.8 ms
 - 既定で`Frame Stacked? = 1`だけを採用し、SharpCapの失敗フレームを除外する。
 - FITSの`DATE-AVG`または`DATE-OBS + EXPTIME/2`、PNG/TIFFのStackLog時刻とExposureから露光中央時刻を求める。
 - SharpCap 4.1.10745未満とバージョン不明のセッションを安全のため停止する。
-- X/Y offsetとrotationが完全な場合はPythonで背景星登録し、Sirilを省略する。
+- X/Y offsetとrotationが完全な場合は、Sirilで補正・デベイヤした後の画像をPythonで背景星登録し、Sirilの登録処理だけを省略する。
 - alignment情報が不完全な場合は、画像を正規FITSへ変換してSirilへフォールバックする。

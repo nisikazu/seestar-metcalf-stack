@@ -4,6 +4,27 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## v0.7.1 - 2026-08-17
+
+### 追加
+
+- SharpCapの`*.CameraSettings.txt`からmaster dark、master flat、ホットピクセル、クールピクセルの設定を読み、Sirilで補正してからデベイヤする処理を追加しました。
+- `Hot Pixel Sensitivity`が0以外ならSirilのホットピクセル補正を既定sigma 3で有効にします。SharpCap固有の数値はSirilへ直接換算しません。
+- `--preprocessing`、dark/flatファイルと有効・無効指定、hot/cold pixelの有効・無効とsigma指定を追加しました。コマンド指定はCameraSettingsより優先します。
+- 基準フレームをSirilで先にPlate Solveし、失敗した場合だけAstrometry.netへフォールバックする`--plate-solver auto|siril|astrometry`を追加しました。
+- Siril WCSを基準フレーム名の`*_siril_wcs.fits`へ保存し、再実行時に再利用します。
+
+### 変更
+
+- SharpCap StackLogのX/Y offsetとrotationが完全な場合も、補正とデベイヤはSirilへ統一しました。StackLogは背景星位置合わせの変換だけを置き換えます。
+- Astrometry.net APIキーは通常のSeestar処理の必須要件ではなく、SirilでPlate Solveできない場合の任意フォールバックになりました。
+
+### 修正
+
+- `stacklog.csv`がない通常のSharpCap FITS撮影フォルダでも`*.CameraSettings.txt`を検出し、記録された補正設定を基準フレームと全スタックフレームへ適用します。
+- Sirilのhot/cold pixel補正で無効側にsigma 0を渡して通常画素を大量補正していた問題を修正しました。
+- 入力フォルダへ保存した`*_siril_wcs.fits`などのPlate Solveキャッシュをサブフレームとして再読込しないようにしました。
+
 ## v0.7.0 - 2026-08-14
 
 ### 追加

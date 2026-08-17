@@ -4,8 +4,8 @@
 
 [日本語](README.md) | [macOS setup (Japanese)](README-macOS.md)
 
-Seestar Metcalf Stack turns Seestar subframe FITS files or SharpCap Live Stack
-raw frames into a stack that follows a moving comet or asteroid. It also creates
+Seestar Metcalf Stack turns subframe FITS files from Seestar, DWARF, and similar
+instruments, or SharpCap Live Stack raw frames into a stack that follows a moving comet or asteroid. It also creates
 a star-aligned stack from the same frames, plus a side-by-side comparison FITS.
 
 This is a post-processing tool. It does not control a Seestar and does not need
@@ -13,19 +13,35 @@ the Seestar PEM/private communication key.
 
 ## Workflow: from observation to stack
 
-This tool processes the individual subframes produced by a Seestar observation.
-Before using it, observe a comet or asteroid and keep the original frame files.
+This tool processes individual subframes produced by Seestar, DWARF, SharpCap,
+and similar imaging workflows. Observe a comet or asteroid and keep the
+original frame files.
 
-1. Select the comet or asteroid in the Seestar app and start the observation.
+1. Select the comet or asteroid in the imaging device or capture software and
+   start the observation.
 2. Turn **subframe saving ON** in the capture settings. A final stacked image
    alone is not sufficient because the pipeline needs the individual exposure
    times and frames.
-3. After the observation, copy the subframe directory to the PC. You can use
-   USB file access, or put the Seestar in STA mode and retrieve the directory
-   through network file sharing. The directory normally ends in `_sub` and
-   contains `.fit` or `.fits` files.
+3. After the observation, copy the subframe directory to the PC. For Seestar,
+   use USB file access or STA-mode network file sharing. Its directory normally
+   ends in `_sub` and contains `.fit` or `.fits` files.
 4. Drag the subframe directory onto `seestar-metcalf-stack.cmd`, or run the
    command shown below.
+
+### Information required for each input type
+
+| Input | Target | Pixel scale | Observing site | Astrometry.net API key |
+| --- | --- | --- | --- | --- |
+| Seestar/DWARF FITS | Prefer FITS `OBJECT`; override only when missing | Prefer FITS focal-length/pixel metadata; otherwise use `--pixel-scale-arcsec` | Prefer FITS; geocenter fallback | Normally unnecessary; used only if Siril cannot solve locally |
+| SharpCap FITS | Specify when `OBJECT` is absent | Record focal length in SharpCap or specify the option | FITS or command option; optional | Normally unnecessary; fallback only |
+| SharpCap PNG/TIFF | Requires `--horizons-object`, `--horizons-command`, or `--ephemeris-csv` | Requires `--pixel-scale-arcsec` | Optional; recommended for close approaches | Normally unnecessary; fallback only |
+
+When a Seestar or DWARF FITS set contains a target name, timestamps, approximate
+center, and a nearly correct image scale, dropping the subframe directory onto
+the launcher is sufficient. The default `--plate-solver auto` tries Siril
+locally first, so basic processing works without an Astrometry.net API key.
+If required metadata is absent, the tool stops and reports the option that must
+be supplied rather than continuing with an unsafe guess.
 
 The default input pattern is `*.fit*`, so both `.fit` and `.fits` files are
 accepted. Other files in the directory are not sent to Siril. This also allows
@@ -36,15 +52,27 @@ an observing site, Horizons automatically falls back to the geocenter.
 
 For SharpCap 4.1.10745 or later, enable Live Stack raw-frame saving, `Create CSV
 log of frame information for each stack`, and alignment. When every selected
-row has X/Y offsets and rotation, the pipeline applies those transforms directly
-and does not launch Siril. Only rows whose `Frame Stacked?` value is true are
+row has X/Y offsets and rotation, the pipeline reuses those transforms for
+background-star alignment. Only rows whose `Frame Stacked?` value is true are
 used by default.
 
-Treat Live Stack raw frames as data saved before the Live Stack dark, flat, and
-hot-pixel corrections. This tool does not perform those calibration steps. If
-calibration is required, process every raw frame first and save it with the
-**same filename, dimensions, orientation, and crop**. Resizing, rotating,
-flipping, or cropping invalidates the StackLog alignment values.
+The tool reads `*.CameraSettings.txt` and uses Siril to apply the recorded master
+dark, master flat, hot-pixel correction, and cold-pixel correction before
+debayering. A nonzero `Hot Pixel Sensitivity` enables hot-pixel correction, but
+the SharpCap value is not converted to a Siril threshold; Siril's default sigma
+of 3 is used. Relocated masters are also searched by basename in nearby `darks`
+and `flats` directories.
+
+With CameraSettings present, no separate hot-pixel setup is needed. Siril
+applies the correction and debayers the raw frames into the same kind of color
+image expected from Seestar subframes before stacking. PNG/TIFF files normally
+do not contain the target name or image scale, so supply those values from a
+terminal as shown below. SharpCap FITS can still be a drag-and-drop input when
+the required values are already present in its headers.
+
+For frames already calibrated by another program, pass `--preprocessing disable`
+to prevent double correction. Preserve the **same filename, dimensions,
+orientation, and crop** if StackLog transforms will be reused.
 
 The recommended approach is to copy the complete session and replace only the
 images inside the copied `rawframes` directory:
@@ -60,9 +88,10 @@ images inside the copied `rawframes` directory:
 
 If only the raw-frame directory is copied, `stacklog.csv` and the
 `*.CameraSettings.txt` file may instead be copied into that directory. The tool
-searches the dropped directory first and then its parent. CameraSettings is
-needed to verify the SharpCap version and to estimate PNG/TIFF exposure
-midpoints.
+searches the dropped directory first and then its parent. CameraSettings provides
+the SharpCap version, PNG/TIFF exposure, and calibration/cosmetic-correction
+settings. Copy the referenced masters too, or specify `--dark-file` and
+`--flat-file`.
 
 Instead of a folder, you may drag and drop `stacklog.csv` itself onto
 `seestar-metcalf-stack.cmd`. Its parent directory becomes the session source,
@@ -119,8 +148,24 @@ rejects that response and continues with the valid JSON calibration instead.
 A two-dimensional Bayer PNG/TIFF without embedded Bayer metadata can be
 specified with `--bayer-pattern RGGB` (or `BGGR`, `GRBG`, `GBRG`). FITS
 `DATE-AVG` is preferred; PNG/TIFF exposure midpoint is estimated from StackLog
-and CameraSettings. Incomplete or disabled StackLog alignment falls back to
-Siril. See [SharpCap timestamp design](SHARPCAP-TIMESTAMPS.md).
+and CameraSettings. Siril always performs preprocessing and debayering. Complete
+StackLog transforms replace only Siril registration; incomplete or disabled
+alignment uses Siril for registration too. See
+[SharpCap timestamp design](SHARPCAP-TIMESTAMPS.md).
+
+Command-line calibration choices override CameraSettings. If a recorded master
+cannot be found after relocation, the run stops with a clear request for
+`--dark-file` or `--flat-file` rather than silently using uncalibrated data.
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\SharpCap\session" --dark-file "C:\masters\dark.fit" --flat-file "C:\masters\flat.fit"
+.\seestar-metcalf-stack.cmd "C:\path\to\processed\frames" --preprocessing disable
+```
+
+Individual `--dark-correction`, `--flat-correction`,
+`--hot-pixel-correction`, and `--cold-pixel-correction` switches accept
+`auto`, `enable`, or `disable`. `--hot-pixel-sigma` and `--cold-pixel-sigma`
+override Siril's cosmetic-correction thresholds.
 
 ## External tools
 
@@ -128,34 +173,31 @@ The raw subframes do not by themselves provide the complete answer to three
 questions: where the image points, where the moving object was at each exposure,
 and how the background stars shifted. These tools provide those separate answers:
 
-- **Astrometry.net** plate-solves one reference frame. The solve establishes the
-  exact sky coordinates, image scale, and orientation, so an ephemeris position
-  can be converted into an image-pixel position. An Astrometry.net account and
-  API key are required. `set-astrometry-api-key.cmd` saves the key for the tool.
+- **Siril** applies dark/flat and hot/cold-pixel corrections, debayers frames,
+  plate-solves the reference locally, and performs background-star registration
+  when StackLog transforms are unavailable. Seestar FITS normally supplies a
+  reliable center and image scale, making the local solve fast.
+- **Astrometry.net** is an optional fallback when Siril cannot solve the
+  reference. Its account and API key are needed only for that fallback.
 - **JPL Horizons** supplies the target's RA/Dec at every exposure time. Those
   positions determine how far the comet or asteroid moved between frames. No
   JPL API key is required.
-- **Siril** detects background stars and estimates each frame's translation,
-  rotation, and scale relative to the reference frame. This tool then adds the
-  Horizons-derived moving-target offset and performs the final pixel combine.
-  Complete SharpCap Live Stack offsets and rotation can replace this step.
 - **Python, NumPy, and Pillow** are needed when running or modifying the source
   scripts. The distributed `seestar-metcalf-stack.exe` contains the Python
   runtime needed for normal use, so ordinary users do not need to install Python
   or these libraries separately.
 
-Astrometry.net, Horizons, and Siril are therefore not interchangeable extras:
-they respectively answer *where the image points*, *where the target moved*,
-and *how the background-star field moved*. Siril detects background stars and
-estimates translation, rotation, and scale between frames. Python then performs
-the final Metcalf stack, star-fixed stack, linear FITS writing, and previews.
+Siril determines where the image points and prepares the raw pixels; Horizons
+determines where the target moved. Complete SharpCap StackLog transforms can
+replace only Siril's background-star registration. Python performs the final
+Metcalf stack, star-fixed stack, linear FITS writing, and previews.
 
 ## Requirements and package choices
 
 - Windows 10/11, or macOS 13 or newer when running the Python source
-- Internet access for Astrometry.net and JPL Horizons
-- An Astrometry.net API key
-- Siril 1.4 or newer for Seestar, ordinary captures, or incomplete SharpCap alignment data; complete SharpCap Live Stack logs skip it automatically
+- Internet access for JPL Horizons
+- Siril 1.4 or newer
+- An Astrometry.net API key only for optional fallback solving
 
 The standard `seestar-metcalf-stack-vX.Y.Z.zip` includes
 `seestar-metcalf-stack.exe`, so normal execution does not require a separate
@@ -174,9 +216,9 @@ If Siril is already installed, or a smaller download is preferred, use
 so Python is not required for normal execution. Install Siril separately and put
 `siril-cli.exe` on `PATH`, or set `SIRIL_CLI` to its full path.
 
-The Siril-free package is sufficient when processing only SharpCap Live Stack
-sessions whose selected frames all contain X/Y offsets and rotation. Confirm
-that the log reports `registration=SharpCap offsets; Siril will be skipped`.
+In 0.7.x, Siril is still required when every SharpCap frame has X/Y offsets and
+rotation because it performs calibration, debayering, and plate solving. StackLog
+replaces only registration-transform estimation.
 
 For an upgrade, the Siril-free package can replace the application files. Copy
 these items from the previous installation into the new folder to retain the
@@ -204,8 +246,8 @@ installs PyInstaller into `.build`, which requires network access.
 ## First-time setup
 
 1. Download a ZIP from the [official GitHub Releases page](https://github.com/nisikazu/seestar-metcalf-stack/releases). Before extracting it on Windows, right-click the ZIP and open `Properties`. If the bottom of the `General` tab says that the file came from another computer and shows an `Unblock` checkbox, select `Unblock`, click `OK`, and then extract the ZIP. If the checkbox is absent, no action is needed. Do not unblock a ZIP whose source you cannot verify.
-2. If you will process Seestar frames, ordinary captures, or SharpCap data with incomplete alignment information and Siril is not installed, extract the Siril-bundled package. Normal EXE execution then needs no separate Python dependency installation.
-3. With the Siril-free package, complete SharpCap Live Stack X/Y offsets and rotation need no Siril installation. For other input, install Siril separately and make `siril-cli.exe` available on `PATH`, or set `SIRIL_CLI`.
+2. If Siril is not installed, extract the Siril-bundled package. Normal EXE execution then needs no separate Python dependency installation.
+3. With the Siril-free package, install Siril separately and make `siril-cli.exe` available on `PATH`, or set `SIRIL_CLI`. Siril is required in 0.7.x even when SharpCap X/Y offsets and rotation are complete.
 4. Run the Python dependency installer only if you plan to use or modify the
    Python fallback:
 
@@ -213,7 +255,7 @@ installs PyInstaller into `.build`, which requires network access.
    .\setup-python-deps.cmd
    ```
 
-5. Obtain an Astrometry.net API key:
+5. Optionally obtain an Astrometry.net API key if you want fallback solving when Siril cannot solve a reference:
 
    1. Open the [Astrometry.net sign-in page](https://nova.astrometry.net/signin).
    2. Sign in or create an account with one of the external identity providers shown on the page, such as a Google account.
@@ -277,9 +319,11 @@ right-click an empty area in the installation directory, choose
 `Open in Terminal`, and run the command with options as shown in the examples
 above.
 
-The pipeline automatically obtains a Horizons ephemeris, solves the reference
-frame, registers the background stars, and writes all final products under
+The pipeline automatically obtains a Horizons ephemeris, plate-solves and
+preprocesses the reference with Siril, registers background stars through
+StackLog or Siril, and writes all final products under
 `metcalf_output\<target>_<method>-YYYYMMDD-HHMMSS`.
+Astrometry.net is contacted only when Siril solving fails.
 
 Verbose output is enabled by default for the CMD, shell launcher, EXE, and
 Python entry point. The console first shows every detected session and marks the
@@ -308,12 +352,14 @@ a registration failure unless `--no-cleanup` is specified.
 The first successful solve is cached beside the source subframes using the
 reference FITS filename:
 
+- `<reference-stem>_siril_wcs.fits`
 - `<reference-stem>_astrometry.json`
 - `<reference-stem>_wcs.fits`
 - `<reference-stem>_astrometry_submission.json` while/resuming a submission
 
-Later runs using the same reference frame validate and reuse the cached WCS or
-JSON calibration without uploading the FITS again. If a previous run uploaded
+Later runs using the same reference frame validate and reuse the cached Siril
+WCS, Astrometry.net WCS, or JSON calibration without uploading the FITS again.
+If a previous run uploaded
 successfully but was interrupted while waiting for the result, the saved
 submission ID is resumed instead of making another upload. A different
 `--reference-frame` may select a different FITS and therefore has its own cache.
@@ -393,8 +439,9 @@ To use a particular subframe as the reference, specify its filename rather than 
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --reference-frame-file "Light_C2025 R2 (SWAN)_20.0s_IRCUT_20251103-185613.fit"
 ```
 
-The selected frame is sent to Astrometry.net and is explicitly set as Siril's
-registration reference. Its `DATE-OBS` and WCS are written to the final FITS.
+The selected frame is first solved locally by Siril and is explicitly set as the
+registration reference. It is sent to Astrometry.net only if Siril fails. Its
+`DATE-OBS` and WCS are written to the final FITS.
 The FITS headers also contain `REFMODE`, `REFINDEX`, `MTREFRA`, and `MTREFDEC`.
 
 ### Subframe saturation warning
@@ -552,6 +599,16 @@ Do not publish your Astrometry.net API key, observing location, personal informa
 
 ## Other useful options
 
+Choose plate-solver behavior:
+
+```bat
+rem Default: Siril first, Astrometry.net only as fallback
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --plate-solver auto
+
+rem Local Siril only, with no image upload
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --plate-solver siril
+```
+
 Include Seestar files whose names contain `_failed_`:
 
 ```bat
@@ -575,8 +632,9 @@ use `"C:\path\to\frames"`, not `"C:\path\to\frames\"`.
 
 ## Privacy
 
-Astrometry.net receives one sanitized reference FITS. Site-location FITS cards
-are removed before upload. By default, JPL Horizons receives the observing site
+Astrometry.net receives one sanitized reference FITS only when Siril plate
+solving fails and fallback is available. Site-location FITS cards are removed
+before upload. By default, JPL Horizons receives the observing site
 from the FITS header to calculate topocentric coordinates. Use
 `--horizons-center geocenter` or your own `--ephemeris-csv` if you do not want to
 send that site information.

@@ -2,8 +2,8 @@
 """End-to-end moving-target stack pipeline.
 
 This wrapper connects:
-1. first-frame plate solve with astrometry_solve.py,
-2. Siril similarity registration on background stars,
+1. Siril-first plate solving with Astrometry.net fallback,
+2. Siril preprocessing and background-star registration, or SharpCap StackLog registration,
 3. target-motion compensated stacking with moving_target_stack.py.
 """
 
@@ -13,6 +13,7 @@ import argparse
 import calendar
 import contextlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -25,13 +26,25 @@ from pathlib import Path
 from typing import TextIO
 
 from moving_target_stack import (
+    SirilRegistrationError,
     normalize_saturation_color,
     parse_time,
     processing_method_token,
+    read_source_image,
     read_fits_header,
+    run_siril,
     select_reference_index,
+    wcs_cd_matrix,
+    write_registered_float,
 )
-from sharpcap_stacklog import load_sharpcap_session, write_manifest
+from sharpcap_stacklog import load_sharpcap_session, read_settings, write_manifest
+from siril_preprocessing import (
+    PreprocessingPlan,
+    build_single_preprocess_script,
+    resolve_preprocessing_plan,
+    stage_preprocessing_files,
+)
+from astrometry_solve import estimate_scale_hint
 
 
 REPO_ROOT = (
@@ -72,7 +85,7 @@ class TeeTextIO:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Solve first frame and stack Seestar subframes on a moving target")
+    parser = argparse.ArgumentParser(description="Plate-solve, preprocess, and stack subframes on a moving target")
     parser.add_argument(
         "source_dir_arg",
         nargs="?",
@@ -149,7 +162,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pixel-scale-arcsec",
         type=float,
-        help="Approximate image scale in arcseconds per pixel for Astrometry.net when FITS camera metadata is missing.",
+        help="Approximate image scale in arcseconds per pixel for plate solving when FITS camera metadata is missing.",
     )
     parser.add_argument("--horizons-object", help="Override Horizons object/designation for auto ephemeris")
     parser.add_argument("--horizons-command", help="Raw Horizons COMMAND value for auto ephemeris")
@@ -158,18 +171,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--solve-dir",
         type=Path,
-        help="Astrometry cache directory. Defaults to the source FITS directory.",
+        help="Plate-solve cache directory. Defaults to the source FITS directory.",
     )
     parser.add_argument(
         "--solve-name",
-        help="Astrometry cache filename prefix. Defaults to the reference FITS stem.",
+        help="Plate-solve cache filename prefix. Defaults to the reference FITS stem.",
     )
     parser.add_argument("--wcs-fits", type=Path, help="Reuse an existing WCS FITS instead of solving")
     parser.add_argument("--astrometry-json", type=Path, help="Optional existing astrometry JSON, recorded in summary")
     parser.add_argument(
+        "--plate-solver",
+        choices=("auto", "siril", "astrometry"),
+        default="auto",
+        help="Plate solver order. auto tries Siril first and Astrometry.net only as fallback.",
+    )
+    parser.add_argument(
+        "--siril-catalog",
+        choices=("tycho2", "nomad", "localgaia", "gaia", "ppmxl", "brightstars", "apass"),
+        help="Force a Siril plate-solve catalog instead of automatic selection.",
+    )
+    parser.add_argument("--solve-center-ra-deg", type=float, help="Approximate J2000 center RA for plate solving.")
+    parser.add_argument("--solve-center-dec-deg", type=float, help="Approximate J2000 center Dec for plate solving.")
+    parser.add_argument(
         "--skip-solve",
         action="store_true",
-        help="Do not upload; require a valid explicit or cached Astrometry.net solution.",
+        help="Do not solve or upload; require a valid explicit or cached Siril/Astrometry.net solution.",
     )
     parser.add_argument("--work-dir", type=Path, help="Use this exact run work directory instead of creating one under --work-root")
     parser.add_argument("--work-root", type=Path, default=REPO_ROOT / "metcalf_output")
@@ -180,6 +206,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--registration-transform", default="similarity")
     parser.add_argument("--registration-minpairs", type=int, default=6)
     parser.add_argument("--siril", type=Path, help="Siril CLI path. Defaults to SIRIL_CLI, PATH, or an OS-standard location.")
+    parser.add_argument(
+        "--preprocessing",
+        choices=("auto", "disable"),
+        default="auto",
+        help="Use SharpCap CameraSettings preprocessing automatically, or disable all calibration/cosmetic correction.",
+    )
+    parser.add_argument("--dark-correction", choices=("auto", "enable", "disable"), default="auto")
+    parser.add_argument("--dark-file", type=Path, help="Master dark override. Implies dark correction unless explicitly disabled.")
+    parser.add_argument("--flat-correction", choices=("auto", "enable", "disable"), default="auto")
+    parser.add_argument("--flat-file", type=Path, help="Master flat override. Implies flat correction unless explicitly disabled.")
+    parser.add_argument("--hot-pixel-correction", choices=("auto", "enable", "disable"), default="auto")
+    parser.add_argument("--cold-pixel-correction", choices=("auto", "enable", "disable"), default="auto")
+    parser.add_argument("--hot-pixel-sigma", type=float, default=3.0, help="Siril hot-pixel sigma threshold. Defaults to 3.")
+    parser.add_argument("--cold-pixel-sigma", type=float, default=3.0, help="Siril cold-pixel sigma threshold. Defaults to 3.")
     parser.add_argument(
         "--stack-method",
         choices=("mean", "median", "rankfit"),
@@ -269,6 +309,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
     if not 0.0 < args.saturation_threshold_percent <= 100.0:
         parser.error("--saturation-threshold-percent must be greater than 0 and at most 100")
+    if not args.hot_pixel_sigma > 0.0 or not args.cold_pixel_sigma > 0.0:
+        parser.error("--hot-pixel-sigma and --cold-pixel-sigma must be greater than 0")
     try:
         args.saturation_color = normalize_saturation_color(args.saturation_color)
     except ValueError as error:
@@ -385,7 +427,10 @@ def looks_like_stacked_outputs(files: list[Path]) -> bool:
 
 
 def is_fits_frame(path: Path) -> bool:
-    return path.is_file() and path.suffix.lower() in {".fit", ".fits"}
+    if not path.is_file() or path.suffix.lower() not in {".fit", ".fits"}:
+        return False
+    stem = path.stem.casefold()
+    return not stem.endswith(("_siril_wcs", "_wcs", "_upload_sanitized"))
 
 
 def resolve_source_dir(source_dir: Path, pattern: str) -> Path:
@@ -452,6 +497,21 @@ def load_sessions(args: argparse.Namespace) -> list[list[tuple[datetime, Path]]]
         before_time = parse_time(args.before)
         dated = [item for item in dated if item[0] <= before_time]
     return split_sessions_by_gap(dated, args.session_gap_min)
+
+
+def discover_preprocessing_settings(
+    source_dir: Path,
+    sharpcap_session: object | None,
+) -> tuple[Path | None, dict[str, str], Path]:
+    """Find CameraSettings independently of SharpCap StackLog metadata."""
+    if sharpcap_session is not None:
+        return (
+            sharpcap_session.settings_file,
+            sharpcap_session.settings,
+            sharpcap_session.root,
+        )
+    settings_file, settings = read_settings(source_dir, source_dir.parent)
+    return settings_file, settings, source_dir
 
 
 def print_session_table(
@@ -758,8 +818,14 @@ def is_valid_wcs_fits(path: Path) -> bool:
         header, _cards, _offset = read_fits_header(path)
     except (OSError, ValueError):
         return False
-    required = {"CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2", "CD1_1", "CD1_2", "CD2_1", "CD2_2"}
-    return required.issubset(header)
+    required = {"CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2"}
+    if not required.issubset(header):
+        return False
+    try:
+        wcs_cd_matrix(header)
+    except ValueError:
+        return False
+    return True
 
 
 def is_valid_astrometry_json(path: Path) -> bool:
@@ -793,6 +859,231 @@ def cached_submission_id(json_path: Path) -> str | None:
     return subid if subid.isdigit() else None
 
 
+SIRIL_NEAR_SCALE_FACTORS = (1.0, 0.70, 1.40, 0.50, 2.00)
+SIRIL_WIDE_SCALE_FACTORS = (0.35, 2.80, 0.25, 4.00)
+
+
+def positive_float(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0.0 else None
+
+
+def parse_sexagesimal(value: str, *, is_ra: bool) -> float:
+    text = value.strip()
+    if ":" not in text and not any(character.isspace() for character in text):
+        return float(text)
+    sign = -1.0 if text.startswith("-") else 1.0
+    parts = [float(part) for part in text.lstrip("+-").replace(":", " ").split()]
+    if not 1 <= len(parts) <= 3:
+        raise ValueError(f"Unsupported coordinate: {value}")
+    absolute = parts[0] + (parts[1] / 60.0 if len(parts) > 1 else 0.0) + (parts[2] / 3600.0 if len(parts) > 2 else 0.0)
+    return sign * absolute * (15.0 if is_ra else 1.0)
+
+
+def infer_solve_center(header: dict[str, object], args: argparse.Namespace) -> tuple[float, float]:
+    ra_value = args.solve_center_ra_deg
+    dec_value = args.solve_center_dec_deg
+    if ra_value is None:
+        ra_value = header.get("RA", header.get("OBJCTRA", header.get("CRVAL1")))
+    if dec_value is None:
+        dec_value = header.get("DEC", header.get("OBJCTDEC", header.get("CRVAL2")))
+    if ra_value is None or dec_value is None:
+        raise ValueError(
+            "The reference frame has no approximate RA/Dec for Siril plate solving; "
+            "provide --solve-center-ra-deg and --solve-center-dec-deg."
+        )
+    ra = float(ra_value) if isinstance(ra_value, (int, float)) else parse_sexagesimal(str(ra_value), is_ra=True)
+    dec = float(dec_value) if isinstance(dec_value, (int, float)) else parse_sexagesimal(str(dec_value), is_ra=False)
+    if not math.isfinite(ra) or not math.isfinite(dec) or not -90.0 <= dec <= 90.0:
+        raise ValueError(f"Invalid plate-solve center: RA={ra}, Dec={dec}")
+    return ra % 360.0, dec
+
+
+def embed_explicit_solve_center(header: dict[str, object], args: argparse.Namespace) -> None:
+    """Persist CLI center hints when a raster image is converted to temporary FITS."""
+    if args.solve_center_ra_deg is None and args.solve_center_dec_deg is None:
+        return
+    ra, dec = infer_solve_center({}, args)
+    header["RA"] = ra
+    header["DEC"] = dec
+
+
+def infer_solve_scale(header: dict[str, object], explicit: float | None) -> float:
+    if explicit is not None:
+        if not math.isfinite(explicit) or explicit <= 0.0:
+            raise ValueError("--pixel-scale-arcsec must be a positive finite number")
+        return explicit
+    hint = estimate_scale_hint(header)
+    if hint and positive_float(hint.get("arcsecPerPix")):
+        return float(hint["arcsecPerPix"])
+    try:
+        cd11, cd12, cd21, cd22 = wcs_cd_matrix(header)
+        return (math.hypot(cd11, cd21) + math.hypot(cd12, cd22)) * 1800.0
+    except ValueError as error:
+        raise ValueError(
+            "The reference frame has no reliable image scale for Siril plate solving; "
+            "provide --pixel-scale-arcsec."
+        ) from error
+
+
+def infer_effective_pixel_size(header: dict[str, object]) -> float:
+    values: list[float] = []
+    for size_key, bin_keys in (("XPIXSZ", ("XBINNING", "CCDXBIN")), ("YPIXSZ", ("YBINNING", "CCDYBIN"))):
+        size = positive_float(header.get(size_key))
+        if size is None:
+            continue
+        binning = next((positive_float(header.get(key)) for key in bin_keys if positive_float(header.get(key))), 1.0)
+        values.append(size * float(binning or 1.0))
+    return sum(values) / len(values) if values else 1.0
+
+
+def prepare_reference_with_siril(args: argparse.Namespace, reference_frame: Path) -> Path:
+    image = read_source_image(reference_frame, args.bayer_pattern, debayer=False)
+    pattern = str(image.header.get("BAYERPAT") or image.header.get("COLORTYP") or "").strip()
+    cfa = image.data.ndim == 2 and bool(pattern)
+    plan: PreprocessingPlan = args.preprocessing_plan
+    if not cfa and not plan.enabled:
+        return stage_file(reference_frame, args.work_dir)
+
+    if is_fits_frame(reference_frame):
+        staged = args.work_dir / f"{reference_frame.stem}_solve_input.fit"
+        shutil.copy2(reference_frame, staged)
+    else:
+        staged = args.work_dir / f"{reference_frame.stem}_solve_input.fit"
+        sharpcap = getattr(args, "sharpcap_session", None)
+        frame = next(item for item in sharpcap.frames if item.path.resolve() == reference_frame.resolve())
+        embed_explicit_solve_center(image.header, args)
+        write_registered_float(
+            staged,
+            image,
+            frame.time,
+            sharpcap.object_name,
+            sharpcap.exposure_seconds,
+        )
+    corrected = args.work_dir / f"cc_{staged.name}"
+    staged_plan = stage_preprocessing_files(plan, args.work_dir)
+    script_text, output_name = build_single_preprocess_script(
+        staged,
+        staged_plan,
+        cfa=cfa,
+        corrected_intermediate=corrected,
+    )
+    script = args.work_dir / "prepare_plate_solve_reference.ssf"
+    script.write_text(script_text, encoding="ascii")
+    verbose(args, f"Siril preprocessing reference frame: cfa={'yes' if cfa else 'no'}")
+    run_siril(args.siril, args.work_dir, script, args.verbose)
+    output = args.work_dir / output_name
+    if not output.is_file():
+        raise RuntimeError(f"Siril did not write the preprocessed reference frame: {output}")
+    return output
+
+
+def siril_wcs_cache_path(args: argparse.Namespace, reference_frame: Path) -> Path:
+    cache_dir = args.solve_dir or reference_frame.parent
+    prefix = args.solve_name or reference_frame.stem
+    return cache_dir / f"{prefix}_siril_wcs.fits"
+
+
+def plate_solution_source(wcs_fits: Path | None, astrometry_json: Path | None) -> str | None:
+    if astrometry_json is not None:
+        return "astrometry.net"
+    if wcs_fits is None:
+        return None
+    name = Path(wcs_fits).name.casefold()
+    if name.endswith("_siril_wcs.fits") or name.endswith("_siril_wcs.fit"):
+        return "siril"
+    if name.endswith("_wcs.fits") or name.endswith("_wcs.fit"):
+        return "astrometry.net"
+    return "explicit-wcs"
+
+
+def build_siril_plate_solve_script(
+    input_fits: Path,
+    output_fits: Path,
+    center: tuple[float, float],
+    focal_mm: float,
+    pixel_size_um: float,
+    catalog: str | None,
+) -> str:
+    catalog_option = f" -catalog={catalog}" if catalog else ""
+    return "\n".join(
+        [
+            "requires 1.4.0",
+            f"load {input_fits.name}",
+            (
+                # Siril 1.4.1 rejects explicit coordinates in batch scripts.
+                # The validated approximate center is retained in the loaded
+                # FITS header, so only sampling overrides are passed here.
+                f"platesolve -force -focal={focal_mm:.12g} "
+                f"-pixelsize={pixel_size_um:.12g} -noflip{catalog_option}"
+            ),
+            f"save {output_fits.name}",
+            "close",
+            "",
+        ]
+    )
+
+
+def siril_detected_star_count(output: str) -> int | None:
+    counts = [
+        int(value)
+        for value in re.findall(
+            r"(?:Found|Using)\s+(\d+)\s+(?:(?:Gaussian profile|detected)\s+)?stars?",
+            output,
+            re.IGNORECASE,
+        )
+    ]
+    return max(counts) if counts else None
+
+
+def try_siril_plate_solve(
+    args: argparse.Namespace,
+    input_fits: Path,
+    reference_frame: Path,
+    factors: tuple[float, ...],
+) -> tuple[Path | None, int | None, list[str]]:
+    header, _cards, _offset = read_fits_header(input_fits)
+    center = infer_solve_center(header, args)
+    scale = infer_solve_scale(header, args.pixel_scale_arcsec)
+    pixel_size = infer_effective_pixel_size(header)
+    errors: list[str] = []
+    detected_stars: int | None = None
+    for attempt, factor in enumerate(factors, start=1):
+        supplied_scale = scale * factor
+        focal = 206.265 * pixel_size / supplied_scale
+        candidate = args.work_dir / f"siril_solve_{attempt:02d}_{factor:g}x.fit"
+        script = args.work_dir / f"siril_plate_solve_{attempt:02d}.ssf"
+        script.write_text(
+            build_siril_plate_solve_script(input_fits, candidate, center, focal, pixel_size, args.siril_catalog),
+            encoding="ascii",
+        )
+        verbose(
+            args,
+            f"Siril plate solve attempt {attempt}/{len(factors)}: scale={supplied_scale:.6g} arcsec/pixel ({factor:g}x)",
+        )
+        output = ""
+        try:
+            output = run_siril(args.siril, args.work_dir, script, args.verbose)
+        except SirilRegistrationError as error:
+            output = error.output
+            errors.append(f"{factor:g}x: {str(error)}")
+        count = siril_detected_star_count(output)
+        if count is not None:
+            detected_stars = max(detected_stars or 0, count)
+        actual = candidate if candidate.is_file() else candidate.with_suffix(".fits")
+        if is_valid_wcs_fits(actual):
+            cache = siril_wcs_cache_path(args, reference_frame)
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(actual, cache)
+            print(f"Siril plate solve succeeded at {factor:g}x scale: {cache}", flush=True)
+            return cache, detected_stars, errors
+        errors.append(f"{factor:g}x: no usable WCS output")
+    return None, detected_stars, errors
+
+
 def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path | None, Path | None]:
     if args.wcs_fits:
         if not args.wcs_fits.exists():
@@ -805,6 +1096,11 @@ def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path
             raise FileNotFoundError(f"Astrometry JSON not found: {args.astrometry_json}")
         return None, stage_file(args.astrometry_json, args.work_dir)
 
+    siril_cache = siril_wcs_cache_path(args, first_frame)
+    if is_valid_wcs_fits(siril_cache):
+        print(f"Reusing cached Siril WCS: {siril_cache}", flush=True)
+        return siril_cache, None
+
     json_path, wcs_path = solve_cache_paths(args, first_frame)
     valid_json = is_valid_astrometry_json(json_path)
     if is_valid_wcs_fits(wcs_path):
@@ -814,42 +1110,99 @@ def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path
         print(f"Reusing cached Astrometry.net calibration: {json_path}", flush=True)
         return None, json_path
     if args.skip_solve:
-        raise SystemExit("--skip-solve requested, but no valid explicit or cached Astrometry.net solution was found")
+        raise SystemExit("--skip-solve requested, but no valid explicit or cached Siril/Astrometry.net solution was found")
+
+    prepared_reference: Path | None = None
+    siril_errors: list[str] = []
+    detected_stars: int | None = None
+    if args.plate_solver in {"auto", "siril"}:
+        try:
+            prepared_reference = prepare_reference_with_siril(args, first_frame)
+            factors = SIRIL_NEAR_SCALE_FACTORS + (SIRIL_WIDE_SCALE_FACTORS if args.plate_solver == "siril" else ())
+            solved, detected_stars, siril_errors = try_siril_plate_solve(
+                args,
+                prepared_reference,
+                first_frame,
+                factors,
+            )
+            if solved:
+                return solved, None
+            if detected_stars is not None and detected_stars < args.registration_minpairs:
+                raise RuntimeError(
+                    f"Siril detected only {detected_stars} star(s) in the reference frame; "
+                    f"background registration requires {args.registration_minpairs}. "
+                    "Choose a clearer reference frame instead of widening the plate-solve search."
+                )
+        except (OSError, ValueError, SirilRegistrationError) as error:
+            siril_errors.append(str(error))
+        if args.plate_solver == "siril":
+            details = "; ".join(siril_errors[-5:]) or "no usable WCS output"
+            raise RuntimeError(f"Siril plate solving failed after scale search: {details}")
 
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    if is_fits_frame(first_frame):
+    astrometry_input = prepared_reference or first_frame
+    if is_fits_frame(astrometry_input):
         upload_frame = sanitize_fits_for_upload(
-            first_frame,
+            astrometry_input,
             args.work_dir / f"{first_frame.stem}_upload_sanitized.fit",
         )
     else:
-        upload_frame = stage_file(first_frame, args.work_dir)
+        upload_frame = stage_file(astrometry_input, args.work_dir)
     solve_command = child_command(
         "astrometry_solve.py",
         [str(upload_frame), str(json_path), str(wcs_path)],
     )
     if args.pixel_scale_arcsec is not None:
         solve_command.extend(["--pixel-scale-arcsec", str(args.pixel_scale_arcsec)])
+    if args.solve_center_ra_deg is not None:
+        solve_command.extend(["--center-ra-deg", str(args.solve_center_ra_deg)])
+    if args.solve_center_dec_deg is not None:
+        solve_command.extend(["--center-dec-deg", str(args.solve_center_dec_deg)])
     resume_subid = cached_submission_id(json_path)
     if resume_subid:
         print(f"Resuming cached Astrometry.net submission {resume_subid} for {first_frame.name}.", flush=True)
         solve_command.append(resume_subid)
     else:
         print(f"No valid cached plate solve for {first_frame.name}; uploading to Astrometry.net.", flush=True)
-    run(solve_command, REPO_ROOT)
+    astrometry_error: Exception | None = None
+    try:
+        run(solve_command, REPO_ROOT)
+    except (OSError, subprocess.CalledProcessError) as error:
+        astrometry_error = error
     if is_valid_wcs_fits(wcs_path):
         return wcs_path, json_path
 
     if is_valid_astrometry_json(json_path):
         print(f"WCS FITS was not usable; falling back to Astrometry.net JSON calibration: {json_path}", file=sys.stderr)
         return None, json_path
+
+    if args.plate_solver == "auto" and prepared_reference is not None:
+        print("Astrometry.net was unavailable or did not solve; extending the Siril scale search.", file=sys.stderr, flush=True)
+        solved, wide_stars, wide_errors = try_siril_plate_solve(
+            args,
+            prepared_reference,
+            first_frame,
+            SIRIL_WIDE_SCALE_FACTORS,
+        )
+        if solved:
+            return solved, None
+        detected_stars = max(value for value in (detected_stars, wide_stars) if value is not None) if any(
+            value is not None for value in (detected_stars, wide_stars)
+        ) else None
+        siril_errors.extend(wide_errors)
     # A completed but unusable job should not trap future runs into resuming the
     # same failed submission forever. Interrupted/network-failed runs never
     # reach here, so their checkpoint remains available for resume.
     submission_path = json_path.with_name(f"{json_path.stem}_submission.json")
     if resume_subid and submission_path.exists():
         submission_path.unlink()
-    raise RuntimeError(f"Astrometry.net completed without a usable WCS or calibration cache for {first_frame}")
+    details = []
+    if astrometry_error:
+        details.append(f"Astrometry.net: {astrometry_error}")
+    if siril_errors:
+        details.append("Siril: " + "; ".join(siril_errors[-5:]))
+    suffix = " " + " | ".join(details) if details else ""
+    raise RuntimeError(f"Plate solving completed without a usable WCS for {first_frame}.{suffix}")
 
 
 def run_stack(
@@ -905,6 +1258,8 @@ def run_stack(
         cmd.extend(["--pattern", args.pattern])
     if args.frame_manifest:
         cmd.extend(["--frame-manifest", str(args.frame_manifest)])
+    if args.preprocessing_plan_file:
+        cmd.extend(["--preprocessing-plan", str(args.preprocessing_plan_file)])
     if args.bayer_pattern:
         cmd.extend(["--bayer-pattern", args.bayer_pattern])
     if args.output_prefix:
@@ -976,9 +1331,35 @@ def main(args: argparse.Namespace) -> Path | None:
     args.work_dir = prepare_work_dir(args, reference_frame)
     verbose(args, f"Work directory: {args.work_dir}")
     sharpcap = getattr(args, "sharpcap_session", None)
+    settings_file, settings, preprocessing_root = discover_preprocessing_settings(args.source_dir, sharpcap)
+    preprocessing_plan = resolve_preprocessing_plan(
+        settings=settings,
+        settings_file=settings_file,
+        session_root=preprocessing_root,
+        preprocessing=args.preprocessing,
+        dark_correction=args.dark_correction,
+        dark_file=args.dark_file,
+        flat_correction=args.flat_correction,
+        flat_file=args.flat_file,
+        hot_pixel_correction=args.hot_pixel_correction,
+        cold_pixel_correction=args.cold_pixel_correction,
+        hot_pixel_sigma=args.hot_pixel_sigma,
+        cold_pixel_sigma=args.cold_pixel_sigma,
+    )
+    args.preprocessing_plan = preprocessing_plan
+    args.preprocessing_plan_file = args.work_dir / "preprocessing_plan.json"
+    args.preprocessing_plan_file.write_text(
+        json.dumps(preprocessing_plan.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     if sharpcap is not None:
-        args.frame_manifest = write_manifest(args.work_dir / "sharpcap_frame_manifest.json", sharpcap, files)
-        alignment_mode = "SharpCap offsets; Siril will be skipped" if sharpcap.alignment_complete else "incomplete offsets; Siril fallback"
+        args.frame_manifest = write_manifest(
+            args.work_dir / "sharpcap_frame_manifest.json",
+            sharpcap,
+            files,
+            preprocessing_plan.to_dict(),
+        )
+        alignment_mode = "SharpCap offsets" if sharpcap.alignment_complete else "incomplete offsets; Siril fallback"
         verbose(
             args,
             f"SharpCap Live Stack detected: version={sharpcap.version_text or 'unknown'}; "
@@ -989,6 +1370,23 @@ def main(args: argparse.Namespace) -> Path | None:
             args,
             f"SharpCap metadata: stacklog={sharpcap.stacklog}; "
             f"CameraSettings={sharpcap.settings_file or 'not found'}",
+        )
+        verbose(
+            args,
+            "SharpCap preprocessing: "
+            f"dark={'on' if preprocessing_plan.dark_enabled else 'off'}; "
+            f"flat={'on' if preprocessing_plan.flat_enabled else 'off'}; "
+            f"hot={'on' if preprocessing_plan.hot_pixel_enabled else 'off'}; "
+            f"cold={'on' if preprocessing_plan.cold_pixel_enabled else 'off'}",
+        )
+    else:
+        verbose(
+            args,
+            f"CameraSettings without StackLog: {settings_file or 'not found'}; "
+            f"dark={'on' if preprocessing_plan.dark_enabled else 'off'}; "
+            f"flat={'on' if preprocessing_plan.flat_enabled else 'off'}; "
+            f"hot={'on' if preprocessing_plan.hot_pixel_enabled else 'off'}; "
+            f"cold={'on' if preprocessing_plan.cold_pixel_enabled else 'off'}",
         )
     verbose(args, "Stage 1/3: obtaining target ephemeris")
     ephemeris_csv = ensure_ephemeris(args, reference_frame, session_index)
@@ -1008,6 +1406,9 @@ def main(args: argparse.Namespace) -> Path | None:
         "stack_method_token": processing_method_token(args.stack_method, args.rankfit_fraction),
         "input_mode": "sharpcap-live-stack" if getattr(args, "sharpcap_session", None) is not None else "fits-subframes",
         "frame_manifest": str(args.frame_manifest) if args.frame_manifest else None,
+        "preprocessing": args.preprocessing_plan.to_dict(),
+        "plate_solver_requested": args.plate_solver,
+        "plate_solution_source": plate_solution_source(wcs_fits, astrometry_json),
         "padding_policy": args.padding_policy,
         "zero_sample_policy": args.zero_sample_policy if args.stack_method != "mean" else None,
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,

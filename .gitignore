@@ -16,6 +16,8 @@ siril_work/
 metcalf_output/
 downloads/
 plate_solve/
+plate_solve_benchmark/
+.tmp/
 *.fit
 *.fits
 *.png

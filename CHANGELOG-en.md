@@ -4,6 +4,26 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.7.1 - 2026-08-17
+
+### Added
+
+- Read SharpCap `*.CameraSettings.txt` master-dark, master-flat, hot-pixel, and cold-pixel settings and apply them with Siril before debayering.
+- Treat nonzero `Hot Pixel Sensitivity` as enabling Siril hot-pixel correction at the default sigma of 3 without translating SharpCap's incompatible numeric scale.
+- Add preprocessing, master-file override, per-correction enable/disable, cosmetic sigma, and `--plate-solver auto|siril|astrometry` options.
+- Plate-solve locally with Siril first, cache `*_siril_wcs.fits`, and use Astrometry.net only as fallback.
+
+### Changed
+
+- Complete SharpCap StackLog transforms now replace only background-star registration; Siril remains responsible for calibration and debayering.
+- The Astrometry.net API key is optional for normal Seestar processing.
+
+### Fixed
+
+- Detect `*.CameraSettings.txt` in ordinary SharpCap FITS capture directories without `stacklog.csv`, and apply the recorded preprocessing to both the reference frame and all stacked frames.
+- Avoid passing zero as the disabled side of Siril hot/cold-pixel correction, which could correct millions of ordinary pixels.
+- Exclude cached `*_siril_wcs.fits` and related plate-solve artifacts when scanning source subframes again.
+
 ## v0.7.0 - 2026-08-14
 
 ### Added

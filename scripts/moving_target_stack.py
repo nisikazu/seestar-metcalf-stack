@@ -33,6 +33,7 @@ import numpy as np
 from PIL import Image
 
 from sharpcap_stacklog import load_manifest
+from siril_preprocessing import PreprocessingPlan, build_sequence_preprocess_script, stage_preprocessing_files
 
 
 REPO_ROOT = (
@@ -113,6 +114,35 @@ class SirilRegistrationError(RuntimeError):
         self.output = output
 
 
+def wcs_cd_matrix(header: dict[str, object]) -> tuple[float, float, float, float]:
+    try:
+        return tuple(float(header[key]) for key in ("CD1_1", "CD1_2", "CD2_1", "CD2_2"))  # type: ignore[return-value]
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        cdelt1 = float(header["CDELT1"])
+        cdelt2 = float(header["CDELT2"])
+        pc11 = float(header.get("PC1_1", 1.0))
+        pc12 = float(header.get("PC1_2", 0.0))
+        pc21 = float(header.get("PC2_1", 0.0))
+        pc22 = float(header.get("PC2_2", 1.0))
+        return pc11 * cdelt1, pc12 * cdelt1, pc21 * cdelt2, pc22 * cdelt2
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        cdelt1 = float(header["CDELT1"])
+        cdelt2 = float(header["CDELT2"])
+        angle = math.radians(float(header.get("CROTA2", header.get("CROTA1", 0.0))))
+        return (
+            cdelt1 * math.cos(angle),
+            -cdelt2 * math.sin(angle),
+            cdelt1 * math.sin(angle),
+            cdelt2 * math.cos(angle),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("WCS has neither a CD matrix nor usable PC/CDELT terms") from error
+
+
 class WcsModel:
     def __init__(self, header: dict[str, object] | None = None, calibration: dict[str, object] | None = None):
         self.header = header
@@ -147,10 +177,7 @@ class WcsModel:
         dec0 = float(h["CRVAL2"])
         crpix1 = float(h["CRPIX1"])
         crpix2 = float(h["CRPIX2"])
-        cd11 = float(h["CD1_1"])
-        cd12 = float(h["CD1_2"])
-        cd21 = float(h["CD2_1"])
-        cd22 = float(h["CD2_2"])
+        cd11, cd12, cd21, cd22 = wcs_cd_matrix(h)
 
         xi_deg, eta_deg = tangent_plane_offsets_deg(ra_deg, dec_deg, ra0, dec0)
         det = cd11 * cd22 - cd12 * cd21
@@ -191,6 +218,10 @@ class WcsModel:
                 "CD1_2",
                 "CD2_1",
                 "CD2_2",
+                "PC1_1",
+                "PC1_2",
+                "PC2_1",
+                "PC2_2",
                 "CDELT1",
                 "CDELT2",
                 "CROTA1",
@@ -355,10 +386,12 @@ def debayer_bilinear(data: np.ndarray, pattern: str) -> np.ndarray:
     return np.stack(planes, axis=0)
 
 
-def read_source_image(path: Path, bayer_pattern: str | None = None) -> FitsImage:
+def read_source_image(path: Path, bayer_pattern: str | None = None, *, debayer: bool = True) -> FitsImage:
     image = read_fits(path) if path.suffix.lower() in {".fit", ".fits"} else read_raster(path)
     pattern = bayer_pattern or str(image.header.get("BAYERPAT") or image.header.get("COLORTYP") or "").strip()
     if image.data.ndim == 2 and pattern:
+        image.header["BAYERPAT"] = pattern.strip().upper()
+    if debayer and image.data.ndim == 2 and pattern:
         image = FitsImage(header=image.header, cards=image.cards, data=debayer_bilinear(image.data, pattern))
     return image
 
@@ -503,7 +536,29 @@ def write_fits_float32(path: Path, data: np.ndarray, source_header: dict[str, ob
     ]
     if channels > 1:
         cards.append(format_card("NAXIS3", channels))
-    for key in ["OBJECT", "DATE-OBS", "FILTER", "GAIN", "EXPOSURE"]:
+    for key in [
+        "OBJECT",
+        "DATE-OBS",
+        "FILTER",
+        "GAIN",
+        "EXPOSURE",
+        "EXPTIME",
+        "BAYERPAT",
+        "COLORTYP",
+        "RA",
+        "DEC",
+        "OBJCTRA",
+        "OBJCTDEC",
+        "FOCALLEN",
+        "XPIXSZ",
+        "YPIXSZ",
+        "XBINNING",
+        "YBINNING",
+        "CCDXBIN",
+        "CCDYBIN",
+        "SITELONG",
+        "SITELAT",
+    ]:
         if key in source_header:
             cards.append(format_card(key, source_header[key]))
     for key, value in extra.items():
@@ -1064,6 +1119,22 @@ def write_siril_script(
     )
 
 
+def write_siril_registration_script(
+    path: Path,
+    sequence_basename: str,
+    transform: str,
+    minpairs: int | None,
+    reference_index: int,
+) -> None:
+    register = f"register {sequence_basename}_ -prefix=r_ -transf={transform}"
+    if minpairs:
+        register += f" -minpairs={minpairs}"
+    path.write_text(
+        "\n".join(["requires 1.4.0", f"setref {sequence_basename}_ {reference_index}", register, ""]),
+        encoding="ascii",
+    )
+
+
 def write_siril_findstar_script(path: Path, basename: str, frame_count: int) -> None:
     lines = ["requires 1.4.0"]
     for index in range(1, frame_count + 1):
@@ -1177,11 +1248,20 @@ def select_manifest_reference_index(
     return min(dated, key=lambda item: (abs((item[0] - midpoint).total_seconds()), item[0]))[1]
 
 
-def cleanup_intermediate_images(work_dir: Path, basename: str, copied: list[Path], frame_count: int) -> list[str]:
+def cleanup_intermediate_images(
+    work_dir: Path,
+    basename: str,
+    copied: list[Path],
+    frame_count: int,
+    processed_basename: str | None = None,
+) -> list[str]:
     candidates = [*copied]
     for i in range(1, frame_count + 1):
         candidates.append(work_dir / f"{basename}_{i:05d}.fit")
         candidates.append(work_dir / f"r_{basename}_{i:05d}.fit")
+        if processed_basename and processed_basename != basename:
+            candidates.append(work_dir / f"{processed_basename}_{i:05d}.fit")
+            candidates.append(work_dir / f"r_{processed_basename}_{i:05d}.fit")
     removed: list[str] = []
     seen: set[Path] = set()
     for path in candidates:
@@ -1576,6 +1656,8 @@ def siril_requires_windows_shell(siril_cmd: Path) -> bool:
 
 
 def run_siril(siril_cmd: Path | None, work_dir: Path, script_path: Path, verbose: bool = True) -> str:
+    work_dir = work_dir.resolve()
+    script_path = script_path.resolve()
     resolved_siril = resolve_siril_command(siril_cmd)
     cmd = build_siril_command(resolved_siril, work_dir, script_path)
     use_shell = siril_requires_windows_shell(resolved_siril)
@@ -1675,7 +1757,10 @@ def looks_like_stacked_outputs(files: list[Path]) -> bool:
 
 
 def is_fits_frame(path: Path) -> bool:
-    return path.is_file() and path.suffix.lower() in {".fit", ".fits"}
+    if not path.is_file() or path.suffix.lower() not in {".fit", ".fits"}:
+        return False
+    stem = path.stem.casefold()
+    return not stem.endswith(("_siril_wcs", "_wcs", "_upload_sanitized"))
 
 
 def resolve_source_dir(source_dir: Path, pattern: str) -> Path:
@@ -1811,6 +1896,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Stack Seestar frames on a moving target")
     parser.add_argument("--source-dir", required=True, type=Path)
     parser.add_argument("--frame-manifest", type=Path, help="Normalized SharpCap Live Stack frame manifest")
+    parser.add_argument("--preprocessing-plan", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--bayer-pattern",
         choices=("RGGB", "BGGR", "GRBG", "GBRG"),
@@ -1984,40 +2070,33 @@ def main() -> int:
     registration_dir.mkdir(parents=True, exist_ok=True)
     use_sharpcap_registration = bool(manifest and manifest.get("alignment_complete"))
     manifest_reference = manifest_rows[reference_index - 1] if use_sharpcap_registration else None
+    preprocessing_payload = None
+    if args.preprocessing_plan:
+        preprocessing_payload = json.loads(args.preprocessing_plan.read_text(encoding="utf-8"))
+    elif isinstance(manifest, dict):
+        preprocessing_payload = manifest.get("preprocessing")
+    preprocessing_plan = PreprocessingPlan.from_dict(preprocessing_payload)
 
     copied: list[Path] = []
+    cfa = False
     try:
         if args.verbose:
-            action = "Preparing SharpCap-aligned frames" if use_sharpcap_registration else "Copying source frames for Siril registration"
-            print(f"[prepare] {action}: {len(files)} frames", flush=True)
+            print(f"[prepare] Copying source frames for Siril preprocessing: {len(files)} frames", flush=True)
         for i, source in enumerate(files, start=1):
             if args.verbose:
                 print(f"[prepare] frame {i}/{len(files)}: {source.name}", flush=True)
             destination = registration_dir / f"{args.basename}_src_{i:05d}.fit"
             copied.append(destination)
-            if use_sharpcap_registration:
+            if manifest is not None:
                 row = manifest_rows[i - 1]
-                image = read_source_image(source, args.bayer_pattern)
-                tx, ty, angle = relative_sharpcap_transform(row, manifest_reference)
-                aligned, _valid = transform_image(image.data, tx, ty, angle)
-                registered = registration_dir / f"r_{args.basename}_{i:05d}.fit"
-                write_registered_float(
-                    registered,
-                    FitsImage(header=image.header, cards=image.cards, data=aligned),
-                    parse_time(row["time"]),
-                    str(manifest.get("object") or source.parent.name),
-                    float(manifest["exposure_seconds"]) if manifest.get("exposure_seconds") is not None else None,
-                )
-                write_registered_float(
-                    destination,
-                    image,
-                    parse_time(row["time"]),
-                    str(manifest.get("object") or source.parent.name),
-                    float(manifest["exposure_seconds"]) if manifest.get("exposure_seconds") is not None else None,
-                )
-            elif manifest is not None:
-                row = manifest_rows[i - 1]
-                image = read_source_image(source, args.bayer_pattern)
+                image = read_source_image(source, args.bayer_pattern, debayer=False)
+                if image.data.ndim == 2:
+                    pattern = str(image.header.get("BAYERPAT") or "").strip()
+                    if not pattern:
+                        raise ValueError(
+                            f"CFA Bayer pattern is missing for {source.name}; provide --bayer-pattern"
+                        )
+                    cfa = True
                 write_registered_float(
                     destination,
                     image,
@@ -2027,24 +2106,72 @@ def main() -> int:
                 )
             else:
                 shutil.copy2(source, destination)
+                if i == 1:
+                    raw_image = read_source_image(source, args.bayer_pattern, debayer=False)
+                    cfa = raw_image.data.ndim == 2 and bool(
+                        str(raw_image.header.get("BAYERPAT") or raw_image.header.get("COLORTYP") or "").strip()
+                    )
     except Exception:
         if not args.no_cleanup:
             cleanup_intermediate_images(registration_dir, args.basename, copied, len(copied))
         raise
 
-    siril_script = registration_dir / "register_background_stars.ssf"
-    write_siril_script(
-        siril_script,
+    preprocess_script = registration_dir / "preprocess_and_debayer.ssf"
+    staged_preprocessing_plan = stage_preprocessing_files(preprocessing_plan, registration_dir)
+    preprocess_text, processed_sequence = build_sequence_preprocess_script(
         args.basename,
+        staged_preprocessing_plan,
+        cfa=cfa,
+    )
+    preprocess_script.write_text(preprocess_text, encoding="ascii")
+    if args.verbose:
+        print(
+            "[preprocess] Siril calibration/debayer: "
+            f"dark={'on' if preprocessing_plan.dark_enabled else 'off'}; "
+            f"flat={'on' if preprocessing_plan.flat_enabled else 'off'}; "
+            f"hot={'on' if preprocessing_plan.hot_pixel_enabled else 'off'}; "
+            f"cold={'on' if preprocessing_plan.cold_pixel_enabled else 'off'}; "
+            f"cfa={'yes' if cfa else 'no'}",
+            flush=True,
+        )
+    run_siril(args.siril, registration_dir, preprocess_script, args.verbose)
+    processed_basename = processed_sequence.rstrip("_")
+    processed_files = [registration_dir / f"{processed_basename}_{i:05d}.fit" for i in range(1, len(files) + 1)]
+    missing_processed = [path for path in processed_files if not path.is_file()]
+    if missing_processed:
+        raise RuntimeError(
+            f"Siril preprocessing produced only {len(processed_files) - len(missing_processed)}/{len(processed_files)} frame(s)"
+        )
+
+    if use_sharpcap_registration:
+        if args.verbose:
+            print(f"[registration] Applying SharpCap StackLog alignment: {len(files)} frames", flush=True)
+        for i, prepared in enumerate(processed_files, start=1):
+            row = manifest_rows[i - 1]
+            image = read_fits(prepared)
+            tx, ty, angle = relative_sharpcap_transform(row, manifest_reference)
+            aligned, _valid = transform_image(image.data, tx, ty, angle)
+            registered = registration_dir / f"r_{processed_basename}_{i:05d}.fit"
+            write_registered_float(
+                registered,
+                FitsImage(header=image.header, cards=image.cards, data=aligned),
+                parse_time(row["time"]),
+                str(manifest.get("object") or files[i - 1].parent.name),
+                float(manifest["exposure_seconds"]) if manifest.get("exposure_seconds") is not None else None,
+            )
+
+    siril_script = registration_dir / "register_background_stars.ssf"
+    write_siril_registration_script(
+        siril_script,
+        processed_basename,
         args.registration_transform,
         args.registration_minpairs,
         reference_index,
-        debayer=manifest is None,
     )
-    registration_seq = registration_dir / f"{args.basename}_.seq"
+    registration_seq = registration_dir / f"{processed_basename}_.seq"
     try:
         if use_sharpcap_registration:
-            print("[registration] Using SharpCap StackLog alignment; Siril was not called", flush=True)
+            print("[registration] Using SharpCap StackLog alignment after Siril preprocessing", flush=True)
             star_registrations = {}
             reference_stack_index = int(manifest_reference["frame_index"])
             for index, row in enumerate(manifest_rows, start=1):
@@ -2081,7 +2208,7 @@ def main() -> int:
             registration_issues = registration_validation_issues(
                 files,
                 registration_dir,
-                args.basename,
+                processed_basename,
                 star_registrations,
                 args.registration_minpairs,
             )
@@ -2107,7 +2234,7 @@ def main() -> int:
                 )
                 raise RuntimeError("Selected reference frame cannot support background-star registration; see warning above")
             registered_count = sum(
-                (registration_dir / f"r_{args.basename}_{i:05d}.fit").exists()
+                (registration_dir / f"r_{processed_basename}_{i:05d}.fit").exists()
                 for i in range(1, len(copied) + 1)
             )
             if args.verbose:
@@ -2124,7 +2251,7 @@ def main() -> int:
             collect_failed_registration_diagnostics(
                 args.siril,
                 registration_dir,
-                args.basename,
+                processed_basename,
                 len(files),
                 args.verbose,
             ),
@@ -2133,7 +2260,7 @@ def main() -> int:
         registration_issues = registration_validation_issues(
             files,
             registration_dir,
-            args.basename,
+            processed_basename,
             star_registrations,
             args.registration_minpairs,
         )
@@ -2165,7 +2292,9 @@ def main() -> int:
                 flush=True,
             )
         if not args.no_cleanup:
-            removed = cleanup_intermediate_images(registration_dir, args.basename, copied, len(copied))
+            removed = cleanup_intermediate_images(
+                registration_dir, args.basename, copied, len(copied), processed_basename
+            )
             print(f"[cleanup] Removed {len(removed)} intermediate FITS files after registration failure", flush=True)
         raise RuntimeError(
             siril_registration_failure_message(
@@ -2177,10 +2306,12 @@ def main() -> int:
         ) from None
     except Exception:
         if not args.no_cleanup:
-            removed = cleanup_intermediate_images(registration_dir, args.basename, copied, len(copied))
+            removed = cleanup_intermediate_images(
+                registration_dir, args.basename, copied, len(copied), processed_basename
+            )
             print(f"[cleanup] Removed {len(removed)} intermediate FITS files after registration failure", flush=True)
         raise
-    reference = read_fits(copied[reference_index - 1])
+    reference = read_fits(processed_files[reference_index - 1])
     height = int(reference.header["NAXIS2"])
     width = int(reference.header["NAXIS1"])
     if args.wcs_fits:
@@ -2219,7 +2350,7 @@ def main() -> int:
                 f"[stack:{args.stack_method}] frame {i}/{len(copied)}: {files[i - 1].name}",
                 flush=True,
             )
-        registered = registration_dir / f"r_{args.basename}_{i:05d}.fit"
+        registered = registration_dir / f"r_{processed_basename}_{i:05d}.fit"
         star_reg = star_registrations.get(i, SirilRegistration(index=i))
         match_diag = match_diagnostics.get(i, SirilMatchDiagnostics(index=i))
         registration_metrics = {
@@ -2606,7 +2737,9 @@ def main() -> int:
 
     removed_intermediate_images: list[str] = []
     if not args.no_cleanup:
-        removed_intermediate_images = cleanup_intermediate_images(registration_dir, args.basename, copied, len(files))
+        removed_intermediate_images = cleanup_intermediate_images(
+            registration_dir, args.basename, copied, len(files), processed_basename
+        )
 
     summary = {
         "source_dir": str(args.source_dir),
@@ -2618,6 +2751,7 @@ def main() -> int:
         "registration_transform": args.registration_transform,
         "registration_source": "sharpcap-stacklog" if use_sharpcap_registration else "siril",
         "frame_manifest": str(args.frame_manifest) if args.frame_manifest else None,
+        "preprocessing": preprocessing_plan.to_dict(),
         "registration_minpairs": args.registration_minpairs,
         "registration_seq": str(registration_seq),
         "preview_flip_vertical": args.preview_flip_vertical,

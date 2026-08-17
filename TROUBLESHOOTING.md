@@ -81,9 +81,15 @@ PNG/TIFFにはHorizons検索に使える天体名や、プレートソルブの�
 
 観測地は`--site-longitude`と`--site-latitude`で指定できますが、省略時は地心座標へフォールバックします。地球へ近接中の天体では視差が大きくなるため省略しないでください。
 
-### SharpCap Live Stack入力なのにSirilが起動する
+### SharpCap Live Stack入力でもSirilが起動する
 
-`LiveStack.AlignFrames=True`で、選択した全フレームにX/Y offsetとrotationが必要です。位置合わせ情報が欠ける場合、位置合わせがOFFの場合、または`--include-sharpcap-rejected`で失敗行を含めた場合はSirilへフォールバックします。ログの`registration=`表示を確認してください。
+0.7.xではSirilをdark/flat補正、ホット・クールピクセル補正、デベイヤ、Plate Solveに使うため、StackLogの位置合わせが完全でもSirilは起動します。`Using SharpCap StackLog alignment after Siril preprocessing`と表示されれば、Sirilで前処理した後の背景星位置合わせにはStackLogのX/Y offsetとrotationを使用しています。
+
+### CameraSettingsのmaster darkまたはflatが見つからない
+
+CameraSettingsに記録された元の絶対パスと、コピー先周辺の同名ファイルを探します。見つからない場合は未補正で黙って続行しません。masterをコピーして`--dark-file`または`--flat-file`で指定するか、その補正を意図的に使わない場合だけ`--dark-correction disable`または`--flat-correction disable`を指定してください。
+
+すでに補正済み画像へ差し替えた場合は、二重補正を避けるため`--preprocessing disable`を指定します。
 
 ### `--reference-frame-file was not found`
 
@@ -117,7 +123,9 @@ Siril同梱版を使うか、Sirilをインストールして `siril-cli` をPAT
 
 ### Astrometry.netで停止する
 
-APIキーを確認し、ネットワーク接続を確認してください。成功済みの基準フレームはソースフォルダの `*_astrometry.json` または `*_wcs.fits` を再利用するため、同じ基準を選べば通常は再送しません。別の基準を選ぶと、そのファイル用に新しい解が必要です。
+既定の`--plate-solver auto`はSirilを先に試すため、通常のSeestar FITSではAstrometry.netへ到達しません。Astrometry.netへ進んだ場合は、Sirilで解決できなかった理由を直前のログで確認し、続いてAPIキーとネットワーク接続を確認してください。ローカル処理だけに限定するには`--plate-solver siril`を使います。
+
+成功済みの基準フレームはソースフォルダの`*_siril_wcs.fits`、`*_astrometry.json`、`*_wcs.fits`を再利用します。別の基準を選ぶと、そのファイル用に新しい解が必要です。
 
 ### Horizonsで天体名が見つからない
 

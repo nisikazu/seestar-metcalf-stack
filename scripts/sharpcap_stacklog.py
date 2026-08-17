@@ -47,6 +47,7 @@ class SharpCapSession:
     root: Path
     stacklog: Path
     settings_file: Path | None
+    settings: dict[str, str]
     version_text: str | None
     version: tuple[int, ...] | None
     exposure_seconds: float | None
@@ -312,6 +313,7 @@ def load_sharpcap_session(source_dir: Path, include_rejected: bool = False) -> S
         root=root,
         stacklog=stacklog,
         settings_file=settings_file,
+        settings=settings,
         version_text=version_text,
         version=version,
         exposure_seconds=exposure_seconds,
@@ -324,7 +326,12 @@ def load_sharpcap_session(source_dir: Path, include_rejected: bool = False) -> S
     )
 
 
-def write_manifest(path: Path, session: SharpCapSession, selected_paths: list[Path]) -> Path:
+def write_manifest(
+    path: Path,
+    session: SharpCapSession,
+    selected_paths: list[Path],
+    preprocessing: dict[str, object] | None = None,
+) -> Path:
     selected = {item.resolve() for item in selected_paths}
     frames = []
     selected_frames: list[SharpCapFrame] = []
@@ -342,6 +349,8 @@ def write_manifest(path: Path, session: SharpCapSession, selected_paths: list[Pa
         "root": str(session.root),
         "stacklog": str(session.stacklog),
         "settings_file": str(session.settings_file) if session.settings_file else None,
+        "settings": session.settings,
+        "preprocessing": preprocessing,
         "sharpcap_version": session.version_text,
         "exposure_seconds": session.exposure_seconds,
         "object": session.object_name,

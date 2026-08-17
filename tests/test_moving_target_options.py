@@ -19,6 +19,7 @@ import moving_target_pipeline as pipeline
 import astrometry_solve
 import horizons_ephemeris as horizons
 import sharpcap_stacklog as sharpcap
+import siril_preprocessing as preprocessing
 
 
 class FitsPatternTests(unittest.TestCase):
@@ -32,12 +33,18 @@ class FitsPatternTests(unittest.TestCase):
             fit = root / "frame.fit"
             fits = root / "frame.fits"
             invalid = root / "frame.fits.invalid"
+            siril_wcs = root / "frame_siril_wcs.fits"
+            astrometry_wcs = root / "frame_wcs.fits"
             fit.touch()
             fits.touch()
             invalid.touch()
+            siril_wcs.touch()
+            astrometry_wcs.touch()
             self.assertTrue(pipeline.is_fits_frame(fits))
             self.assertTrue(pipeline.is_fits_frame(fit))
             self.assertFalse(pipeline.is_fits_frame(invalid))
+            self.assertFalse(pipeline.is_fits_frame(siril_wcs))
+            self.assertFalse(stacker.is_fits_frame(astrometry_wcs))
 
     def test_pipeline_accepts_site_and_pixel_scale_overrides(self):
         with patch.object(
@@ -59,6 +66,22 @@ class FitsPatternTests(unittest.TestCase):
         self.assertEqual(args.site_longitude, 139.6)
         self.assertEqual(args.site_latitude, 35.9)
         self.assertAlmostEqual(args.pixel_scale_arcsec, 0.959)
+
+    def test_pipeline_defaults_to_siril_first_plate_solver(self):
+        with patch.object(sys, "argv", ["seestar-metcalf-stack", "frames"]):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.plate_solver, "auto")
+        self.assertEqual(args.preprocessing, "auto")
+
+    def test_explicit_solve_center_is_embedded_for_raster_reference(self):
+        header = {"OBJECT": "10P"}
+        args = Namespace(solve_center_ra_deg=329.551590564, solve_center_dec_deg=-26.515075999)
+
+        pipeline.embed_explicit_solve_center(header, args)
+
+        self.assertAlmostEqual(header["RA"], 329.551590564)
+        self.assertAlmostEqual(header["DEC"], -26.515075999)
 
 
 class SharpCapStackLogTests(unittest.TestCase):
@@ -237,6 +260,107 @@ class SharpCapStackLogTests(unittest.TestCase):
 
         np.testing.assert_array_equal(rgb[0, 0::2, 0::2], mosaic[0::2, 0::2])
         np.testing.assert_array_equal(rgb[2, 1::2, 1::2], mosaic[1::2, 1::2])
+
+    def test_camerasettings_resolves_relocated_dark_and_enables_hot_pixels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "target" / "2026-08-06" / "session copy"
+            self.write_session(root)
+            dark = root.parent / "darks" / "MasterDark.tif"
+            dark.parent.mkdir()
+            dark.touch()
+            settings = root / "Stack.CameraSettings.txt"
+            settings.write_text(
+                settings.read_text(encoding="utf-8")
+                + "\nSubtract Dark=C:\\old location\\MasterDark.tif\n"
+                + "Apply Flat=None\nHot Pixel Sensitivity=21\n",
+                encoding="utf-8",
+            )
+            session = sharpcap.load_sharpcap_session(root)
+
+            plan = preprocessing.resolve_preprocessing_plan(
+                settings=session.settings,
+                settings_file=session.settings_file,
+                session_root=session.root,
+            )
+
+            self.assertTrue(plan.dark_enabled)
+            self.assertEqual(Path(plan.dark_file), dark.resolve())
+            self.assertTrue(plan.hot_pixel_enabled)
+            self.assertFalse(plan.cold_pixel_enabled)
+            self.assertEqual(plan.sharpcap_hot_pixel_sensitivity, 21.0)
+
+    def test_camerasettings_is_discovered_without_stacklog(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "capture"
+            root.mkdir()
+            settings = root / "frame_00001.CameraSettings.txt"
+            settings.write_text(
+                "Subtract Dark=Hot Pixel Removal Only\nHot Pixel Sensitivity=5\n",
+                encoding="utf-8",
+            )
+
+            settings_file, values, session_root = pipeline.discover_preprocessing_settings(root, None)
+            plan = preprocessing.resolve_preprocessing_plan(
+                settings=values,
+                settings_file=settings_file,
+                session_root=session_root,
+            )
+
+            self.assertEqual(settings_file, settings)
+            self.assertTrue(plan.hot_pixel_enabled)
+            self.assertEqual(plan.sharpcap_hot_pixel_sensitivity, 5.0)
+
+    def test_zero_sensitivity_disables_automatic_hot_pixel_correction(self):
+        plan = preprocessing.resolve_preprocessing_plan(
+            settings={"Subtract Dark": "None", "Apply Flat": "None", "Hot Pixel Sensitivity": "0"},
+            settings_file=None,
+            session_root=Path.cwd(),
+        )
+
+        self.assertFalse(plan.hot_pixel_enabled)
+        self.assertFalse(plan.enabled)
+
+    def test_command_line_disable_overrides_camerasettings(self):
+        plan = preprocessing.resolve_preprocessing_plan(
+            settings={"Subtract Dark": "Hot and Cold Pixel Removal", "Hot Pixel Sensitivity": "21"},
+            settings_file=None,
+            session_root=Path.cwd(),
+            hot_pixel_correction="disable",
+            cold_pixel_correction="disable",
+        )
+
+        self.assertFalse(plan.hot_pixel_enabled)
+        self.assertFalse(plan.cold_pixel_enabled)
+
+    def test_siril_script_uses_dark_cosmetic_correction_and_debayer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dark = Path(temporary) / "calibration" / "master_dark.fit"
+            dark.parent.mkdir()
+            dark.touch()
+            plan = preprocessing.PreprocessingPlan(
+                enabled=True,
+                settings_file=None,
+                dark_enabled=True,
+                dark_file=str(dark),
+                dark_source="test",
+                flat_enabled=False,
+                flat_file=None,
+                flat_source="default",
+                hot_pixel_enabled=True,
+                hot_pixel_source="test",
+                cold_pixel_enabled=False,
+                cold_pixel_source="default",
+                hot_pixel_sigma=3.0,
+                cold_pixel_sigma=3.0,
+                sharpcap_hot_pixel_sensitivity=21.0,
+            )
+
+            script, output = preprocessing.build_sequence_preprocess_script("frame", plan, cfa=True)
+
+            self.assertIn("-dark=calibration/master_dark.fit", script)
+            self.assertIn("-cc=dark 1000000 3", script)
+            self.assertIn("-cfa -debayer", script)
+            self.assertEqual(output, "pp_frame_")
 
 
 class HorizonsObjectResolutionTests(unittest.TestCase):
@@ -808,8 +932,49 @@ class PlateSolveCacheTests(unittest.TestCase):
 
             self.assertEqual(pipeline.cached_submission_id(result_path), "15501234")
 
+    def test_plate_solution_source_distinguishes_siril_and_explicit_wcs(self):
+        self.assertEqual(pipeline.plate_solution_source(Path("frame_siril_wcs.fits"), None), "siril")
+        self.assertEqual(pipeline.plate_solution_source(Path("frame_wcs.fits"), None), "astrometry.net")
+        self.assertEqual(pipeline.plate_solution_source(Path("provided.fit"), None), "explicit-wcs")
+
 
 class AstrometryHelperTests(unittest.TestCase):
+    def test_siril_pc_cdelt_wcs_is_converted_to_cd_matrix(self):
+        header = {
+            "CDELT1": -0.000266,
+            "CDELT2": 0.000267,
+            "PC1_1": 0.0,
+            "PC1_2": -1.0,
+            "PC2_1": 1.0,
+            "PC2_2": 0.0,
+        }
+
+        cd11, cd12, cd21, cd22 = stacker.wcs_cd_matrix(header)
+
+        self.assertAlmostEqual(cd11, 0.0)
+        self.assertAlmostEqual(cd12, 0.000266)
+        self.assertAlmostEqual(cd21, 0.000267)
+        self.assertAlmostEqual(cd22, 0.0)
+
+    def test_siril_plate_solve_script_uses_sampling_hints(self):
+        script = pipeline.build_siril_plate_solve_script(
+            Path("reference.fit"),
+            Path("solved.fit"),
+            (329.0, -26.0),
+            250.0,
+            2.9,
+            "gaia",
+        )
+
+        self.assertIn("platesolve -force -focal=250 -pixelsize=2.9", script)
+        self.assertIn("-catalog=gaia", script)
+        self.assertIn("save solved.fit", script)
+
+    def test_siril_detected_star_count_uses_largest_reported_count(self):
+        output = "Found 8 Gaussian profile stars in image\nUsing 41 detected stars"
+
+        self.assertEqual(pipeline.siril_detected_star_count(output), 41)
+
     def test_scale_hint_uses_fits_camera_metadata(self):
         hint = astrometry_solve.estimate_scale_hint(
             {

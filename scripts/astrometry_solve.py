@@ -170,16 +170,35 @@ def positive_number(value: object) -> float | None:
     return number if math.isfinite(number) and number > 0 else None
 
 
-def estimate_scale_hint(header: dict[str, object], pixel_scale_arcsec: float | None = None) -> dict | None:
+def estimate_scale_hint(
+    header: dict[str, object],
+    pixel_scale_arcsec: float | None = None,
+    scale_range_factor: float | None = None,
+) -> dict | None:
     if pixel_scale_arcsec is not None:
         if not math.isfinite(pixel_scale_arcsec) or pixel_scale_arcsec <= 0:
             raise ValueError("--pixel-scale-arcsec must be a positive finite number")
+        if scale_range_factor is not None and (
+            not math.isfinite(scale_range_factor) or scale_range_factor <= 1
+        ):
+            raise ValueError("--scale-range-factor must be greater than 1")
         width = positive_number(header.get("NAXIS1"))
         height = positive_number(header.get("NAXIS2"))
+        lower = (
+            pixel_scale_arcsec / scale_range_factor
+            if scale_range_factor is not None
+            else pixel_scale_arcsec * max(0.05, 1 - SCALE_MARGIN)
+        )
+        upper = (
+            pixel_scale_arcsec * scale_range_factor
+            if scale_range_factor is not None
+            else pixel_scale_arcsec * (1 + SCALE_MARGIN)
+        )
         return {
             "arcsecPerPix": pixel_scale_arcsec,
-            "lower": pixel_scale_arcsec * max(0.05, 1 - SCALE_MARGIN),
-            "upper": pixel_scale_arcsec * (1 + SCALE_MARGIN),
+            "lower": lower,
+            "upper": upper,
+            "rangeFactor": scale_range_factor,
             "source": "command-line",
             "fovDeg": (
                 {
@@ -229,9 +248,12 @@ def upload_file(
     session: str,
     file_path: pathlib.Path,
     pixel_scale_arcsec: float | None = None,
+    center_ra_deg: float | None = None,
+    center_dec_deg: float | None = None,
+    scale_range_factor: float | None = None,
 ) -> tuple[dict, dict, dict, dict]:
     header = read_fits_header(file_path)
-    scale_hint = estimate_scale_hint(header, pixel_scale_arcsec)
+    scale_hint = estimate_scale_hint(header, pixel_scale_arcsec, scale_range_factor)
     request = {
         "session": session,
         "publicly_visible": "n",
@@ -241,8 +263,8 @@ def upload_file(
         "scale_type": "ul",
         "scale_lower": scale_hint["lower"] if scale_hint else 3.2,
         "scale_upper": scale_hint["upper"] if scale_hint else 4.8,
-        "center_ra": header.get("RA"),
-        "center_dec": header.get("DEC"),
+        "center_ra": center_ra_deg if center_ra_deg is not None else header.get("RA"),
+        "center_dec": center_dec_deg if center_dec_deg is not None else header.get("DEC"),
         "radius": SEARCH_RADIUS_DEG,
         "downsample_factor": 2,
         "tweak_order": 2,
@@ -307,9 +329,23 @@ def angular_separation_deg(ra1: float, dec1: float, ra2: float, dec2: float) -> 
     return math.acos(max(-1.0, min(1.0, cosine))) / d2r
 
 
-def parse_args(argv: list[str]) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, str, float | None]:
+def parse_args(
+    argv: list[str],
+) -> tuple[
+    pathlib.Path,
+    pathlib.Path,
+    pathlib.Path,
+    str,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+]:
     positional: list[str] = []
     pixel_scale_arcsec: float | None = None
+    center_ra_deg: float | None = None
+    center_dec_deg: float | None = None
+    scale_range_factor: float | None = None
     index = 0
     while index < len(argv):
         if argv[index] == "--pixel-scale-arcsec":
@@ -318,13 +354,41 @@ def parse_args(argv: list[str]) -> tuple[pathlib.Path, pathlib.Path, pathlib.Pat
             pixel_scale_arcsec = float(argv[index + 1])
             index += 2
             continue
+        if argv[index] in {"--center-ra-deg", "--center-dec-deg"}:
+            option = argv[index]
+            if index + 1 >= len(argv):
+                raise ValueError(f"{option} requires a value")
+            value = float(argv[index + 1])
+            if option == "--center-ra-deg":
+                center_ra_deg = value
+            else:
+                center_dec_deg = value
+            index += 2
+            continue
+        if argv[index] == "--scale-range-factor":
+            if index + 1 >= len(argv):
+                raise ValueError("--scale-range-factor requires a value")
+            scale_range_factor = float(argv[index + 1])
+            if not math.isfinite(scale_range_factor) or scale_range_factor <= 1:
+                raise ValueError("--scale-range-factor must be greater than 1")
+            index += 2
+            continue
         positional.append(argv[index])
         index += 1
     fits_path = pathlib.Path(positional[0]) if len(positional) > 0 else DEFAULT_FILE
     output_path = pathlib.Path(positional[1]) if len(positional) > 1 else SCRIPT_DIR / "downloads" / "98943_Torifune_astrometry_result.json"
     wcs_path = pathlib.Path(positional[2]) if len(positional) > 2 else output_path.with_name(output_path.stem + "_wcs.fits")
     resume_id = positional[3] if len(positional) > 3 else os.environ.get("ASTROMETRY_NET_SUBID", "")
-    return fits_path, output_path, wcs_path, resume_id, pixel_scale_arcsec
+    return (
+        fits_path,
+        output_path,
+        wcs_path,
+        resume_id,
+        pixel_scale_arcsec,
+        center_ra_deg,
+        center_dec_deg,
+        scale_range_factor,
+    )
 
 
 def is_valid_wcs_bytes(data: bytes) -> bool:
@@ -337,11 +401,20 @@ def is_valid_wcs_bytes(data: bytes) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    fits_path, output_path, wcs_path, resume_id, pixel_scale_arcsec = parse_args(argv or sys.argv[1:])
+    (
+        fits_path,
+        output_path,
+        wcs_path,
+        resume_id,
+        pixel_scale_arcsec,
+        center_ra_deg,
+        center_dec_deg,
+        scale_range_factor,
+    ) = parse_args(argv or sys.argv[1:])
     if not fits_path.exists():
         raise FileNotFoundError(f"FITS file not found: {fits_path}")
     header = read_fits_header(fits_path)
-    scale_hint = estimate_scale_hint(header, pixel_scale_arcsec)
+    scale_hint = estimate_scale_hint(header, pixel_scale_arcsec, scale_range_factor)
     upload = None
     request = {"resumed": True}
     submission_id = resume_id.strip()
@@ -351,7 +424,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Uploading {fits_path}")
         session = login(read_api_key())
         print("Astrometry login succeeded")
-        upload, request, header, scale_hint = upload_file(session, fits_path, pixel_scale_arcsec)
+        upload, request, header, scale_hint = upload_file(
+            session,
+            fits_path,
+            pixel_scale_arcsec,
+            center_ra_deg,
+            center_dec_deg,
+            scale_range_factor,
+        )
         submission_id = str(upload["subid"])
         print(f"Submission id: {submission_id}")
         if scale_hint:

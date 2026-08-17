@@ -2,17 +2,56 @@
 
 利用者に影響する変更は[変更履歴](CHANGELOG.md)と[改訂内容とトラブルシュート](TROUBLESHOOTING.md)にまとめています。この文書は実装判断、検証、引き継ぎを目的とした開発者向け資料です。
 
-## 2026-08-13: SharpCap Live StackログによるSiril省略
+## 2026-08-17: Siril前処理・Plate Solve優先経路（実装済み、0.7.x）
+
+基準フレームのプレートソルブを高速化し、Astrometry.netのAPIやネットワークが利用できない場合にも復旧できるよう、次の順序で実装した。
+
+1. FITSヘッダまたは`--pixel-scale-arcsec`から画角を得られる場合は、その値から換算した焦点距離でSiril内蔵ソルバーを最初に実行する。
+2. Sirilが検出した星数が`--registration-minpairs`未満なら、画角を変えても後続の位置合わせに使えないため、必要数と検出数を示して終了する。
+3. 星数が足りており、失敗理由がカタログ星との位置合わせ不成立なら、指定焦点距離に次の倍率を掛けて近距離探索する。
+
+   ```text
+   1.00, 0.70, 1.40, 0.50, 2.00
+   ```
+
+4. 近距離探索でも解けなければAstrometry.netへフォールバックする。概略中心座標は使うが、画角は制限しないか十分広い範囲を与え、誤ったFITS画角に再び拘束されないようにする。
+5. APIキー欠落、認証失敗、通信障害、サービス障害などでAstrometry.netを利用できない場合に限り、Siril探索を次の順で拡張する。
+
+   ```text
+   1.00, 0.70, 1.40, 0.50, 2.00, 0.35, 2.80, 0.25, 4.00
+   ```
+
+   この系列は、実際の焦点距離がヘッダ値の約0.21～5.0倍にある範囲を、Sirilの実測許容幅を考慮してほぼ隙間なく覆う。これを超えた場合は探索を続けず、焦点距離、ピクセルピッチ、ビニング、中心座標の確認と明示指定を求める。
+
+倍率系列は等比約1.4倍とする。2026-08-16にSiril 1.4.1とSharpCapの10P FITSで測定したところ、正しいピクセル画角の0.84～1.25倍で3/3回成功し、0.83倍と1.26倍では0/3回だった。焦点距離に直すと約0.80～1.19倍であり、概ね±20%の照合許容幅に相当する。隣接試行倍率の比を理論上の上限`1.2 / 0.8 = 1.5`未満にし、画像差に備えて1.4とした。`0.41, 0.65, 1.00`のような系列は隣接比が1.5を超える箇所があり、探索漏れを作るため採用しない。
+
+失敗は少なくとも次に分類し、利用者へ別の復旧方法を示す。
+
+- 検出星不足: 画角再試行をせず終了し、基準フレーム変更や不良フレーム除外を案内する。
+- 星数十分・カタログ星との照合失敗: 焦点距離倍率探索を行う。
+- 星表取得失敗: 同じ倍率の反復ではなく、通信・CA証明書・Sirilキャッシュを確認する。
+- Astrometry.net API利用不能: 理由を認証、通信、サーバー応答に分け、Siril広域探索へ移る。
+- 中心座標不良の疑い: Sirilの画角探索では直らないことを明示する。Astrometry.netも利用不能ならRA/Decの明示指定を求める。
+
+Sirilのオンライン部分星表は中心座標、画角、限界等級に応じてディスクキャッシュされる。通常実行では自動再利用し、同じ候補を再取得しない。検証には`run-siril-scale-tolerance.cmd`を使い、毎回の初回取得を測る場合だけ`--siril-cache-mode cold-each`で通常キャッシュから隔離する。実測CSVは配布物へ含めず、設計根拠は[プレートソルブ・ベンチマーク](PLATE-SOLVE-BENCHMARK.md)に記録する。
+
+SharpCap入力では`*.CameraSettings.txt`を正規化して`PreprocessingPlan`を作る。master dark/flatはCLI明示を最優先し、次にCameraSettingsの記録パス、移動後はbasenameと近隣`darks`/`flats`を探索する。要求されたmasterが見つからない場合は未補正で続行せず停止する。`Hot Pixel Sensitivity != 0`はホット補正ONの信号としてのみ使い、SharpCapの尺度をSiril sigmaへ換算しない。既定sigmaは3である。
+
+全フレームをSirilでdark/flat・cosmetic correction後にデベイヤする。SharpCap StackLogの変換が完全なら、デベイヤ済み画像へ記録済みX/Y/rotationを適用し、Sirilの星登録だけを省略する。masterファイルは`registration_images/calibration`へ分離し、Sirilのライト列`convert`へ混入させない。
+
+2026-08-17にSharpCap 4.1.13800.0の10P RAW16 FITS 3枚で統合確認した。Sirilはライト3枚だけを変換し、master dark subtraction、master-dark由来のhot pixel 1314点補正、RGGBデベイヤを実施した。続いてStackLog位置合わせで3/3枚を採用し、メトカーフ、星固定、左右比較のFITS/PNGを生成した。基準フレームは同データでSiril 1.4.1により約0.52秒で解決できた。
+
+## 2026-08-13: SharpCap Live Stackログによる星登録省略
 
 - `stacklog.csv`が入力フォルダ内またはその1つ上にある場合、SharpCap 4.1.10745以降のLive Stackセッションとして自動認識する。raw frameフォルダ名を`rawframes`へ固定しない。
 - CSVは列番号ではなくヘッダ名で読み、`Raw frame file`のbasenameをコピー先へ照合する。入力フォルダ内の同名画像をCSVの旧絶対パスより優先し、複数候補はエラーにする。既定では`Frame Stacked? = 1`だけを採用する。
 - FITSは`DATE-AVG`、次に`DATE-OBS + EXPTIME/2`を露光中央時刻に使う。PNG/TIFFはStackLog時刻からCameraSettingsのExposure/2を引く。
-- `LiveStack.AlignFrames=True`かつ全採用行にX/Y offsetとrotationがある場合、Pythonが線形デベイヤと中心回転・平行移動を適用して登録FITSを生成し、Sirilを起動しない。
+- `LiveStack.AlignFrames=True`かつ全採用行にX/Y offsetとrotationがある場合、Sirilで補正・デベイヤした画像へPythonが中心回転・平行移動を適用して登録FITSを生成する。Sirilの星登録は起動しない。
 - SharpCap offsetは実データとの相関比較で、そのまま画像へ加える符号が基準像と一致することを確認した。任意基準フレームではStackLog基準からの相対変換へ合成する。
 - offset不完全、alignment OFF、失敗行を明示的に含める場合は従来Siril経路へフォールバックする。
 - 非FITSのSharpCap入力では、対象を`--horizons-object`/`--horizons-command`/既存CSVのいずれかで、画素スケールを`--pixel-scale-arcsec`で明示させる。観測地は任意で、欠落時はgeocenterを使う。
 - 下処理済み画像へ差し替える場合もStackLog変換を有効に保つため、ファイル名、寸法、向き、切り抜き範囲を維持する。CameraSettingsはバージョン検査とPNG/TIFFのExposure補正に必要である。
-- 3枚のSharpCap 4.1.13800.0 RAW16 FITSで、wrapperからSiril未起動、3/3枚スタック、星固定/Metcalf/比較FITS・PNG生成を確認した。
+- 初期実装ではPythonデベイヤでSiril全体を省略したが、0.7.xで補正とデベイヤをSirilへ統一した。StackLog変換の利用条件と3/3枚スタック結果は維持されている。
 - 時刻仕様・バージョン差・parser検証項目は`SHARPCAP-TIMESTAMPS.md`を正本とする。
 
 ## 2026-08-04: 登録失敗時の全フレーム診断
@@ -47,7 +86,7 @@ macOSの導入方法は`README-macOS.md`、リリース作業は`PUBLISHING.md`�
 
 ## 現在の状態
 
-- 最新の公開Releaseは`v0.6.0`です。
+- 最新の公開Releaseは`v0.7.0`です。ここより上の「未リリース（0.7.x）」項目は次回版候補です。
 - `v0.5.1`にはHorizons復旧手順、座標CSVの補間・外挿説明、
   Astrometry.net APIキー取得手順の改善、飽和警告、開発文書の配布同梱が
   含まれます。
@@ -75,9 +114,9 @@ Windowsランチャーは同じフォルダにEXEがあればEXEを優先し、�
 
 ### 外部ツールとの役割分担
 
-- Astrometry.net: 基準フレームの中心座標、画角、回転を確定する
+- Siril: dark/flat・hot/cold pixel補正、デベイヤ、基準フレームのPlate Solve、必要時の背景星登録を行う
+- Astrometry.net: Sirilで解決できない場合だけ基準フレームのWCSを得る
 - JPL Horizons: 各露光時刻の天体の赤経・赤緯を取得する
-- Siril: デベイヤと背景星基準のフレーム間位置合わせを行う
 - Python/NumPy: 天体移動量を画素移動へ変換し、最終的な画素結合とFITS出力を行う
 
 Sirilは最終スタックを行いません。Sirilが生成した星位置合わせ済みフレームを
@@ -90,15 +129,14 @@ Pythonが読み、メトカーフスタックと星固定スタックを同じ�
    フレームは既定で除外します。
 3. FITSの`OBJECT`からHorizons検索候補を作り、各フレーム時刻のtopocentric座標を
    取得します。明示CSV、COMMAND、天体名の上書きもできます。
-4. 基準フレームをAstrometry.netでプレートソルブします。基準は先頭または
-   セッション時刻中間に最も近いフレームです。
-5. SirilでCFA FITSをデベイヤし、背景星を基準に登録します。既定の変換は
-   `similarity`で、平行移動、回転、等方的な倍率を推定します。
-6. WCSと各時刻の天体座標から、基準フレームに対する天体の追加移動量を求めます。
-7. 登録済みフレームを双線形補間でサブピクセル移動し、メトカーフ基準と
+4. SharpCap入力ではCameraSettingsから補正計画を作り、Sirilで基準フレームを補正・デベイヤします。
+5. Sirilで基準フレームをPlate Solveします。近距離画角探索で解けなければAstrometry.netへフォールバックし、それも利用不能ならSirilの画角探索を拡張します。
+6. Sirilで全CFA画像を同じ設定で補正・デベイヤします。StackLog変換が完全ならそのX/Y/rotationを使い、不完全ならSirilの`similarity`登録で平行移動、回転、等方倍率を推定します。
+7. WCSと各時刻の天体座標から、基準フレームに対する天体の追加移動量を求めます。
+8. 登録済みフレームを双線形補間でサブピクセル移動し、メトカーフ基準と
    星固定基準を同じ結合方式でスタックします。
-8. 線形FITS、表示用PNG、フレーム別シフトCSV、処理要約JSON、ログを出力します。
-9. 成功時は大きな中間FITSを削除し、成果物フォルダを開きます。
+9. 線形FITS、表示用PNG、フレーム別シフトCSV、処理要約JSON、ログを出力します。
+10. 成功時は大きな中間FITSを削除し、成果物フォルダを開きます。
 
 ## 主要ファイル
 
@@ -107,6 +145,7 @@ Pythonが読み、メトカーフスタックと星固定スタックを同じ�
 | `scripts/moving_target_pipeline.py` | 引数、セッション選択、作業ディレクトリ、外部処理の順序、ログ、キャッシュ、EXE内部ディスパッチ |
 | `scripts/horizons_ephemeris.py` | FITS時刻・観測地の読出し、天体名候補、SBDBフォールバック、Horizons CSV生成 |
 | `scripts/astrometry_solve.py` | APIログイン、FITS送信、再試行、ジョブ待機、WCS/JSON取得、submission再開 |
+| `scripts/siril_preprocessing.py` | CameraSettingsとCLIから補正計画を解決し、master配置とSiril補正・デベイヤscriptを生成 |
 | `scripts/moving_target_stack.py` | FITS入出力、WCS、Siril登録、画素シフト、平均・メジアン・ランクフィット、成果物生成 |
 | `tests/test_moving_target_options.py` | 名称解決、セッション、スタック方式、プレビュー、キャッシュ、Siril失敗判定、OS差の単体テスト |
 | `build-release-packages.ps1` | 通常版とSiril同梱版の生成・内容検証・SHA-256作成 |

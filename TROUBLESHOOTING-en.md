@@ -85,10 +85,18 @@ Earth approach where topocentric parallax can be significant.
 
 ### Siril starts for SharpCap Live Stack input
 
-Skipping Siril requires `LiveStack.AlignFrames=True` and complete X/Y offsets
-and rotation for every selected frame. Missing alignment, disabled alignment,
-or `--include-sharpcap-rejected` causes the intentional Siril fallback. Inspect
-the `registration=` message in the run log.
+This is expected in 0.7.x. Siril performs dark/flat and hot/cold-pixel
+correction, debayering, and plate solving even when StackLog alignment is
+complete. `Using SharpCap StackLog alignment after Siril preprocessing` means
+the recorded X/Y offsets and rotation replaced only Siril registration.
+
+### A CameraSettings master dark or flat is missing
+
+The tool searches the recorded path and nearby same-name files. It stops rather
+than silently continuing uncalibrated. Copy the master and specify `--dark-file`
+or `--flat-file`, or intentionally disable that correction. Use
+`--preprocessing disable` for frames already calibrated elsewhere to avoid
+double correction.
 
 ### `--reference-frame-file was not found`
 
@@ -118,7 +126,12 @@ The combined installation, input, output, and target-name path may exceed the Wi
 
 ### Astrometry.net or Horizons fails
 
-Check the API key and network for Astrometry.net. Cached `*_astrometry.json` and `*_wcs.fits` in the source folder are reused for the same reference. For Horizons target-name failures, use `--horizons-object`, `--horizons-command`, or a prepared `--ephemeris-csv` as described in the README.
+The default solver tries Siril first. If execution reaches Astrometry.net, check
+the preceding Siril error, then the API key and network. Use `--plate-solver
+siril` to prohibit image upload. Cached `*_siril_wcs.fits`,
+`*_astrometry.json`, and `*_wcs.fits` files are reused for the same reference.
+For Horizons target-name failures, use `--horizons-object`,
+`--horizons-command`, or a prepared `--ephemeris-csv` as described in the README.
 
 ## Useful files for a bug report
 

@@ -12,12 +12,12 @@ Windows版と同様にセッション一覧、処理段階、SirilまたはSharp
 
 - macOS 13以降を推奨
 - Python 3.10以降
-- Siril 1.4以降（Seestar、通常画像、またはSharpCapの位置合わせ情報が不完全な場合）
-- Astrometry.netとJPL Horizonsへ接続できるネットワーク
-- Astrometry.net APIキー
+- Siril 1.4以降
+- JPL Horizonsへ接続できるネットワーク
+- Astrometry.net APIキー（Sirilで解決できない場合の任意のフォールバック）
 
 Pythonは[python.orgのmacOS版](https://www.python.org/downloads/macos/)または
-Homebrewでインストールできます。完全なX/Y offsetとrotationを持つSharpCap Live Stackログだけを処理する場合、Sirilは不要です。それ以外ではSirilを
+Homebrewでインストールできます。0.7.xではSirilをdark/flat補正、ホット・クールピクセル補正、デベイヤ、Plate Solveに使うため、SharpCapのX/Y offsetとrotationが完全な場合も必要です。Sirilを
 [公式macOSインストール手順](https://siril.readthedocs.io/en/stable/installation/macos.html)
 に従ってアプリケーションフォルダへインストールしてください。Homebrewを使う場合は
 次のコマンドでも導入できます。
@@ -37,7 +37,7 @@ cd /path/to/seestar-metcalf-stack
 sh setup-macos.sh
 ```
 
-続いてAstrometry.netのAPIキーを次の手順で取得します。
+SirilでPlate Solveできない場合にも処理を継続したいときは、任意でAstrometry.netのAPIキーを次の手順で取得します。
 
 1. ブラウザで[Astrometry.netのログイン画面](https://nova.astrometry.net/signin)を開きます。
 2. Googleアカウントなど、画面に表示される外部認証を使ってログイン、または新規登録します。
@@ -86,7 +86,7 @@ SharpCap Live StackのPNG/TIFFは対象天体と画素スケールの明示が�
 ./seestar-metcalf-stack.sh "/path/to/10P_processed_rawframes" --horizons-object "10P/Tempel 2" --pixel-scale-arcsec 2.392 --site-longitude 139.6 --site-latitude 35.9
 ```
 
-観測地は省略可能で、その場合は地心座標を使います。地球へ近接中の天体では視差が大きくなるため、正確な観測地を指定してください。ログに`registration=SharpCap offsets; Siril will be skipped`と表示されればSirilは呼ばれません。
+観測地は省略可能で、その場合は地心座標を使います。地球へ近接中の天体では視差が大きくなるため、正確な観測地を指定してください。StackLogの変換が完全なら、Sirilで補正・デベイヤした後に`Using SharpCap StackLog alignment after Siril preprocessing`と表示されます。
 
 FITSの天体名をJPL Horizonsで特定できない場合は、メインREADMEの
 [「Horizonsで天体を特定できない場合」](README.md#horizonsで天体を特定できない場合)
@@ -119,6 +119,6 @@ macOSバイナリを追加してもランチャーや操作方法を変えずに
 
 ## プライバシー
 
-プレートソルブのため基準FITS 1枚をAstrometry.netへ送信します。JPL Horizonsで
+SirilのローカルPlate Solveに成功すればAstrometry.netへ画像を送りません。フォールバックを使った場合だけ基準FITS 1枚をAstrometry.netへ送信します。JPL Horizonsで
 topocentric座標を得る場合はFITSに記録された観測地点も送信します。観測地点を
 送信したくない場合は`--horizons-center geocenter`を使用してください。
