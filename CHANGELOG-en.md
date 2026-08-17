@@ -4,6 +4,20 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.7.3 - 2026-08-18
+
+### Improved
+
+- When Siril's VizieR catalogue request returns HTTP 503, retry the same scale up to three times with 2- and 4-second waits before changing scale.
+- Retry Astrometry.net, JPL Horizons, and JPL SBDB communication failures with backoff, and report the service, attempt count, and final cause when retries are exhausted.
+- If VizieR remains unavailable and no Astrometry.net API key is configured, show the API-key page and setup command before stopping.
+- The Windows launcher now waits for a key only after an unsuccessful run so the error and log path remain readable. Successful runs open the output folder and exit automatically.
+
+### Fixed
+
+- Preserve the specific `ERROR:` emitted by Horizons and Astrometry child processes instead of replacing it with a generic worker error.
+- Fix `--siril-cache-mode cold-each` failing immediately because its Siril catalogue-cache directory was absent or exceeded the Windows path limit. Each trial now uses a short temporary empty cache.
+
 ## v0.7.2 - 2026-08-17
 
 ### Changed

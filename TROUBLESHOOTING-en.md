@@ -133,6 +133,15 @@ siril` to prohibit image upload. Cached `*_siril_wcs.fits`,
 For Horizons target-name failures, use `--horizons-object`,
 `--horizons-command`, or a prepared `--ephemeris-csv` as described in the README.
 
+### VizieR, Astrometry.net, or Horizons returns HTTP 503
+
+HTTP 503 means the external service is temporarily unable to handle the request;
+it is not evidence that the image or supplied scale is wrong. The tool retries
+the same request with backoff, so allow it to continue. If VizieR remains
+unavailable and no Astrometry.net API key is configured, follow the displayed
+API-key URL and setup command before running again. On Windows, an unsuccessful
+launcher run waits for a key so the error and log path remain readable.
+
 ## Useful files for a bug report
 
 Do not include API keys or private information. Include the command, console output, `metcalf-*.log`, `*_shifts.csv`, `*_summary.json`, Seestar model/firmware, Siril version, and a few representative subframes when possible.

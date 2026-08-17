@@ -41,8 +41,9 @@ def read_api_key() -> str:
         if file_key:
             return file_key
     raise RuntimeError(
-        "Astrometry.net API key was not found. Set ASTROMETRY_NET_API_KEY "
-        "or put it in .astrometry_api_key."
+        "Astrometry.net API key is not configured. Obtain a key from "
+        "https://nova.astrometry.net/api_help and save it with the included "
+        "set-astrometry-api-key launcher."
     )
 
 
@@ -80,7 +81,10 @@ def request_bytes(
                 flush=True,
             )
             time.sleep(delay)
-    raise RuntimeError(str(last_error or "Astrometry request failed")) from last_error
+    raise RuntimeError(
+        f"Astrometry.net remained unavailable after {max(1, retries)} attempts: "
+        f"{last_error or 'request failed'}"
+    ) from last_error
 
 
 def json_request(url: str, *, data: bytes | None = None, headers: dict[str, str] | None = None) -> dict:

@@ -4,7 +4,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PyInstallerPath = Join-Path $Root ".build\pyinstaller-runtime"
+$PyInstallerVersion = "6.22.1"
+$PyInstallerPath = Join-Path $Root ".build\pyinstaller-runtime-$PyInstallerVersion"
 $BuildRoot = Join-Path $Root "build\pyinstaller"
 $DistRoot = Join-Path $Root "build"
 
@@ -25,7 +26,7 @@ if (Test-Path -LiteralPath $PyInstallerPath) {
 if (-not $PyInstallerReady) {
     Write-Host "Installing PyInstaller build dependencies into $PyInstallerPath"
     New-Item -ItemType Directory -Force -Path $PyInstallerPath | Out-Null
-    & $Python -m pip install --upgrade --target $PyInstallerPath pyinstaller
+    & $Python -m pip install --target $PyInstallerPath "pyinstaller==$PyInstallerVersion"
     if ($LASTEXITCODE -ne 0) {
         throw "Installing PyInstaller failed with exit code $LASTEXITCODE"
     }

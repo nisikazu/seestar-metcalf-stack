@@ -127,6 +127,10 @@ Siril同梱版を使うか、Sirilをインストールして `siril-cli` をPAT
 
 成功済みの基準フレームはソースフォルダの`*_siril_wcs.fits`、`*_astrometry.json`、`*_wcs.fits`を再利用します。別の基準を選ぶと、そのファイル用に新しい解が必要です。
 
+### VizieR、Astrometry.net、HorizonsでHTTP 503になる
+
+HTTP 503は画像や画角の誤りではなく、外部サービスが一時的に要求を処理できない応答です。本ツールは同じ要求を待機付きで自動再試行します。そのままお待ちください。再試行後もVizieRを利用できずAstrometry.net APIキーも未設定の場合は、画面に表示されるURLとコマンドでAPIキーを設定してから再実行できます。異常終了時のWindows画面はキーを押すまで閉じず、詳しい内容は表示されたログにも残ります。
+
 ### Horizonsで天体名が見つからない
 
 READMEの「Horizonsで天体を特定できない場合」を参照し、`--horizons-object` または `--horizons-command` を指定してください。作成済みの座標CSVがあれば `--ephemeris-csv` も使えます。

@@ -422,7 +422,9 @@ def fetch_result(url: str, retries: int, retry_delay_sec: float, verbose: bool =
         except Exception as exc:  # Horizons occasionally returns transient 5xx.
             last_error = exc
             if attempt >= max(1, retries):
-                raise
+                raise RuntimeError(
+                    f"JPL Horizons remained unavailable after {max(1, retries)} attempts: {exc}"
+                ) from exc
             delay = retry_delay_sec * (2 ** (attempt - 1))
             print(f"Horizons request failed on attempt {attempt}/{retries}: {exc}; retrying in {delay:.1f}s", file=sys.stderr)
             time.sleep(delay)
@@ -490,11 +492,31 @@ def fetch_sbdb_candidates(object_name: str, retries: int, retry_delay_sec: float
     for term in sbdb_lookup_terms(object_name):
         query = urllib.parse.urlencode({"sstr": term, "full-prec": "true"})
         url = f"{SBDB_API_URL}?{query}"
-        try:
-            with urllib.request.urlopen(url, timeout=30) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except Exception as exc:
-            print(f"SBDB lookup failed for {term!r}: {exc}", file=sys.stderr)
+        payload: dict[str, object] | None = None
+        last_error: Exception | None = None
+        for attempt in range(1, max(1, retries) + 1):
+            try:
+                with urllib.request.urlopen(url, timeout=30) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt >= max(1, retries):
+                    break
+                delay = retry_delay_sec * (2 ** (attempt - 1))
+                print(
+                    f"JPL SBDB request failed on attempt {attempt}/{retries}: {exc}; "
+                    f"retrying in {delay:.1f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(delay)
+        if payload is None:
+            print(
+                f"JPL SBDB remained unavailable after {max(1, retries)} attempts "
+                f"for {term!r}: {last_error}",
+                file=sys.stderr,
+            )
             continue
         obj = payload.get("object")
         if not isinstance(obj, dict):

@@ -2,6 +2,17 @@
 
 利用者に影響する変更は[変更履歴](CHANGELOG.md)と[改訂内容とトラブルシュート](TROUBLESHOOTING.md)にまとめています。この文書は実装判断、検証、引き継ぎを目的とした開発者向け資料です。
 
+## 2026-08-18: 外部サービス障害の再試行とエラー保持（v0.7.3）
+
+- VizieRのHTTP 503は画像・画角の失敗と区別し、同じ倍率を3回まで指数バックオフで再試行する。HTTP 400や星照合不成立ではこの再試行を行わない。
+- 近距離倍率探索の全条件が503で尽き、Astrometry.net APIキーもない場合は、無意味な広域探索へ進まずAPIキー設定方法を示して終了する。
+- Astrometry.netの全HTTP処理、Horizons ephemeris、SBDB名称検索は一時的な通信失敗を再試行し、最終例外にサービス名と試行回数を残す。
+- `run()`は子プロセスのstdout/stderrをリアルタイム表示しながら蓄積する。非ゼロ終了時は`CalledProcessError.output`へ保持し、子の`ERROR:`を最終的な利用者向けメッセージへ引き継ぐ。
+- Windows CMDは異常終了時だけ`pause`する。処理本体や内部子プロセスへpauseを入れてはならない。
+- ベンチマークの`cold-each`は通常のSirilキャッシュから隔離した短い一時ディレクトリに`.config/siril/download_cache`等を作り、試行後に削除する。結果フォルダ配下はWindowsのパス長制限に達するため使用しない。
+- 10P基準FITSの1.00倍を空キャッシュから実測し、VizieRからNOMAD 1898星を取得して4.92秒で解決した。
+- EXEビルド用PyInstallerはバージョン付き隔離先へ固定し、既存`--target`を`pip --upgrade`で再帰削除して長時間停止する経路を避ける。
+
 ## 2026-08-17: Siril前処理・Plate Solve優先経路（実装済み、0.7.x）
 
 基準フレームのプレートソルブを高速化し、Astrometry.netのAPIやネットワークが利用できない場合にも復旧できるよう、次の順序で実装した。
@@ -77,7 +88,7 @@ SharpCap入力では`*.CameraSettings.txt`を正規化して`PreprocessingPlan`�
 - Astrometry.netへ送る画素スケールはFITSの焦点距離・画素サイズから推定し、欠落時は`--pixel-scale-arcsec`を使う。Astrometry側の検索範囲だけに使い、画像の実データを変換しない。
 - WCSダウンロードは`SIMPLE`と`END`カードを確認してから保存する。HTMLログインページなどが返った場合も、JSON calibrationで処理を継続できる。
 
-最終更新: 2026-08-17
+最終更新: 2026-08-18
 
 この文書は、Seestar Metcalf Stackを改造する人、保守する人、または開発を
 引き継ぐ人のための技術記録です。一般利用者向けの操作方法は`README.md`、
@@ -86,7 +97,7 @@ macOSの導入方法は`README-macOS.md`、リリース作業は[GitHub上のPUB
 
 ## 現在の状態
 
-- 最新の公開Releaseは`v0.7.1`です。次の`v0.7.2`では利用者向けZIPから開発専用ファイルを除外します。
+- 最新の公開Releaseは`v0.7.3`です。
 - `v0.5.1`にはHorizons復旧手順、座標CSVの補間・外挿説明、
   Astrometry.net APIキー取得手順の改善、飽和警告、開発文書の配布同梱が
   含まれます。

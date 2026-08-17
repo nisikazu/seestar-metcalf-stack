@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import re
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,7 +45,7 @@ from siril_preprocessing import (
     resolve_preprocessing_plan,
     stage_preprocessing_files,
 )
-from astrometry_solve import estimate_scale_hint
+from astrometry_solve import estimate_scale_hint, read_api_key
 
 
 REPO_ROOT = (
@@ -61,6 +62,8 @@ PRIVACY_FITS_KEYS = {
     "OBSLONG",
     "OBSLAT",
 }
+SIRIL_CATALOG_RETRIES = 3
+SIRIL_CATALOG_RETRY_DELAY_SEC = 2.0
 
 
 class TeeTextIO:
@@ -739,7 +742,26 @@ def ensure_ephemeris(args: argparse.Namespace, first_frame: Path, session_index:
 
 def run(cmd: list[str], cwd: Path) -> None:
     print("+ " + " ".join(f'"{item}"' if " " in item else item for item in cmd), flush=True)
-    subprocess.run(cmd, cwd=cwd, check=True)
+    process = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    if process.stdout is None:
+        raise RuntimeError("Child process output pipe was not created")
+    output: list[str] = []
+    with process.stdout:
+        for line in process.stdout:
+            output.append(line)
+            write_console_safe(line)
+    return_code = process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, cmd, output="".join(output))
 
 
 def write_console_safe(text: str) -> None:
@@ -1039,18 +1061,43 @@ def siril_detected_star_count(output: str) -> int | None:
     return max(counts) if counts else None
 
 
+def siril_catalog_service_unavailable(output: str) -> bool:
+    """Return true only for a retryable VizieR HTTP 503 response."""
+    return re.search(r"HTTP(?:\s+code)?\s+503\b", output, re.IGNORECASE) is not None
+
+
+def astrometry_api_key_is_configured() -> bool:
+    try:
+        read_api_key()
+    except (OSError, RuntimeError):
+        return False
+    return True
+
+
+def astrometry_api_key_setup_message() -> str:
+    if os.name == "nt":
+        command = r".\set-astrometry-api-key.cmd YOUR_API_KEY"
+    else:
+        command = "./set-astrometry-api-key.sh YOUR_API_KEY"
+    return (
+        "Astrometry.net API key is not configured. Obtain an API key from "
+        "https://nova.astrometry.net/api_help, then run " + command + "."
+    )
+
+
 def try_siril_plate_solve(
     args: argparse.Namespace,
     input_fits: Path,
     reference_frame: Path,
     factors: tuple[float, ...],
-) -> tuple[Path | None, int | None, list[str]]:
+) -> tuple[Path | None, int | None, list[str], bool]:
     header, _cards, _offset = read_fits_header(input_fits)
     center = infer_solve_center(header, args)
     scale = infer_solve_scale(header, args.pixel_scale_arcsec)
     pixel_size = infer_effective_pixel_size(header)
     errors: list[str] = []
     detected_stars: int | None = None
+    unavailable_factors = 0
     for attempt, factor in enumerate(factors, start=1):
         supplied_scale = scale * factor
         focal = 206.265 * pixel_size / supplied_scale
@@ -1065,11 +1112,36 @@ def try_siril_plate_solve(
             f"Siril plate solve attempt {attempt}/{len(factors)}: scale={supplied_scale:.6g} arcsec/pixel ({factor:g}x)",
         )
         output = ""
-        try:
-            output = run_siril(args.siril, args.work_dir, script, args.verbose)
-        except SirilRegistrationError as error:
-            output = error.output
-            errors.append(f"{factor:g}x: {str(error)}")
+        last_error: SirilRegistrationError | None = None
+        for catalog_attempt in range(1, SIRIL_CATALOG_RETRIES + 1):
+            try:
+                output = run_siril(args.siril, args.work_dir, script, args.verbose)
+                last_error = None
+                break
+            except SirilRegistrationError as error:
+                output = error.output
+                last_error = error
+                if not siril_catalog_service_unavailable(output) or catalog_attempt >= SIRIL_CATALOG_RETRIES:
+                    break
+                delay = SIRIL_CATALOG_RETRY_DELAY_SEC * (2 ** (catalog_attempt - 1))
+                print(
+                    f"Siril catalog server returned HTTP 503; retrying the same {factor:g}x scale "
+                    f"in {delay:g}s ({catalog_attempt + 1}/{SIRIL_CATALOG_RETRIES}).",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                for partial in (candidate, candidate.with_suffix(".fits")):
+                    partial.unlink(missing_ok=True)
+                time.sleep(delay)
+        if last_error is not None:
+            if siril_catalog_service_unavailable(output):
+                unavailable_factors += 1
+                errors.append(
+                    f"{factor:g}x: VizieR catalog server remained unavailable (HTTP 503) "
+                    f"after {SIRIL_CATALOG_RETRIES} attempts"
+                )
+            else:
+                errors.append(f"{factor:g}x: {str(last_error)}")
         count = siril_detected_star_count(output)
         if count is not None:
             detected_stars = max(detected_stars or 0, count)
@@ -1079,9 +1151,9 @@ def try_siril_plate_solve(
             cache.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(actual, cache)
             print(f"Siril plate solve succeeded at {factor:g}x scale: {cache}", flush=True)
-            return cache, detected_stars, errors
+            return cache, detected_stars, errors, False
         errors.append(f"{factor:g}x: no usable WCS output")
-    return None, detected_stars, errors
+    return None, detected_stars, errors, unavailable_factors == len(factors)
 
 
 def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path | None, Path | None]:
@@ -1114,12 +1186,13 @@ def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path
 
     prepared_reference: Path | None = None
     siril_errors: list[str] = []
+    siril_catalog_unavailable = False
     detected_stars: int | None = None
     if args.plate_solver in {"auto", "siril"}:
         try:
             prepared_reference = prepare_reference_with_siril(args, first_frame)
             factors = SIRIL_NEAR_SCALE_FACTORS + (SIRIL_WIDE_SCALE_FACTORS if args.plate_solver == "siril" else ())
-            solved, detected_stars, siril_errors = try_siril_plate_solve(
+            solved, detected_stars, siril_errors, siril_catalog_unavailable = try_siril_plate_solve(
                 args,
                 prepared_reference,
                 first_frame,
@@ -1138,6 +1211,16 @@ def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path
         if args.plate_solver == "siril":
             details = "; ".join(siril_errors[-5:]) or "no usable WCS output"
             raise RuntimeError(f"Siril plate solving failed after scale search: {details}")
+
+    if args.plate_solver in {"auto", "astrometry"} and not astrometry_api_key_is_configured():
+        if siril_catalog_unavailable:
+            raise RuntimeError(
+                "Siril could not obtain a star catalog because VizieR kept returning HTTP 503. "
+                "The configured retries were exhausted, and the Astrometry.net fallback cannot run. "
+                + astrometry_api_key_setup_message()
+            )
+        if args.plate_solver == "astrometry":
+            raise RuntimeError(astrometry_api_key_setup_message())
 
     json_path.parent.mkdir(parents=True, exist_ok=True)
     astrometry_input = prepared_reference or first_frame
@@ -1178,7 +1261,7 @@ def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path
 
     if args.plate_solver == "auto" and prepared_reference is not None:
         print("Astrometry.net was unavailable or did not solve; extending the Siril scale search.", file=sys.stderr, flush=True)
-        solved, wide_stars, wide_errors = try_siril_plate_solve(
+        solved, wide_stars, wide_errors, _wide_catalog_unavailable = try_siril_plate_solve(
             args,
             prepared_reference,
             first_frame,
@@ -1198,7 +1281,7 @@ def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path
         submission_path.unlink()
     details = []
     if astrometry_error:
-        details.append(f"Astrometry.net: {astrometry_error}")
+        details.append(f"Astrometry.net: {friendly_exception_message(astrometry_error)}")
     if siril_errors:
         details.append("Siril: " + "; ".join(siril_errors[-5:]))
     suffix = " " + " | ".join(details) if details else ""

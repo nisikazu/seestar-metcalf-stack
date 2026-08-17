@@ -1,5 +1,6 @@
 import io
 import csv
+import subprocess
 import tempfile
 import unittest
 from argparse import Namespace
@@ -975,6 +976,132 @@ class AstrometryHelperTests(unittest.TestCase):
 
         self.assertEqual(pipeline.siril_detected_star_count(output), 41)
 
+    def test_siril_catalog_service_unavailable_recognizes_only_http_503(self):
+        self.assertTrue(pipeline.siril_catalog_service_unavailable("Server unavailable (HTTP code 503)"))
+        self.assertTrue(pipeline.siril_catalog_service_unavailable("request failed: HTTP 503"))
+        self.assertFalse(pipeline.siril_catalog_service_unavailable("request failed: HTTP code 400"))
+        self.assertFalse(pipeline.siril_catalog_service_unavailable("Plate solving failed"))
+
+    def test_siril_plate_solve_retries_same_scale_after_http_503(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work_dir = Path(temporary)
+            args = Namespace(
+                work_dir=work_dir,
+                pixel_scale_arcsec=4.0,
+                siril_catalog=None,
+                siril=Path("siril-cli"),
+                verbose=False,
+                solve_center_ra_deg=None,
+                solve_center_dec_deg=None,
+                solve_dir=None,
+                solve_name=None,
+            )
+            input_fits = work_dir / "input.fit"
+            input_fits.write_bytes(b"")
+            unavailable = stacker.SirilRegistrationError(
+                "Siril registration failed",
+                "Server unreachable or unresponsive (HTTP code 503)",
+            )
+
+            with (
+                patch.object(pipeline, "read_fits_header", return_value=({"RA": 10.0, "DEC": 20.0, "XPIXSZ": 2.9}, [], 0)),
+                patch.object(pipeline, "run_siril", side_effect=[unavailable, "Script execution finished successfully"]),
+                patch.object(pipeline, "is_valid_wcs_fits", return_value=True),
+                patch.object(pipeline.shutil, "copy2"),
+                patch.object(pipeline.time, "sleep") as sleep,
+            ):
+                solved, _stars, errors, catalog_unavailable = pipeline.try_siril_plate_solve(
+                    args, input_fits, input_fits, (1.0,)
+                )
+
+            self.assertIsNotNone(solved)
+            self.assertEqual(errors, [])
+            self.assertFalse(catalog_unavailable)
+            sleep.assert_called_once_with(2.0)
+
+    def test_siril_plate_solve_reports_exhausted_http_503_retries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work_dir = Path(temporary)
+            args = Namespace(
+                work_dir=work_dir,
+                pixel_scale_arcsec=4.0,
+                siril_catalog=None,
+                siril=Path("siril-cli"),
+                verbose=False,
+                solve_center_ra_deg=None,
+                solve_center_dec_deg=None,
+                solve_dir=None,
+                solve_name=None,
+            )
+            input_fits = work_dir / "input.fit"
+            input_fits.write_bytes(b"")
+            unavailable = stacker.SirilRegistrationError(
+                "Siril registration failed",
+                "Server unreachable or unresponsive (HTTP code 503)",
+            )
+
+            with (
+                patch.object(pipeline, "read_fits_header", return_value=({"RA": 10.0, "DEC": 20.0, "XPIXSZ": 2.9}, [], 0)),
+                patch.object(pipeline, "run_siril", side_effect=[unavailable, unavailable, unavailable]),
+                patch.object(pipeline, "is_valid_wcs_fits", return_value=False),
+                patch.object(pipeline.time, "sleep") as sleep,
+            ):
+                solved, _stars, errors, catalog_unavailable = pipeline.try_siril_plate_solve(
+                    args, input_fits, input_fits, (1.0,)
+                )
+
+            self.assertIsNone(solved)
+            self.assertTrue(catalog_unavailable)
+            self.assertTrue(any("remained unavailable (HTTP 503) after 3 attempts" in error for error in errors))
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [2.0, 4.0])
+
+    def test_api_key_setup_message_names_included_launcher(self):
+        message = pipeline.astrometry_api_key_setup_message()
+
+        self.assertIn("https://nova.astrometry.net/api_help", message)
+        self.assertIn("set-astrometry-api-key", message)
+
+    def test_horizons_retries_after_temporary_network_failure(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"result":"ephemeris"}'
+
+        with (
+            patch.object(horizons.urllib.request, "urlopen", side_effect=[OSError("offline"), Response()]),
+            patch.object(horizons.time, "sleep") as sleep,
+        ):
+            result = horizons.fetch_result("https://example.invalid", retries=3, retry_delay_sec=2.0)
+
+        self.assertEqual(result, "ephemeris")
+        sleep.assert_called_once_with(2.0)
+
+    def test_sbdb_retries_after_temporary_network_failure(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"object":{"des":"10P","fullname":"10P/Tempel 2"}}'
+
+        with (
+            patch.object(horizons, "sbdb_lookup_terms", return_value=["10P"]),
+            patch.object(horizons.urllib.request, "urlopen", side_effect=[OSError("offline"), Response()]),
+            patch.object(horizons.time, "sleep") as sleep,
+        ):
+            candidates = horizons.fetch_sbdb_candidates("10PTempel", retries=3, retry_delay_sec=2.0)
+
+        self.assertEqual(candidates[0].command, "DES=10P;CAP;NOFRAG")
+        sleep.assert_called_once_with(2.0)
+
     def test_scale_hint_uses_fits_camera_metadata(self):
         hint = astrometry_solve.estimate_scale_hint(
             {
@@ -1016,6 +1143,19 @@ class AstrometryHelperTests(unittest.TestCase):
 
 
 class VerboseOutputTests(unittest.TestCase):
+    def test_child_process_error_is_streamed_and_retained(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                pipeline.run(
+                    [sys.executable, "-c", "print('ERROR: remote service unavailable'); raise SystemExit(1)"],
+                    Path.cwd(),
+                )
+
+        self.assertIn("ERROR: remote service unavailable", output.getvalue())
+        self.assertIn("ERROR: remote service unavailable", raised.exception.output)
+        self.assertEqual(pipeline.friendly_exception_message(raised.exception), "remote service unavailable")
+
     def test_stack_summary_parser_ignores_braces_in_verbose_output(self):
         output = 'Siril message {not json}\n[stack:mean] frame 2/2\n{"used_frames": 2, "work_dir": "C:/work"}\n'
 

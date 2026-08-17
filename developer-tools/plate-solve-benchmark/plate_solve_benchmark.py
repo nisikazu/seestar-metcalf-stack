@@ -17,6 +17,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -167,6 +168,44 @@ def infer_effective_pixel_size(header: dict[str, object], explicit: float | None
 
 def focal_length_for_scale(pixel_size_um: float, scale_arcsec: float) -> float:
     return 206.265 * pixel_size_um / scale_arcsec
+
+
+def prepare_isolated_siril_environment(
+    run_dir: Path,
+    base_environment: dict[str, str],
+    platform_name: str | None = None,
+) -> dict[str, str]:
+    """Create a valid empty Siril profile and catalogue cache for one trial."""
+    environment = base_environment.copy()
+    isolated_root = run_dir / "siril-user-data"
+    profile = isolated_root / "profile"
+    platform_name = platform_name or os.name
+    if platform_name == "nt":
+        local_app_data = isolated_root / "local"
+        roaming = isolated_root / "roaming"
+        environment["LOCALAPPDATA"] = str(local_app_data)
+        environment["APPDATA"] = str(roaming)
+        environment["USERPROFILE"] = str(profile)
+        environment["HOME"] = str(profile)
+        cache_paths = (
+            profile / ".config" / "siril" / "download_cache",
+            local_app_data / "siril" / "download_cache",
+        )
+    else:
+        cache = isolated_root / "cache"
+        config = isolated_root / "config"
+        data = isolated_root / "data"
+        environment["HOME"] = str(profile)
+        environment["XDG_CACHE_HOME"] = str(cache)
+        environment["XDG_CONFIG_HOME"] = str(config)
+        environment["XDG_DATA_HOME"] = str(data)
+        cache_paths = (
+            config / "siril" / "download_cache",
+            cache / "siril" / "download_cache",
+        )
+    for cache_path in cache_paths:
+        cache_path.mkdir(parents=True, exist_ok=True)
+    return environment
 
 
 def make_trials(solvers: Iterable[str], repeats: int, seed: int) -> list[Trial]:
@@ -361,6 +400,7 @@ def run_trial(
     log_path = run_dir / "solver.log"
     result_path = run_dir / ("astrometry.json" if trial.solver == "astrometry" else "siril_solved.fit")
     environment = os.environ.copy()
+    cold_environment_root: Path | None = None
     command: list[str]
     if trial.solver == "astrometry":
         environment["ASTROMETRY_NET_API_KEY"] = astrometry_key or ""
@@ -381,17 +421,10 @@ def run_trial(
         ]
     else:
         if args.siril_cache_mode == "cold-each":
-            isolated_root = run_dir / "siril-user-data"
-            isolated_root.mkdir(parents=True, exist_ok=True)
-            if os.name == "nt":
-                environment["LOCALAPPDATA"] = str(isolated_root)
-                environment["APPDATA"] = str(isolated_root / "roaming")
-                environment["USERPROFILE"] = str(isolated_root / "profile")
-                environment["HOME"] = str(isolated_root / "profile")
-            else:
-                environment["XDG_CACHE_HOME"] = str(isolated_root / "cache")
-                environment["XDG_CONFIG_HOME"] = str(isolated_root / "config")
-                environment["XDG_DATA_HOME"] = str(isolated_root / "data")
+            # Keep this short on Windows: the benchmark result path can already
+            # approach MAX_PATH before Siril appends its catalogue filename.
+            cold_environment_root = Path(tempfile.mkdtemp(prefix="siril-cold-"))
+            environment = prepare_isolated_siril_environment(cold_environment_root, environment)
         script_path = run_dir / "platesolve.ssf"
         script_path.write_text(
             build_siril_script(
@@ -424,6 +457,9 @@ def run_trial(
     except OSError as run_error:
         elapsed = time.perf_counter() - started
         error = str(run_error)
+    finally:
+        if cold_environment_root is not None:
+            shutil.rmtree(cold_environment_root, ignore_errors=True)
 
     solved_ra = solved_dec = solved_scale = None
     if status != "timeout" and return_code == 0:

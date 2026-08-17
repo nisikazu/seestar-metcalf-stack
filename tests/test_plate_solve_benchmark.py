@@ -3,6 +3,7 @@ import io
 import sys
 import tempfile
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +17,31 @@ import plate_solve_benchmark as benchmark
 
 
 class PlateSolveBenchmarkTests(unittest.TestCase):
+    def test_astrometry_request_retries_http_503(self):
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b"ok"
+
+        unavailable = urllib.error.HTTPError(
+            "https://example.invalid", 503, "unavailable", {}, io.BytesIO(b"busy")
+        )
+        with (
+            patch.object(astrometry_solve.urllib.request, "urlopen", side_effect=[unavailable, Response()]),
+            patch.object(astrometry_solve.time, "sleep") as sleep,
+        ):
+            result = astrometry_solve.request_bytes("https://example.invalid", retries=3)
+
+        self.assertEqual(result, b"ok")
+        sleep.assert_called_once_with(2.0)
+
     def test_trial_order_contains_every_condition_per_repeat(self):
         trials = benchmark.make_trials(("astrometry", "siril"), repeats=10, seed=1234)
 
@@ -48,6 +74,27 @@ class PlateSolveBenchmarkTests(unittest.TestCase):
         parsed = benchmark.parse_args(["frame.fit", "--siril-cache-mode", "cold-each"])
 
         self.assertEqual(parsed.siril_cache_mode, "cold-each")
+
+    def test_cold_siril_environment_creates_windows_catalog_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            environment = benchmark.prepare_isolated_siril_environment(run_dir, {"KEEP": "yes"}, "nt")
+
+            profile = run_dir / "siril-user-data" / "profile"
+            self.assertEqual(environment["HOME"], str(profile))
+            self.assertEqual(environment["KEEP"], "yes")
+            self.assertTrue((profile / ".config" / "siril" / "download_cache").is_dir())
+            self.assertTrue((run_dir / "siril-user-data" / "local" / "siril" / "download_cache").is_dir())
+
+    def test_cold_siril_environment_creates_posix_catalog_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            environment = benchmark.prepare_isolated_siril_environment(run_dir, {}, "posix")
+
+            config = run_dir / "siril-user-data" / "config"
+            self.assertEqual(environment["XDG_CONFIG_HOME"], str(config))
+            self.assertTrue((config / "siril" / "download_cache").is_dir())
+            self.assertTrue((run_dir / "siril-user-data" / "cache" / "siril" / "download_cache").is_dir())
 
     def test_focal_length_represents_supplied_pixel_scale(self):
         pixel_size = 2.9
