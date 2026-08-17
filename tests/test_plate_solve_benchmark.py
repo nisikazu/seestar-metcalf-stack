@@ -108,18 +108,22 @@ class PlateSolveBenchmarkTests(unittest.TestCase):
         )
 
     def test_siril_script_handles_paths_with_spaces(self):
-        script = benchmark.build_siril_script(
-            Path("C:/input files/frame.fit"),
-            Path("C:/output files/solved.fit"),
-            150.0,
-            2.9,
-            "gaia",
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            input_path = Path(temporary) / "input files" / "frame.fit"
+            output_path = Path(temporary) / "output files" / "solved.fit"
+            script = benchmark.build_siril_script(
+                input_path,
+                output_path,
+                150.0,
+                2.9,
+                "gaia",
+            )
 
-        self.assertIn('load "C:/input files/frame.fit"', script)
-        self.assertIn("platesolve -force -focal=150.0000000000", script)
-        self.assertIn("-focal=150.0000000000 -pixelsize=2.9000000000", script)
-        self.assertIn("-catalog=gaia", script)
+            self.assertIn(f'load "{input_path.resolve().as_posix()}"', script)
+            self.assertIn(f'save "{output_path.resolve().as_posix()}"', script)
+            self.assertIn("platesolve -force -focal=150.0000000000", script)
+            self.assertIn("-focal=150.0000000000 -pixelsize=2.9000000000", script)
+            self.assertIn("-catalog=gaia", script)
 
     def test_astrometry_parser_accepts_center_overrides(self):
         parsed = astrometry_solve.parse_args(

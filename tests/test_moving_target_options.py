@@ -142,7 +142,7 @@ class SharpCapStackLogTests(unittest.TestCase):
 
             self.assertIsNotNone(session)
             self.assertEqual(session.stacklog.parent, (root / "rawframes").resolve())
-            self.assertEqual(session.settings_file, root / "Stack.CameraSettings.txt")
+            self.assertEqual(session.settings_file, (root / "Stack.CameraSettings.txt").resolve())
             self.assertEqual(session.frames[0].path.parent, (root / "rawframes").resolve())
 
     def test_stacklog_file_itself_can_be_used_as_source(self):
@@ -306,7 +306,7 @@ class SharpCapStackLogTests(unittest.TestCase):
                 session_root=session_root,
             )
 
-            self.assertEqual(settings_file, settings)
+            self.assertEqual(settings_file, settings.resolve())
             self.assertTrue(plan.hot_pixel_enabled)
             self.assertEqual(plan.sharpcap_hot_pixel_sensitivity, 5.0)
 
