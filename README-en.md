@@ -387,6 +387,16 @@ older release for comparison:
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean --padding-policy legacy
 ```
 
+### Normalize a time-varying sky background
+
+Changes in altitude, twilight, moonlight, thin cloud, or other conditions can change the DC background from frame to frame. Even with per-pixel contribution counts, regions covered only by early frames can then remain brighter or darker. `--background-normalization offset` estimates an RGB sigma-clipped median background from the central 70% of valid pixels in every registered frame, then shifts every usable frame to the median background of the session before stacking:
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --background-normalization offset
+```
+
+The correction is applied only to real image pixels; registration and Metcalf-shift padding never contributes to either background estimation or the stack. The output remains a linear ADU image with a common background. `BGNORM`, `BGREF1` through `BGREF3`, and per-frame background/offset values in the shifts CSV record the operation. The default `none` remains compatible with earlier output. `offset` requires the default `--padding-policy valid`.
+
 Median is more resistant to satellites, airplanes, hot pixels, and other
 one-frame outliers. In a Metcalf stack, it reduces star trails and is intended
 to improve the accuracy of comet photometry. However, it is slower, uses large
@@ -486,6 +496,10 @@ and combine method, for example:
   star-aligned left half
 - `*_metcalf_preview.png`, `*_star_preview.png`: stretched display previews,
   not photometry products
+- `*_metcalf_north_up_preview.png`, `*_star_north_up_preview.png`, and
+  `*_star_left_metcalf_right_north_up_preview.png`: display PNGs rotated with
+  the plate-solved WCS so celestial north is up, created by
+  `--preview-north-up`; the FITS files and ordinary previews are unchanged
 - `*_metcalf_saturation_warning.png`, `*_star_saturation_warning.png`: optional
   warning previews created by `--saturation-warning enable`
 - `*_star_left_metcalf_right_saturation_warning.png`: side-by-side warning
@@ -494,6 +508,13 @@ and combine method, for example:
 - `*_registration_diagnostics.csv`: every frame's registration quality and
   transform, intended for diagnosing low acceptance and choosing a better reference
 - `*_summary.json`, `moving_target_pipeline_summary.json`: reproducibility data
+
+To create previews with celestial north up, use the following option. A plate
+solution or valid cached WCS is required.
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --preview-north-up
+```
 
 The registration diagnostics table records the index, source filename,
 reference/used status, exclusion reason, FWHM, weighted FWHM, roundness,

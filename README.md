@@ -237,6 +237,16 @@ Sirilの背景星位置合わせでは、デベイヤ済み画像と登録済み
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mean --padding-policy legacy
 ```
 
+### 時間変化する空の明るさを揃える
+
+高度の変化、薄明、月や雲によってサブフレームごとの背景DCレベルが変わると、画素ごとの寄与枚数で平均しても、早い時刻のフレームだけが寄与する周辺が明るく（または暗く）残ることがあります。`--background-normalization offset` は、登録済みの各フレームについて中央70%の有効画素からRGBごとのsigma-clipped median背景を求め、全使用フレームの中央値を共通背景として加減算してからスタックします。
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --background-normalization offset
+```
+
+補正は実画像の有効画素だけに適用され、登録・シフトで生じた画像外の0は加算にも背景推定にも使いません。出力は共通背景を持つADUの線形像で、FITSヘッダーの`BGNORM`、`BGREF1`〜`BGREF3`、shifts CSVの各フレーム背景・補正量に記録されます。既定の`none`は従来互換です。`offset`は有効画素マスクを必要とするため`--padding-policy valid`（既定）でのみ利用できます。
+
 画素ごとのメジアンは、人工衛星、飛行機、ホットピクセルなど少数フレームだけに現れる外れ値に強い方式です。メジアンはメトカーフスタッキング像において星の軌跡を低減し、彗星光度の精度向上を図ります。一方で平均より遅く、大きなディスク上の一時配列を使い、統計的な効率も通常は平均より低くなります。メジアンでは登録・シフト境界に現れる完全な0をデフォルトで母集団から除外します。
 
 ```bat
@@ -303,11 +313,18 @@ Sirilの背景星位置合わせでは、デベイヤ済み画像と登録済み
 - `*_star_stack.fit`: 同じ採用フレームによる背景星固定の線形FITS
 - `*_star_left_metcalf_right.fit`: 左に星固定、右に移動天体固定を並べたFITS。WCSは左半分に有効
 - `*_metcalf_preview.png`、`*_star_preview.png`: 表示用ストレッチ画像。測光には使用しません
+- `*_metcalf_north_up_preview.png`、`*_star_north_up_preview.png`、`*_star_left_metcalf_right_north_up_preview.png`: `--preview-north-up`指定時に、プレートソルブしたWCSを使って天の北を上に回転した表示用PNG。元のFITSと通常プレビューは変更しません
 - `*_metcalf_saturation_warning.png`、`*_star_saturation_warning.png`: `--saturation-warning enable` 時だけ作る飽和警告PNG
 - `*_star_left_metcalf_right_saturation_warning.png`: 星固定と移動天体固定の飽和警告を並べたPNG
 - `*_shifts.csv`: 各フレームの星位置合わせ量と天体移動量
 - `*_registration_diagnostics.csv`: 全フレームの位置合わせ診断表。基準フレームの選び直しや、採用枚数が少ない原因の確認に使います
 - `*_summary.json`、`moving_target_pipeline_summary.json`: 再現用の処理記録
+
+北を上にした表示画像が必要な場合は、次のように指定します。WCSが必要なため、プレートソルブまたは有効なWCSキャッシュが必要です。
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --preview-north-up
+```
 
 位置合わせ診断表は、index、元ファイル名、基準フレームか、採用/除外、除外理由、FWHM、weighted FWHM、roundness、検出星数、初期対応星数、フィッティング後の対応星数、inlier率、背景星位置合わせのX/Y移動量・回転角・倍率を記録します。`fwhm_px`はSirilの代表FWHM、`weighted_fwhm_px`はSirilの星品質を考慮したweighted FWHMです。値が小さいほど星像は鋭く、roundnessは1に近いほど丸い星像です。
 

@@ -171,6 +171,20 @@ class WcsModel:
             return self._world_to_pixel_cd(ra_deg, dec_deg)
         return self._world_to_pixel_calibration(ra_deg, dec_deg)
 
+    def cd_matrix(self) -> tuple[float, float, float, float]:
+        """Return the sky-per-pixel matrix used by this solution."""
+        if self.header:
+            return wcs_cd_matrix(self.header)
+        c = self.calibration or {}
+        pixscale_deg = float(c["pixscale"]) / 3600.0
+        theta = math.radians(float(c["orientation"]))
+        return (
+            pixscale_deg * math.cos(theta),
+            pixscale_deg * math.sin(theta),
+            -pixscale_deg * math.sin(theta),
+            pixscale_deg * math.cos(theta),
+        )
+
     def _world_to_pixel_cd(self, ra_deg: float, dec_deg: float) -> tuple[float, float]:
         h = self.header or {}
         ra0 = float(h["CRVAL1"])
@@ -767,6 +781,109 @@ def registered_valid_mask(data: np.ndarray) -> np.ndarray:
     return np.isfinite(data) & (data != 0.0)
 
 
+BACKGROUND_ROI_FRACTION = 0.70
+BACKGROUND_SAMPLE_STEP = 8
+BACKGROUND_SIGMA = 3.0
+BACKGROUND_ITERATIONS = 3
+
+
+def sigma_clipped_median(values: np.ndarray, sigma: float = BACKGROUND_SIGMA, iterations: int = BACKGROUND_ITERATIONS) -> float:
+    """Return a robust background level without letting stars set the DC level."""
+    samples = np.asarray(values, dtype=np.float64)
+    samples = samples[np.isfinite(samples)]
+    if samples.size == 0:
+        raise ValueError("No finite pixels were available for background estimation")
+    for _ in range(iterations):
+        center = float(np.median(samples))
+        mad = float(np.median(np.abs(samples - center)))
+        if not math.isfinite(mad) or mad <= 0.0:
+            return center
+        robust_sigma = 1.4826 * mad
+        kept = samples[np.abs(samples - center) <= sigma * robust_sigma]
+        if kept.size == 0 or kept.size == samples.size:
+            return center
+        samples = kept
+    return float(np.median(samples))
+
+
+def estimate_background_levels(data: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
+    """Estimate one DC level per channel from a sampled central valid region."""
+    if valid_mask.shape != data.shape[-2:]:
+        raise ValueError(f"Background validity mask shape changed: {valid_mask.shape} != {data.shape[-2:]}")
+    height, width = valid_mask.shape
+    roi_height = max(1, int(round(height * BACKGROUND_ROI_FRACTION)))
+    roi_width = max(1, int(round(width * BACKGROUND_ROI_FRACTION)))
+    y0 = (height - roi_height) // 2
+    x0 = (width - roi_width) // 2
+    region = np.s_[y0 : y0 + roi_height : BACKGROUND_SAMPLE_STEP, x0 : x0 + roi_width : BACKGROUND_SAMPLE_STEP]
+    sampled_valid = valid_mask[region]
+    if int(np.count_nonzero(sampled_valid)) < 128:
+        raise ValueError("Fewer than 128 valid sampled pixels were available for background estimation")
+    planes = data[np.newaxis, :, :] if data.ndim == 2 else data
+    levels: list[float] = []
+    for plane in planes:
+        values = plane[region][sampled_valid]
+        if int(np.count_nonzero(np.isfinite(values))) < 128:
+            raise ValueError("A channel has too few finite pixels for background estimation")
+        levels.append(sigma_clipped_median(values))
+    return np.asarray(levels, dtype=np.float64)
+
+
+def apply_background_offset(data: np.ndarray, valid_mask: np.ndarray, offset_levels: np.ndarray) -> np.ndarray:
+    """Apply a per-channel DC offset only to real source pixels, never to padding."""
+    if valid_mask.shape != data.shape[-2:]:
+        raise ValueError(f"Background validity mask shape changed: {valid_mask.shape} != {data.shape[-2:]}")
+    planes = data[np.newaxis, :, :] if data.ndim == 2 else data
+    offsets = np.asarray(offset_levels, dtype=np.float64).reshape(-1)
+    if offsets.size != planes.shape[0]:
+        raise ValueError(f"Background offset channel count changed: {offsets.size} != {planes.shape[0]}")
+    result = planes.astype(np.float64, copy=True)
+    result[:, valid_mask] += offsets[:, np.newaxis]
+    return result[0] if data.ndim == 2 else result
+
+
+def collect_background_normalization(
+    copied: list[Path],
+    source_files: list[Path],
+    registration_dir: Path,
+    processed_basename: str,
+    registration_issues: dict[int, list[str]],
+    verbose_mode: bool,
+) -> tuple[np.ndarray, dict[int, np.ndarray], dict[int, np.ndarray]]:
+    """Find a session-common background and the additive correction for every usable frame."""
+    levels_by_index: dict[int, np.ndarray] = {}
+    for index, source in enumerate(copied, start=1):
+        if registration_issues.get(index):
+            continue
+        registered = registration_dir / f"r_{processed_basename}_{index:05d}.fit"
+        source_header, _cards, _offset = read_fits_header(source)
+        image, _registered_unit_scale = restore_registered_units(read_fits(registered), source_header)
+        try:
+            levels_by_index[index] = estimate_background_levels(image.data, registered_valid_mask(image.data))
+        except ValueError as error:
+            raise RuntimeError(
+                f"Cannot estimate the background of usable frame {index} ({source_files[index - 1].name}): {error}"
+            ) from error
+        if verbose_mode:
+            rendered = ", ".join(f"{level:.3f}" for level in levels_by_index[index])
+            print(f"[background] frame {index}/{len(copied)}: [{rendered}] ADU", flush=True)
+    if not levels_by_index:
+        raise RuntimeError("No registered frames were available for background normalization")
+    channel_counts = {levels.size for levels in levels_by_index.values()}
+    if len(channel_counts) != 1:
+        raise RuntimeError("Registered frames have inconsistent channel counts for background normalization")
+    common_levels = np.median(np.stack(list(levels_by_index.values())), axis=0)
+    offsets_by_index = {index: common_levels - levels for index, levels in levels_by_index.items()}
+    if verbose_mode:
+        rendered = ", ".join(f"{level:.3f}" for level in common_levels)
+        print(
+            f"[background] common sigma-clipped median: [{rendered}] ADU "
+            f"(central {int(BACKGROUND_ROI_FRACTION * 100)}%, every {BACKGROUND_SAMPLE_STEP} px)",
+            flush=True,
+        )
+    return common_levels, levels_by_index, offsets_by_index
+
+
 def shift_image(
     data: np.ndarray,
     dx: float,
@@ -1099,6 +1216,53 @@ def export_preview_png(
             rgb[display_mask] = np.asarray(warning_color, dtype=np.uint8)
         image = Image.fromarray(rgb, mode="RGB")
     image.save(path)
+
+
+def north_up_rotation_degrees(wcs: WcsModel, flip_vertical: bool = False) -> float:
+    """Return the PIL rotation that puts increasing Declination upward."""
+    cd11, cd12, cd21, cd22 = wcs.cd_matrix()
+    det = cd11 * cd22 - cd12 * cd21
+    if abs(det) < 1e-20:
+        raise ValueError("Cannot orient preview: WCS CD matrix is singular")
+    # Inverse CD times the sky-north vector (dRA, dDec)=(0, 1).
+    pixel_x = -cd12 / det
+    pixel_y = cd11 / det
+    display_y = pixel_y if flip_vertical else -pixel_y
+    current_angle = math.atan2(display_y, pixel_x)
+    raw_angle = math.degrees(-math.pi / 2.0 - current_angle)
+    return (raw_angle + 180.0) % 360.0 - 180.0
+
+
+def rotate_preview_png(source: Path, destination: Path, angle_degrees: float) -> None:
+    """Rotate an already-stretched preview without changing its FITS data.
+
+    The source PNG is deliberately stretched before this function is called.
+    Therefore the black fill pixels introduced by ``expand=True`` cannot
+    affect the brightness range; north-up and ordinary previews share the
+    same display scaling.
+    """
+    with Image.open(source) as source_image:
+        image = source_image.convert("RGB") if source_image.mode not in ("L", "RGB") else source_image.copy()
+    fill = 0 if image.mode == "L" else (0, 0, 0)
+    image.rotate(angle_degrees, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=fill).save(destination)
+
+
+def rotate_comparison_preview_png(
+    left_source: Path,
+    right_source: Path,
+    destination: Path,
+    angle_degrees: float,
+) -> None:
+    with Image.open(left_source) as left_image, Image.open(right_source) as right_image:
+        left = left_image.convert("RGB")
+        right = right_image.convert("RGB")
+    resample = Image.Resampling.BICUBIC
+    left = left.rotate(angle_degrees, resample=resample, expand=True, fillcolor=(0, 0, 0))
+    right = right.rotate(angle_degrees, resample=resample, expand=True, fillcolor=(0, 0, 0))
+    output = Image.new("RGB", (left.width + right.width, max(left.height, right.height)), (0, 0, 0))
+    output.paste(left, (0, 0))
+    output.paste(right, (left.width, 0))
+    output.save(destination)
 
 
 def write_siril_script(
@@ -1508,6 +1672,12 @@ REGISTRATION_DIAGNOSTIC_FIELDS = [
     "star_ty_px",
     "star_rotation_deg",
     "star_scale",
+    "background_ch1_adu",
+    "background_ch2_adu",
+    "background_ch3_adu",
+    "background_offset_ch1_adu",
+    "background_offset_ch2_adu",
+    "background_offset_ch3_adu",
 ]
 
 
@@ -1967,6 +2137,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--background-normalization",
+        choices=("none", "offset"),
+        default="none",
+        help=(
+            "Keep each frame's original DC background (none, default), or match usable frames to a "
+            "common sigma-clipped median background before stacking (offset)."
+        ),
+    )
+    parser.add_argument(
         "--zero-sample-policy",
         choices=("exclude", "include"),
         default="exclude",
@@ -1984,6 +2163,11 @@ def main() -> int:
         help="Output filename stem. Defaults to '<OBJECT>_<start>-<end>_<N>frames'.",
     )
     parser.add_argument("--preview-flip-vertical", action="store_true")
+    parser.add_argument(
+        "--preview-north-up",
+        action="store_true",
+        help="Add preview PNGs rotated using the solved WCS so celestial north is up.",
+    )
     parser.add_argument("--output-bitpix", choices=("float32", "uint16"), default="float32")
     parser.add_argument("--uint16-scale", choices=("none", "global", "per-channel"), default="none")
     parser.add_argument("--scale-low-percentile", type=float, default=0.0)
@@ -2022,6 +2206,8 @@ def main() -> int:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
     if args.registration_minpairs < 1:
         parser.error("--registration-minpairs must be at least 1")
+    if args.background_normalization == "offset" and args.padding_policy != "valid":
+        parser.error("--background-normalization offset requires --padding-policy valid")
     if not 0.0 < args.saturation_threshold_percent <= 100.0:
         parser.error("--saturation-threshold-percent must be greater than 0 and at most 100")
     try:
@@ -2322,6 +2508,23 @@ def main() -> int:
     reference_time = parse_time(reference.header["DATE-OBS"])
     reference_target = interpolate_ephemeris(ephemeris, reference_time)
     reference_x, reference_y = wcs.world_to_pixel(reference_target.ra_deg, reference_target.dec_deg)
+    background_common_levels: np.ndarray | None = None
+    background_levels_by_index: dict[int, np.ndarray] = {}
+    background_offsets_by_index: dict[int, np.ndarray] = {}
+    if args.background_normalization == "offset":
+        print("[background] Estimating per-frame DC offsets", flush=True)
+        (
+            background_common_levels,
+            background_levels_by_index,
+            background_offsets_by_index,
+        ) = collect_background_normalization(
+            copied,
+            files,
+            registration_dir,
+            processed_basename,
+            registration_issues,
+            args.verbose,
+        )
     saturation_enabled = args.saturation_warning == "enable"
     warning_color_rgb = saturation_rgb(args.saturation_color)
     metcalf_saturation_mask = np.zeros((height, width), dtype=bool) if saturation_enabled else None
@@ -2340,7 +2543,8 @@ def main() -> int:
     used = 0
     if args.verbose:
         print(
-            f"[stack] padding policy={args.padding_policy}; zero-sample policy={args.zero_sample_policy}",
+            f"[stack] padding policy={args.padding_policy}; zero-sample policy={args.zero_sample_policy}; "
+            f"background normalization={args.background_normalization}",
             flush=True,
         )
 
@@ -2390,8 +2594,6 @@ def main() -> int:
         dy = reference_y - y
         image, registered_unit_scale = restore_registered_units(read_fits(registered), source_header)
         source_valid = registered_valid_mask(image.data) if args.padding_policy == "valid" else None
-        shifted, mask2d = shift_image(image.data, dx, dy, source_valid)
-        star_shifted, star_mask2d = shift_image(image.data, 0.0, 0.0, source_valid)
         saturation_level: float | None = None
         saturation_threshold_count: float | None = None
         subframe_max_count: float | None = None
@@ -2426,6 +2628,15 @@ def main() -> int:
                             f"threshold={saturation_threshold_count:.3f}, pixels={saturated_pixel_count}",
                             flush=True,
                         )
+        background_levels = background_levels_by_index.get(i)
+        background_offset = background_offsets_by_index.get(i)
+        stack_data = image.data
+        if args.background_normalization == "offset":
+            if source_valid is None or background_levels is None or background_offset is None:
+                raise RuntimeError(f"Background normalization data is missing for usable frame {i}")
+            stack_data = apply_background_offset(image.data, source_valid, background_offset)
+        shifted, mask2d = shift_image(stack_data, dx, dy, source_valid)
+        star_shifted, star_mask2d = shift_image(stack_data, 0.0, 0.0, source_valid)
         if args.stack_method == "mean":
             sum_image, count_image = add_to_average(sum_image, count_image, shifted, mask2d)
             star_sum_image, star_count_image = add_to_average(
@@ -2440,13 +2651,17 @@ def main() -> int:
                     work_dir / f"{args.stack_method}_metcalf_frames.npy",
                     len(files),
                     shifted.shape,
-                    exclude_zero_samples=args.zero_sample_policy == "exclude",
+                    exclude_zero_samples=(
+                        args.zero_sample_policy == "exclude" and args.background_normalization == "none"
+                    ),
                 )
                 median_star_stack = MedianAccumulator(
                     work_dir / f"{args.stack_method}_star_frames.npy",
                     len(files),
                     star_shifted.shape,
-                    exclude_zero_samples=args.zero_sample_policy == "exclude",
+                    exclude_zero_samples=(
+                        args.zero_sample_policy == "exclude" and args.background_normalization == "none"
+                    ),
                 )
             median_stack.add(shifted, mask2d)
             if median_star_stack is None:
@@ -2469,6 +2684,12 @@ def main() -> int:
                 "extra_dy_px": dy,
                 **registration_metrics,
                 "registered_unit_scale": registered_unit_scale,
+                "background_ch1_adu": float(background_levels[0]) if background_levels is not None else None,
+                "background_ch2_adu": float(background_levels[1]) if background_levels is not None and background_levels.size > 1 else None,
+                "background_ch3_adu": float(background_levels[2]) if background_levels is not None and background_levels.size > 2 else None,
+                "background_offset_ch1_adu": float(background_offset[0]) if background_offset is not None else None,
+                "background_offset_ch2_adu": float(background_offset[1]) if background_offset is not None and background_offset.size > 1 else None,
+                "background_offset_ch3_adu": float(background_offset[2]) if background_offset is not None and background_offset.size > 2 else None,
                 "saturation_warning": frame_saturation_warning if saturation_enabled else None,
                 "saturation_level": saturation_level,
                 "saturation_threshold_count": saturation_threshold_count,
@@ -2524,6 +2745,15 @@ def main() -> int:
     star_output_png = work_dir / f"{output_stem}_star_preview.png"
     comparison_output_fits = work_dir / f"{output_stem}_star_left_metcalf_right.fit"
     comparison_output_png = work_dir / f"{output_stem}_star_left_metcalf_right_preview.png"
+    north_up_angle = None
+    north_up_output_png = None
+    north_up_star_output_png = None
+    north_up_comparison_output_png = None
+    if args.preview_north_up:
+        north_up_angle = north_up_rotation_degrees(wcs, args.preview_flip_vertical)
+        north_up_output_png = work_dir / f"{output_stem}_metcalf_north_up_preview.png"
+        north_up_star_output_png = work_dir / f"{output_stem}_star_north_up_preview.png"
+        north_up_comparison_output_png = work_dir / f"{output_stem}_star_left_metcalf_right_north_up_preview.png"
     saturation_output_png = (
         work_dir / f"{output_stem}_metcalf_saturation_warning.png" if saturation_enabled else None
     )
@@ -2539,6 +2769,21 @@ def main() -> int:
     registration_diagnostics_csv = work_dir / f"{output_stem}_registration_diagnostics.csv"
     summary_json = work_dir / f"{output_stem}_summary.json"
     star_wcs_header = wcs.to_fits_header(width, height)
+    background_header = {"BGNORM": args.background_normalization}
+    if background_common_levels is not None:
+        background_header.update(
+            {
+                "BGEST": "sigclip-med",
+                "BGSIGMA": BACKGROUND_SIGMA,
+                "BGROI": BACKGROUND_ROI_FRACTION,
+                "BGSAMPLE": BACKGROUND_SAMPLE_STEP,
+            }
+        )
+        for channel, level in enumerate(background_common_levels, start=1):
+            background_header[f"BGREF{channel}"] = float(level)
+    effective_zero_sample_policy = (
+        "mask-only" if args.background_normalization == "offset" and args.stack_method != "mean" else args.zero_sample_policy
+    )
     extra_header = {
         **star_wcs_header,
         "MTSTACK": True,
@@ -2549,12 +2794,13 @@ def main() -> int:
         "MTREFDEC": reference_target.dec_deg,
         "STKMODE": args.stack_method,
         "PADPOL": args.padding_policy,
-        "ZEROPOL": args.zero_sample_policy if args.stack_method != "mean" else "n/a",
+        "ZEROPOL": effective_zero_sample_policy if args.stack_method != "mean" else "n/a",
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
         "RFDEG": 5 if args.stack_method == "rankfit" else 0,
         "REFMODE": reference_mode,
         "REFINDEX": reference_index,
         "MTUNITS": "ADU",
+        **background_header,
     }
     star_extra_header = {
         **star_wcs_header,
@@ -2564,11 +2810,12 @@ def main() -> int:
         "MTUNITS": "ADU",
         "STKMODE": args.stack_method,
         "PADPOL": args.padding_policy,
-        "ZEROPOL": args.zero_sample_policy if args.stack_method != "mean" else "n/a",
+        "ZEROPOL": effective_zero_sample_policy if args.stack_method != "mean" else "n/a",
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
         "RFDEG": 5 if args.stack_method == "rankfit" else 0,
         "REFMODE": reference_mode,
         "REFINDEX": reference_index,
+        **background_header,
     }
     comparison_extra_header = {
         **star_wcs_header,
@@ -2582,11 +2829,12 @@ def main() -> int:
         "MTUNITS": "ADU",
         "STKMODE": args.stack_method,
         "PADPOL": args.padding_policy,
-        "ZEROPOL": args.zero_sample_policy if args.stack_method != "mean" else "n/a",
+        "ZEROPOL": effective_zero_sample_policy if args.stack_method != "mean" else "n/a",
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
         "RFDEG": 5 if args.stack_method == "rankfit" else 0,
         "REFMODE": reference_mode,
         "REFINDEX": reference_index,
+        **background_header,
     }
     uint16_stats: list[dict[str, float]] | None = None
     star_uint16_stats: list[dict[str, float]] | None = None
@@ -2649,6 +2897,18 @@ def main() -> int:
         low_percentile=args.preview_low_percentile,
         high_percentile=args.preview_high_percentile,
     )
+    if args.preview_north_up:
+        if north_up_angle is None or north_up_output_png is None or north_up_star_output_png is None or north_up_comparison_output_png is None:
+            raise RuntimeError("North-up preview paths were not initialized")
+        rotate_preview_png(output_png, north_up_output_png, north_up_angle)
+        rotate_preview_png(star_output_png, north_up_star_output_png, north_up_angle)
+        rotate_comparison_preview_png(
+            star_output_png,
+            output_png,
+            north_up_comparison_output_png,
+            north_up_angle,
+        )
+        print(f"[preview] North-up PNGs written (rotation={north_up_angle:.3f} deg)", flush=True)
     if saturation_enabled:
         if metcalf_saturation_mask is None or star_saturation_mask is None:
             raise RuntimeError("Saturation warning masks were not initialized")
@@ -2727,6 +2987,12 @@ def main() -> int:
             "saturation_threshold_count",
             "subframe_max_count",
             "saturated_pixel_count",
+            "background_ch1_adu",
+            "background_ch2_adu",
+            "background_ch3_adu",
+            "background_offset_ch1_adu",
+            "background_offset_ch2_adu",
+            "background_offset_ch3_adu",
         ]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -2755,6 +3021,8 @@ def main() -> int:
         "registration_minpairs": args.registration_minpairs,
         "registration_seq": str(registration_seq),
         "preview_flip_vertical": args.preview_flip_vertical,
+        "preview_north_up": args.preview_north_up,
+        "preview_north_up_rotation_deg": north_up_angle,
         "preview_low_percentile": args.preview_low_percentile,
         "preview_high_percentile": args.preview_high_percentile,
         "saturation_warning": {
@@ -2792,7 +3060,15 @@ def main() -> int:
         "stack_method": args.stack_method,
         "stack_method_token": method_token,
         "padding_policy": args.padding_policy,
-        "zero_sample_policy": args.zero_sample_policy if args.stack_method != "mean" else None,
+        "zero_sample_policy": effective_zero_sample_policy if args.stack_method != "mean" else None,
+        "background_normalization": {
+            "mode": args.background_normalization,
+            "estimator": "sigma-clipped median" if background_common_levels is not None else None,
+            "sigma": BACKGROUND_SIGMA if background_common_levels is not None else None,
+            "roi_fraction": BACKGROUND_ROI_FRACTION if background_common_levels is not None else None,
+            "sample_step": BACKGROUND_SAMPLE_STEP if background_common_levels is not None else None,
+            "common_levels_adu": background_common_levels.tolist() if background_common_levels is not None else None,
+        },
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,
         "rankfit_polynomial_degree": 5 if args.stack_method == "rankfit" else None,
         "reference_frame_mode": reference_mode,
@@ -2815,6 +3091,9 @@ def main() -> int:
             "star_preview_png": str(star_output_png),
             "comparison_fits": str(comparison_output_fits),
             "comparison_preview_png": str(comparison_output_png),
+            "north_up_preview_png": str(north_up_output_png) if north_up_output_png else None,
+            "north_up_star_preview_png": str(north_up_star_output_png) if north_up_star_output_png else None,
+            "north_up_comparison_preview_png": str(north_up_comparison_output_png) if north_up_comparison_output_png else None,
             "metcalf_saturation_warning_png": (
                 str(saturation_output_png) if saturation_output_png else None
             ),

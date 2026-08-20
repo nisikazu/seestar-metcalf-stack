@@ -578,6 +578,51 @@ class ValidPixelMeanTests(unittest.TestCase):
         np.testing.assert_allclose(result, np.array([[20, 15], [20, 15]], dtype=np.float64))
 
 
+class BackgroundNormalizationTests(unittest.TestCase):
+    def test_sigma_clipped_background_ignores_stars_and_padding(self):
+        data = np.full((3, 160, 160), 100.0, dtype=np.float32)
+        data[0] += 10.0
+        data[1] += 20.0
+        data[2] += 30.0
+        data[:, 72:80, 72:80] = 5000.0
+        data[:, :5, :] = 0.0
+        valid = np.ones((160, 160), dtype=bool)
+        valid[:5, :] = False
+
+        levels = stacker.estimate_background_levels(data, valid)
+
+        np.testing.assert_allclose(levels, np.array([110.0, 120.0, 130.0]), atol=0.01)
+
+    def test_offset_preserves_padding_and_equalizes_valid_background(self):
+        valid = np.array([[False, True], [True, True]], dtype=bool)
+        early = np.array([[0.0, 100.0], [100.0, 100.0]], dtype=np.float32)
+        late = np.array([[0.0, 200.0], [200.0, 200.0]], dtype=np.float32)
+        common = np.array([150.0])
+
+        early_normalized = stacker.apply_background_offset(early, valid, common - np.array([100.0]))
+        late_normalized = stacker.apply_background_offset(late, valid, common - np.array([200.0]))
+        total = counts = None
+        total, counts = stacker.add_to_average(total, counts, early_normalized, valid)
+        total, counts = stacker.add_to_average(total, counts, late_normalized, valid)
+        result = stacker.finalize_average(total, counts)
+
+        self.assertEqual(float(early_normalized[0, 0]), 0.0)
+        self.assertEqual(float(late_normalized[0, 0]), 0.0)
+        np.testing.assert_allclose(result, np.array([[0.0, 150.0], [150.0, 150.0]]))
+
+    def test_offset_mode_keeps_real_zero_for_order_statistic_stacks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "median.npy"
+            accumulator = stacker.MedianAccumulator(path, 3, (1, 1), exclude_zero_samples=False)
+            mask = np.ones((1, 1), dtype=bool)
+            for value in (0.0, 10.0, 20.0):
+                accumulator.add(np.array([[value]], dtype=np.float32), mask)
+            result = accumulator.finalize(row_chunk=1)
+            accumulator.close(remove=True)
+
+        self.assertEqual(float(result[0, 0]), 10.0)
+
+
 class PreviewTests(unittest.TestCase):
     def test_preview_percentiles_ignore_exact_zero_padding(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -940,6 +985,44 @@ class PlateSolveCacheTests(unittest.TestCase):
 
 
 class AstrometryHelperTests(unittest.TestCase):
+    def test_north_up_rotation_is_zero_for_standard_north_up_wcs(self):
+        wcs = stacker.WcsModel(
+            header={
+                "CD1_1": -1.0,
+                "CD1_2": 0.0,
+                "CD2_1": 0.0,
+                "CD2_2": 1.0,
+            }
+        )
+        self.assertAlmostEqual(stacker.north_up_rotation_degrees(wcs), 0.0)
+
+    def test_north_up_preview_is_generated_without_changing_source_preview(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.png"
+            destination = root / "north-up.png"
+            Image.fromarray(np.arange(12, dtype=np.uint8).reshape(3, 4), mode="L").save(source)
+            stacker.rotate_preview_png(source, destination, 0.0)
+            with Image.open(source) as source_image:
+                self.assertEqual(source_image.size, (4, 3))
+            with Image.open(destination) as destination_image:
+                self.assertEqual(destination_image.size, (4, 3))
+
+    def test_north_up_rotation_black_fill_does_not_change_stretched_range(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.png"
+            destination = root / "north-up.png"
+            # A uniform stretched image must remain at the same level after
+            # rotation; only the newly introduced fill pixels may be black.
+            values = np.full((2, 3), 200, dtype=np.uint8)
+            Image.fromarray(values, mode="L").save(source)
+            stacker.rotate_preview_png(source, destination, 45.0)
+            with Image.open(destination) as image:
+                rotated = np.asarray(image)
+            self.assertEqual(int(rotated.max()), 200)
+            self.assertEqual(int(rotated.min()), 0)
+
     def test_siril_pc_cdelt_wcs_is_converted_to_cd_matrix(self):
         header = {
             "CDELT1": -0.000266,
