@@ -252,11 +252,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--background-normalization",
-        choices=("none", "offset"),
+        choices=("none", "offset", "plane", "quadratic"),
         default="none",
         help=(
-            "Keep each frame's original DC background (none, default), or match usable frames to a "
-            "common sigma-clipped median background before stacking (offset)."
+            "Keep each frame's original background (none, default), or subtract each usable frame's "
+            "offset, plane, or quadratic fitted background before stacking."
         ),
     )
     parser.add_argument(
@@ -324,8 +324,8 @@ def parse_args() -> argparse.Namespace:
     delattr(args, "source_dir_option")
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
-    if args.background_normalization == "offset" and args.padding_policy != "valid":
-        parser.error("--background-normalization offset requires --padding-policy valid")
+    if args.background_normalization != "none" and args.padding_policy != "valid":
+        parser.error("--background-normalization offset, plane, and quadratic require --padding-policy valid")
     if not 0.0 < args.saturation_threshold_percent <= 100.0:
         parser.error("--saturation-threshold-percent must be greater than 0 and at most 100")
     if not args.hot_pixel_sigma > 0.0 or not args.cold_pixel_sigma > 0.0:

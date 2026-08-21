@@ -593,14 +593,13 @@ class BackgroundNormalizationTests(unittest.TestCase):
 
         np.testing.assert_allclose(levels, np.array([110.0, 120.0, 130.0]), atol=0.01)
 
-    def test_offset_preserves_padding_and_equalizes_valid_background(self):
+    def test_offset_removes_each_frame_background_and_preserves_padding(self):
         valid = np.array([[False, True], [True, True]], dtype=bool)
         early = np.array([[0.0, 100.0], [100.0, 100.0]], dtype=np.float32)
         late = np.array([[0.0, 200.0], [200.0, 200.0]], dtype=np.float32)
-        common = np.array([150.0])
 
-        early_normalized = stacker.apply_background_offset(early, valid, common - np.array([100.0]))
-        late_normalized = stacker.apply_background_offset(late, valid, common - np.array([200.0]))
+        early_normalized = stacker.apply_background_offset(early, valid, -np.array([100.0]))
+        late_normalized = stacker.apply_background_offset(late, valid, -np.array([200.0]))
         total = counts = None
         total, counts = stacker.add_to_average(total, counts, early_normalized, valid)
         total, counts = stacker.add_to_average(total, counts, late_normalized, valid)
@@ -608,7 +607,10 @@ class BackgroundNormalizationTests(unittest.TestCase):
 
         self.assertEqual(float(early_normalized[0, 0]), 0.0)
         self.assertEqual(float(late_normalized[0, 0]), 0.0)
-        np.testing.assert_allclose(result, np.array([[0.0, 150.0], [150.0, 150.0]]))
+        np.testing.assert_allclose(result, np.zeros((2, 2), dtype=np.float64))
+
+        output = stacker.add_background_output_offset(result, counts > 0, np.array([150.0]))
+        np.testing.assert_allclose(output, np.array([[0.0, 150.0], [150.0, 150.0]]))
 
     def test_offset_mode_keeps_real_zero_for_order_statistic_stacks(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -621,6 +623,46 @@ class BackgroundNormalizationTests(unittest.TestCase):
             accumulator.close(remove=True)
 
         self.assertEqual(float(result[0, 0]), 10.0)
+
+    def test_output_offset_is_the_mean_of_accepted_frame_dc_levels(self):
+        models = {
+            1: stacker.BackgroundModel("offset", np.array([[100.0], [200.0], [300.0]]), 0, np.zeros(3), np.zeros(3)),
+            2: stacker.BackgroundModel("offset", np.array([[160.0], [260.0], [360.0]]), 0, np.zeros(3), np.zeros(3)),
+            3: stacker.BackgroundModel("offset", np.array([[220.0], [320.0], [420.0]]), 0, np.zeros(3), np.zeros(3)),
+        }
+
+        np.testing.assert_allclose(stacker.mean_background_dc_levels(models), np.array([160.0, 260.0, 360.0]))
+
+    def test_plane_fit_rejects_a_corrupt_tile(self):
+        height, width = 500, 800
+        coefficients = np.array([[120.0, 14.0, -9.0]], dtype=np.float64)
+        data = np.tensordot(coefficients, stacker.background_grid(height, width, "plane"), axes=(1, 0))[0]
+        valid = np.ones((height, width), dtype=bool)
+
+        # One fully corrupted 10x16 tile must not steer the final plane fit.
+        data[200:210, 320:336] += 8000.0
+        model = stacker.fit_background_surface(data, valid, "plane")
+
+        self.assertEqual(model.tile_count, 2500)
+        self.assertGreaterEqual(int(model.rejected_tile_counts[0]), 1)
+        np.testing.assert_allclose(model.coefficients, coefficients, atol=0.1)
+
+    def test_quadratic_model_removes_each_background_without_touching_padding(self):
+        height, width = 500, 800
+        valid = np.ones((height, width), dtype=bool)
+        valid[:12, :] = False
+        first_coefficients = np.array([[100.0, 8.0, -3.0, 5.0, 2.0, -4.0]], dtype=np.float64)
+        grid = stacker.background_grid(height, width, "quadratic")
+        first = np.tensordot(first_coefficients, grid, axes=(1, 0))[0]
+        first[:12, :] = 0.0
+
+        first_model = stacker.fit_background_surface(first, valid, "quadratic")
+        first_normalized = stacker.apply_background_model(
+            first, valid, -first_model.coefficients, "quadratic"
+        )
+
+        self.assertTrue(np.all(first_normalized[:12, :] == 0.0))
+        np.testing.assert_allclose(first_normalized[valid], 0.0, atol=0.1)
 
 
 class PreviewTests(unittest.TestCase):

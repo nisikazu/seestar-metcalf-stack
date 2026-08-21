@@ -785,6 +785,28 @@ BACKGROUND_ROI_FRACTION = 0.70
 BACKGROUND_SAMPLE_STEP = 8
 BACKGROUND_SIGMA = 3.0
 BACKGROUND_ITERATIONS = 3
+BACKGROUND_TILE_ROWS = 50
+BACKGROUND_TILE_COLUMNS = 50
+BACKGROUND_MIN_TILE_PIXELS = 96
+BACKGROUND_TILE_SAMPLE_STEP = 4
+BACKGROUND_MIN_TILE_SAMPLES = 12
+BACKGROUND_FIT_OUTLIER_SIGMA = 3.0
+
+
+@dataclass
+class BackgroundModel:
+    """A per-channel background model in normalized image coordinates."""
+
+    mode: str
+    coefficients: np.ndarray
+    tile_count: int
+    rejected_tile_counts: np.ndarray
+    residual_rms: np.ndarray
+
+    @property
+    def levels(self) -> np.ndarray:
+        """Model level at the image centre, where normalized x=y=0."""
+        return self.coefficients[:, 0]
 
 
 def sigma_clipped_median(values: np.ndarray, sigma: float = BACKGROUND_SIGMA, iterations: int = BACKGROUND_ITERATIONS) -> float:
@@ -829,6 +851,171 @@ def estimate_background_levels(data: np.ndarray, valid_mask: np.ndarray) -> np.n
     return np.asarray(levels, dtype=np.float64)
 
 
+def background_term_count(mode: str) -> int:
+    if mode == "offset":
+        return 1
+    if mode == "plane":
+        return 3
+    if mode == "quadratic":
+        return 6
+    raise ValueError(f"Unsupported background normalization mode: {mode}")
+
+
+def background_design_matrix(x: np.ndarray, y: np.ndarray, mode: str) -> np.ndarray:
+    """Return [1], [1,x,y], or [1,x,y,x2,xy,y2] in stable normalized coordinates."""
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if mode == "offset":
+        return np.ones((x.size, 1), dtype=np.float64)
+    if mode == "plane":
+        return np.column_stack((np.ones_like(x), x, y))
+    if mode == "quadratic":
+        return np.column_stack((np.ones_like(x), x, y, x * x, x * y, y * y))
+    raise ValueError(f"Unsupported background normalization mode: {mode}")
+
+
+def background_grid(height: int, width: int, mode: str) -> np.ndarray:
+    """Return a term-by-y-by-x array for evaluating a background model."""
+    x = np.linspace(-1.0, 1.0, width, dtype=np.float64)
+    y = np.linspace(-1.0, 1.0, height, dtype=np.float64)
+    xx, yy = np.meshgrid(x, y)
+    if mode == "offset":
+        return np.ones((1, height, width), dtype=np.float64)
+    if mode == "plane":
+        return np.stack((np.ones_like(xx), xx, yy))
+    if mode == "quadratic":
+        return np.stack((np.ones_like(xx), xx, yy, xx * xx, xx * yy, yy * yy))
+    raise ValueError(f"Unsupported background normalization mode: {mode}")
+
+
+def background_tile_samples(data: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return robust RGB background values sampled from a deterministic 50x50 grid."""
+    if valid_mask.shape != data.shape[-2:]:
+        raise ValueError(f"Background validity mask shape changed: {valid_mask.shape} != {data.shape[-2:]}")
+    planes = data[np.newaxis, :, :] if data.ndim == 2 else data
+    height, width = valid_mask.shape
+    tile_height = math.ceil(height / BACKGROUND_TILE_ROWS)
+    tile_width = math.ceil(width / BACKGROUND_TILE_COLUMNS)
+    padded_height = tile_height * BACKGROUND_TILE_ROWS
+    padded_width = tile_width * BACKGROUND_TILE_COLUMNS
+
+    # Arrange all tiles as rows. NumPy then computes every robust tile median
+    # in compiled code rather than making thousands of Python calls per frame.
+    padded_valid = np.zeros((padded_height, padded_width), dtype=bool)
+    padded_valid[:height, :width] = valid_mask
+    tile_valid = padded_valid.reshape(BACKGROUND_TILE_ROWS, tile_height, BACKGROUND_TILE_COLUMNS, tile_width)
+    tile_valid = tile_valid.transpose(0, 2, 1, 3).reshape(-1, tile_height * tile_width)
+    weights = np.count_nonzero(tile_valid, axis=1).astype(np.float64)
+    sampled_tile_height = math.ceil(tile_height / BACKGROUND_TILE_SAMPLE_STEP)
+    sampled_tile_width = math.ceil(tile_width / BACKGROUND_TILE_SAMPLE_STEP)
+    sampled_valid_grid = padded_valid.reshape(BACKGROUND_TILE_ROWS, tile_height, BACKGROUND_TILE_COLUMNS, tile_width)
+    sampled_valid_grid = sampled_valid_grid[:, ::BACKGROUND_TILE_SAMPLE_STEP, :, ::BACKGROUND_TILE_SAMPLE_STEP]
+    sampled_valid = sampled_valid_grid.transpose(0, 2, 1, 3).reshape(
+        -1, sampled_tile_height * sampled_tile_width
+    )
+    sampled_weights = np.count_nonzero(sampled_valid, axis=1)
+    x_coordinates = np.broadcast_to(np.arange(padded_width, dtype=np.float64), (padded_height, padded_width))
+    y_coordinates = np.broadcast_to(np.arange(padded_height, dtype=np.float64)[:, np.newaxis], (padded_height, padded_width))
+
+    def sampled_coordinates(coordinates: np.ndarray) -> np.ndarray:
+        grid = coordinates.reshape(BACKGROUND_TILE_ROWS, tile_height, BACKGROUND_TILE_COLUMNS, tile_width)
+        grid = grid[:, ::BACKGROUND_TILE_SAMPLE_STEP, :, ::BACKGROUND_TILE_SAMPLE_STEP]
+        return grid.transpose(0, 2, 1, 3).reshape(-1, sampled_tile_height * sampled_tile_width)
+
+    sampled_x = sampled_coordinates(x_coordinates)
+    sampled_y = sampled_coordinates(y_coordinates)
+    values_by_channel: list[np.ndarray] = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        for plane in planes:
+            padded = np.full((padded_height, padded_width), np.nan, dtype=np.float64)
+            padded[:height, :width] = np.where(valid_mask, plane, np.nan)
+            tiles = padded.reshape(BACKGROUND_TILE_ROWS, tile_height, BACKGROUND_TILE_COLUMNS, tile_width)
+            tiles = tiles[:, ::BACKGROUND_TILE_SAMPLE_STEP, :, ::BACKGROUND_TILE_SAMPLE_STEP]
+            tiles = tiles.transpose(0, 2, 1, 3).reshape(-1, sampled_tile_height * sampled_tile_width)
+            initial = np.nanmedian(tiles, axis=1)
+            mad = np.nanmedian(np.abs(tiles - initial[:, np.newaxis]), axis=1)
+            robust_sigma = 1.4826 * mad
+            keep = np.isfinite(tiles)
+            clipping_tiles = robust_sigma > 0.0
+            if np.any(clipping_tiles):
+                keep[clipping_tiles] &= (
+                    np.abs(tiles[clipping_tiles] - initial[clipping_tiles, np.newaxis])
+                    <= BACKGROUND_SIGMA * robust_sigma[clipping_tiles, np.newaxis]
+                )
+            values_by_channel.append(np.nanmedian(np.where(keep, tiles, np.nan), axis=1))
+
+    samples = np.column_stack(values_by_channel)
+    center_x = np.sum(np.where(sampled_valid, sampled_x, 0.0), axis=1) / np.maximum(sampled_weights, 1)
+    center_y = np.sum(np.where(sampled_valid, sampled_y, 0.0), axis=1) / np.maximum(sampled_weights, 1)
+    positions_x = 2.0 * (center_x / max(width - 1.0, 1.0)) - 1.0
+    positions_y = 2.0 * (center_y / max(height - 1.0, 1.0)) - 1.0
+    usable = (
+        (weights >= BACKGROUND_MIN_TILE_PIXELS)
+        & (sampled_weights >= BACKGROUND_MIN_TILE_SAMPLES)
+        & np.all(np.isfinite(samples), axis=1)
+    )
+    if not np.any(usable):
+        raise ValueError("No valid tiles were available for background surface fitting")
+    return positions_x[usable], positions_y[usable], weights[usable], samples[usable]
+
+
+def fit_background_surface(data: np.ndarray, valid_mask: np.ndarray, mode: str) -> BackgroundModel:
+    """Fit a deterministic robust plane or quadratic surface to tile medians."""
+    if mode == "offset":
+        levels = estimate_background_levels(data, valid_mask)
+        return BackgroundModel(
+            mode=mode,
+            coefficients=levels[:, np.newaxis],
+            tile_count=0,
+            rejected_tile_counts=np.zeros(levels.size, dtype=np.int32),
+            residual_rms=np.zeros(levels.size, dtype=np.float64),
+        )
+    x, y, weights, samples = background_tile_samples(data, valid_mask)
+    design = background_design_matrix(x, y, mode)
+    term_count = design.shape[1]
+    minimum_tiles = max(term_count + 3, term_count * 2)
+    if samples.shape[0] < minimum_tiles:
+        raise ValueError(
+            f"Only {samples.shape[0]} background tiles were usable; {minimum_tiles} are required for {mode} fitting"
+        )
+    sqrt_weights = np.sqrt(weights)
+    weighted_design = design * sqrt_weights[:, np.newaxis]
+    coefficients: list[np.ndarray] = []
+    rejected_counts: list[int] = []
+    residual_rms: list[float] = []
+    for channel in range(samples.shape[1]):
+        values = samples[:, channel]
+        coefficient, *_ = np.linalg.lstsq(weighted_design, values * sqrt_weights, rcond=None)
+        residual = values - design @ coefficient
+        residual_centre = float(np.median(residual))
+        residual_mad = float(np.median(np.abs(residual - residual_centre)))
+        keep = np.ones(residual.size, dtype=bool)
+        if math.isfinite(residual_mad) and residual_mad > 0.0:
+            robust_sigma = 1.4826 * residual_mad
+            keep = np.abs(residual - residual_centre) <= BACKGROUND_FIT_OUTLIER_SIGMA * robust_sigma
+        if int(np.count_nonzero(keep)) >= minimum_tiles:
+            kept_weights = sqrt_weights[keep]
+            coefficient, *_ = np.linalg.lstsq(
+                design[keep] * kept_weights[:, np.newaxis],
+                values[keep] * kept_weights,
+                rcond=None,
+            )
+        else:
+            keep[:] = True
+        final_residual = values - design @ coefficient
+        coefficients.append(coefficient)
+        rejected_counts.append(int(np.count_nonzero(~keep)))
+        residual_rms.append(float(np.sqrt(np.average(final_residual[keep] ** 2, weights=weights[keep]))))
+    return BackgroundModel(
+        mode=mode,
+        coefficients=np.stack(coefficients),
+        tile_count=int(samples.shape[0]),
+        rejected_tile_counts=np.asarray(rejected_counts, dtype=np.int32),
+        residual_rms=np.asarray(residual_rms, dtype=np.float64),
+    )
+
+
 def apply_background_offset(data: np.ndarray, valid_mask: np.ndarray, offset_levels: np.ndarray) -> np.ndarray:
     """Apply a per-channel DC offset only to real source pixels, never to padding."""
     if valid_mask.shape != data.shape[-2:]:
@@ -842,16 +1029,68 @@ def apply_background_offset(data: np.ndarray, valid_mask: np.ndarray, offset_lev
     return result[0] if data.ndim == 2 else result
 
 
+def apply_background_model(
+    data: np.ndarray,
+    valid_mask: np.ndarray,
+    coefficient_delta: np.ndarray,
+    mode: str,
+) -> np.ndarray:
+    """Apply an additive background correction to real source pixels only."""
+    if mode == "offset":
+        return apply_background_offset(data, valid_mask, coefficient_delta[:, 0])
+    if valid_mask.shape != data.shape[-2:]:
+        raise ValueError(f"Background validity mask shape changed: {valid_mask.shape} != {data.shape[-2:]}")
+    planes = data[np.newaxis, :, :] if data.ndim == 2 else data
+    coefficients = np.asarray(coefficient_delta, dtype=np.float64)
+    if coefficients.shape != (planes.shape[0], background_term_count(mode)):
+        raise ValueError(
+            f"Background coefficient shape changed: {coefficients.shape} != "
+            f"{(planes.shape[0], background_term_count(mode))}"
+        )
+    correction = np.tensordot(coefficients, background_grid(*valid_mask.shape, mode), axes=(1, 0))
+    result = planes.astype(np.float64, copy=True)
+    result[:, valid_mask] += correction[:, valid_mask]
+    return result[0] if data.ndim == 2 else result
+
+
+def add_background_output_offset(
+    data: np.ndarray,
+    coverage_mask: np.ndarray,
+    output_levels: np.ndarray,
+) -> np.ndarray:
+    """Add a constant output-range offset only where the final stack has data."""
+    if coverage_mask.shape != data.shape[-2:]:
+        raise ValueError(f"Background coverage mask shape changed: {coverage_mask.shape} != {data.shape[-2:]}")
+    planes = data[np.newaxis, :, :] if data.ndim == 2 else data
+    levels = np.asarray(output_levels, dtype=np.float64).reshape(-1)
+    if levels.size != planes.shape[0]:
+        raise ValueError(f"Background output channel count changed: {levels.size} != {planes.shape[0]}")
+    result = planes.astype(np.float64, copy=True)
+    result[:, coverage_mask] += levels[:, np.newaxis]
+    return result[0] if data.ndim == 2 else result
+
+
+def mean_background_dc_levels(models_by_index: dict[int, BackgroundModel]) -> np.ndarray:
+    """Return the RGB arithmetic mean of accepted frames' fitted DC backgrounds."""
+    if not models_by_index:
+        raise ValueError("No background models were supplied")
+    return np.mean(
+        np.stack([model.coefficients[:, 0] for model in models_by_index.values()]),
+        axis=0,
+    )
+
+
 def collect_background_normalization(
     copied: list[Path],
     source_files: list[Path],
     registration_dir: Path,
     processed_basename: str,
     registration_issues: dict[int, list[str]],
+    mode: str,
     verbose_mode: bool,
-) -> tuple[np.ndarray, dict[int, np.ndarray], dict[int, np.ndarray]]:
-    """Find a session-common background and the additive correction for every usable frame."""
-    levels_by_index: dict[int, np.ndarray] = {}
+) -> tuple[np.ndarray, dict[int, BackgroundModel], dict[int, np.ndarray]]:
+    """Fit and remove each frame's background, retaining a final output range offset."""
+    models_by_index: dict[int, BackgroundModel] = {}
     for index, source in enumerate(copied, start=1):
         if registration_issues.get(index):
             continue
@@ -859,29 +1098,39 @@ def collect_background_normalization(
         source_header, _cards, _offset = read_fits_header(source)
         image, _registered_unit_scale = restore_registered_units(read_fits(registered), source_header)
         try:
-            levels_by_index[index] = estimate_background_levels(image.data, registered_valid_mask(image.data))
+            models_by_index[index] = fit_background_surface(image.data, registered_valid_mask(image.data), mode)
         except ValueError as error:
             raise RuntimeError(
                 f"Cannot estimate the background of usable frame {index} ({source_files[index - 1].name}): {error}"
             ) from error
         if verbose_mode:
-            rendered = ", ".join(f"{level:.3f}" for level in levels_by_index[index])
-            print(f"[background] frame {index}/{len(copied)}: [{rendered}] ADU", flush=True)
-    if not levels_by_index:
+            model = models_by_index[index]
+            rendered = ", ".join(f"{level:.3f}" for level in model.levels)
+            details = "" if mode == "offset" else f"; tiles={model.tile_count}; rejected={model.rejected_tile_counts.tolist()}"
+            print(f"[background] frame {index}/{len(copied)}: [{rendered}] ADU{details}", flush=True)
+    if not models_by_index:
         raise RuntimeError("No registered frames were available for background normalization")
-    channel_counts = {levels.size for levels in levels_by_index.values()}
+    coefficient_shapes = {model.coefficients.shape for model in models_by_index.values()}
+    if len(coefficient_shapes) != 1:
+        raise RuntimeError("Registered frames have inconsistent channel counts for background normalization")
+    # Arithmetic is performed around a zero background. The arithmetic mean
+    # DC level is retained only as a post-stack output-range offset for
+    # non-negative formats.
+    output_levels = mean_background_dc_levels(models_by_index)
+    corrections_by_index = {
+        index: -model.coefficients for index, model in models_by_index.items()
+    }
+    channel_counts = {model.levels.size for model in models_by_index.values()}
     if len(channel_counts) != 1:
         raise RuntimeError("Registered frames have inconsistent channel counts for background normalization")
-    common_levels = np.median(np.stack(list(levels_by_index.values())), axis=0)
-    offsets_by_index = {index: common_levels - levels for index, levels in levels_by_index.items()}
     if verbose_mode:
-        rendered = ", ".join(f"{level:.3f}" for level in common_levels)
+        rendered = ", ".join(f"{level:.3f}" for level in output_levels)
+        details = "" if mode == "offset" else f"; model={mode}; tiles={BACKGROUND_TILE_ROWS}x{BACKGROUND_TILE_COLUMNS}"
         print(
-            f"[background] common sigma-clipped median: [{rendered}] ADU "
-            f"(central {int(BACKGROUND_ROI_FRACTION * 100)}%, every {BACKGROUND_SAMPLE_STEP} px)",
+            f"[background] each frame is fitted to zero; final output offset: [{rendered}] ADU{details}",
             flush=True,
         )
-    return common_levels, levels_by_index, offsets_by_index
+    return output_levels, models_by_index, corrections_by_index
 
 
 def shift_image(
@@ -1678,6 +1927,16 @@ REGISTRATION_DIAGNOSTIC_FIELDS = [
     "background_offset_ch1_adu",
     "background_offset_ch2_adu",
     "background_offset_ch3_adu",
+    "background_model",
+    "background_fit_tiles",
+    "background_fit_rejected_ch1",
+    "background_fit_rejected_ch2",
+    "background_fit_rejected_ch3",
+    "background_fit_rms_ch1_adu",
+    "background_fit_rms_ch2_adu",
+    "background_fit_rms_ch3_adu",
+    "background_coefficients",
+    "background_correction_coefficients",
 ]
 
 
@@ -2138,11 +2397,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--background-normalization",
-        choices=("none", "offset"),
+        choices=("none", "offset", "plane", "quadratic"),
         default="none",
         help=(
-            "Keep each frame's original DC background (none, default), or match usable frames to a "
-            "common sigma-clipped median background before stacking (offset)."
+            "Keep each frame's original background (none, default), or subtract each usable frame's "
+            "offset, plane, or quadratic fitted background before stacking."
         ),
     )
     parser.add_argument(
@@ -2206,8 +2465,8 @@ def main() -> int:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
     if args.registration_minpairs < 1:
         parser.error("--registration-minpairs must be at least 1")
-    if args.background_normalization == "offset" and args.padding_policy != "valid":
-        parser.error("--background-normalization offset requires --padding-policy valid")
+    if args.background_normalization != "none" and args.padding_policy != "valid":
+        parser.error("--background-normalization offset, plane, and quadratic require --padding-policy valid")
     if not 0.0 < args.saturation_threshold_percent <= 100.0:
         parser.error("--saturation-threshold-percent must be greater than 0 and at most 100")
     try:
@@ -2508,21 +2767,22 @@ def main() -> int:
     reference_time = parse_time(reference.header["DATE-OBS"])
     reference_target = interpolate_ephemeris(ephemeris, reference_time)
     reference_x, reference_y = wcs.world_to_pixel(reference_target.ra_deg, reference_target.dec_deg)
-    background_common_levels: np.ndarray | None = None
-    background_levels_by_index: dict[int, np.ndarray] = {}
-    background_offsets_by_index: dict[int, np.ndarray] = {}
-    if args.background_normalization == "offset":
-        print("[background] Estimating per-frame DC offsets", flush=True)
+    background_output_levels: np.ndarray | None = None
+    background_models_by_index: dict[int, BackgroundModel] = {}
+    background_corrections_by_index: dict[int, np.ndarray] = {}
+    if args.background_normalization != "none":
+        print(f"[background] Estimating per-frame {args.background_normalization} models", flush=True)
         (
-            background_common_levels,
-            background_levels_by_index,
-            background_offsets_by_index,
+            background_output_levels,
+            background_models_by_index,
+            background_corrections_by_index,
         ) = collect_background_normalization(
             copied,
             files,
             registration_dir,
             processed_basename,
             registration_issues,
+            args.background_normalization,
             args.verbose,
         )
     saturation_enabled = args.saturation_warning == "enable"
@@ -2536,6 +2796,8 @@ def main() -> int:
     count_image: np.ndarray | None = None
     star_sum_image: np.ndarray | None = None
     star_count_image: np.ndarray | None = None
+    metcalf_coverage: np.ndarray | None = None
+    star_coverage: np.ndarray | None = None
     median_stack: MedianAccumulator | None = None
     median_star_stack: MedianAccumulator | None = None
     frame_rows: list[dict[str, object]] = []
@@ -2599,6 +2861,20 @@ def main() -> int:
         subframe_max_count: float | None = None
         saturated_pixel_count = 0
         frame_saturation_warning = False
+        background_model = background_models_by_index.get(i)
+        background_correction = background_corrections_by_index.get(i)
+        stack_data = image.data
+        if args.background_normalization != "none":
+            if source_valid is None or background_model is None or background_correction is None:
+                raise RuntimeError(f"Background normalization data is missing for usable frame {i}")
+            stack_data = apply_background_model(
+                image.data,
+                source_valid,
+                background_correction,
+                args.background_normalization,
+            )
+        shifted, mask2d = shift_image(stack_data, dx, dy, source_valid)
+        star_shifted, star_mask2d = shift_image(stack_data, 0.0, 0.0, source_valid)
         if saturation_enabled:
             (
                 frame_saturation_mask,
@@ -2628,15 +2904,6 @@ def main() -> int:
                             f"threshold={saturation_threshold_count:.3f}, pixels={saturated_pixel_count}",
                             flush=True,
                         )
-        background_levels = background_levels_by_index.get(i)
-        background_offset = background_offsets_by_index.get(i)
-        stack_data = image.data
-        if args.background_normalization == "offset":
-            if source_valid is None or background_levels is None or background_offset is None:
-                raise RuntimeError(f"Background normalization data is missing for usable frame {i}")
-            stack_data = apply_background_offset(image.data, source_valid, background_offset)
-        shifted, mask2d = shift_image(stack_data, dx, dy, source_valid)
-        star_shifted, star_mask2d = shift_image(stack_data, 0.0, 0.0, source_valid)
         if args.stack_method == "mean":
             sum_image, count_image = add_to_average(sum_image, count_image, shifted, mask2d)
             star_sum_image, star_count_image = add_to_average(
@@ -2667,6 +2934,13 @@ def main() -> int:
             if median_star_stack is None:
                 raise RuntimeError("Star median accumulator was not initialized")
             median_star_stack.add(star_shifted, star_mask2d)
+        if metcalf_coverage is None:
+            metcalf_coverage = np.zeros(mask2d.shape, dtype=np.uint32)
+            star_coverage = np.zeros(star_mask2d.shape, dtype=np.uint32)
+        if star_coverage is None:
+            raise RuntimeError("Star coverage image was not initialized")
+        metcalf_coverage += mask2d.astype(np.uint16)
+        star_coverage += star_mask2d.astype(np.uint16)
         used += 1
         used_times.append(frame_time)
         frame_rows.append(
@@ -2684,12 +2958,22 @@ def main() -> int:
                 "extra_dy_px": dy,
                 **registration_metrics,
                 "registered_unit_scale": registered_unit_scale,
-                "background_ch1_adu": float(background_levels[0]) if background_levels is not None else None,
-                "background_ch2_adu": float(background_levels[1]) if background_levels is not None and background_levels.size > 1 else None,
-                "background_ch3_adu": float(background_levels[2]) if background_levels is not None and background_levels.size > 2 else None,
-                "background_offset_ch1_adu": float(background_offset[0]) if background_offset is not None else None,
-                "background_offset_ch2_adu": float(background_offset[1]) if background_offset is not None and background_offset.size > 1 else None,
-                "background_offset_ch3_adu": float(background_offset[2]) if background_offset is not None and background_offset.size > 2 else None,
+                "background_ch1_adu": float(background_model.levels[0]) if background_model is not None else None,
+                "background_ch2_adu": float(background_model.levels[1]) if background_model is not None and background_model.levels.size > 1 else None,
+                "background_ch3_adu": float(background_model.levels[2]) if background_model is not None and background_model.levels.size > 2 else None,
+                "background_offset_ch1_adu": float(background_correction[0, 0]) if background_correction is not None else None,
+                "background_offset_ch2_adu": float(background_correction[1, 0]) if background_correction is not None and background_correction.shape[0] > 1 else None,
+                "background_offset_ch3_adu": float(background_correction[2, 0]) if background_correction is not None and background_correction.shape[0] > 2 else None,
+                "background_model": background_model.mode if background_model is not None else None,
+                "background_fit_tiles": background_model.tile_count if background_model is not None else None,
+                "background_fit_rejected_ch1": int(background_model.rejected_tile_counts[0]) if background_model is not None else None,
+                "background_fit_rejected_ch2": int(background_model.rejected_tile_counts[1]) if background_model is not None and background_model.rejected_tile_counts.size > 1 else None,
+                "background_fit_rejected_ch3": int(background_model.rejected_tile_counts[2]) if background_model is not None and background_model.rejected_tile_counts.size > 2 else None,
+                "background_fit_rms_ch1_adu": float(background_model.residual_rms[0]) if background_model is not None else None,
+                "background_fit_rms_ch2_adu": float(background_model.residual_rms[1]) if background_model is not None and background_model.residual_rms.size > 1 else None,
+                "background_fit_rms_ch3_adu": float(background_model.residual_rms[2]) if background_model is not None and background_model.residual_rms.size > 2 else None,
+                "background_coefficients": json.dumps(background_model.coefficients.tolist()) if background_model is not None else None,
+                "background_correction_coefficients": json.dumps(background_correction.tolist()) if background_correction is not None else None,
                 "saturation_warning": frame_saturation_warning if saturation_enabled else None,
                 "saturation_level": saturation_level,
                 "saturation_threshold_count": saturation_threshold_count,
@@ -2728,6 +3012,11 @@ def main() -> int:
             median_temp_removed.append(str(median_stack.path))
         if median_star_stack.close(remove=not args.no_cleanup):
             median_temp_removed.append(str(median_star_stack.path))
+    if args.background_normalization != "none":
+        if background_output_levels is None or metcalf_coverage is None or star_coverage is None:
+            raise RuntimeError("Background output offset data is missing")
+        stack = add_background_output_offset(stack, metcalf_coverage > 0, background_output_levels)
+        star_stack = add_background_output_offset(star_stack, star_coverage > 0, background_output_levels)
     comparison_stack = concatenate_side_by_side(star_stack, stack)
     if args.verbose:
         print("[output] Writing Metcalf, star-aligned, comparison FITS, and previews", flush=True)
@@ -2770,19 +3059,31 @@ def main() -> int:
     summary_json = work_dir / f"{output_stem}_summary.json"
     star_wcs_header = wcs.to_fits_header(width, height)
     background_header = {"BGNORM": args.background_normalization}
-    if background_common_levels is not None:
+    if background_output_levels is not None:
         background_header.update(
             {
                 "BGEST": "sigclip-med",
+                "BGGOAL": "zero",
+                "BGOUTUSE": "range-only",
+                "BGOUTEST": "mean-dc",
                 "BGSIGMA": BACKGROUND_SIGMA,
-                "BGROI": BACKGROUND_ROI_FRACTION,
-                "BGSAMPLE": BACKGROUND_SAMPLE_STEP,
+                "BGTILER": BACKGROUND_TILE_ROWS if args.background_normalization != "offset" else 0,
+                "BGTILEC": BACKGROUND_TILE_COLUMNS if args.background_normalization != "offset" else 0,
+                "BGTSTEP": BACKGROUND_TILE_SAMPLE_STEP if args.background_normalization != "offset" else 0,
+                "BGOUTSIG": BACKGROUND_FIT_OUTLIER_SIGMA if args.background_normalization != "offset" else 0.0,
             }
         )
-        for channel, level in enumerate(background_common_levels, start=1):
-            background_header[f"BGREF{channel}"] = float(level)
+        if args.background_normalization == "offset":
+            background_header.update(
+                {
+                    "BGROI": BACKGROUND_ROI_FRACTION,
+                    "BGSAMPLE": BACKGROUND_SAMPLE_STEP,
+                }
+            )
+        for channel, output_level in enumerate(background_output_levels, start=1):
+            background_header[f"BGREF{channel}"] = float(output_level)
     effective_zero_sample_policy = (
-        "mask-only" if args.background_normalization == "offset" and args.stack_method != "mean" else args.zero_sample_policy
+        "mask-only" if args.background_normalization != "none" and args.stack_method != "mean" else args.zero_sample_policy
     )
     extra_header = {
         **star_wcs_header,
@@ -2993,6 +3294,16 @@ def main() -> int:
             "background_offset_ch1_adu",
             "background_offset_ch2_adu",
             "background_offset_ch3_adu",
+            "background_model",
+            "background_fit_tiles",
+            "background_fit_rejected_ch1",
+            "background_fit_rejected_ch2",
+            "background_fit_rejected_ch3",
+            "background_fit_rms_ch1_adu",
+            "background_fit_rms_ch2_adu",
+            "background_fit_rms_ch3_adu",
+            "background_coefficients",
+            "background_correction_coefficients",
         ]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -3063,11 +3374,18 @@ def main() -> int:
         "zero_sample_policy": effective_zero_sample_policy if args.stack_method != "mean" else None,
         "background_normalization": {
             "mode": args.background_normalization,
-            "estimator": "sigma-clipped median" if background_common_levels is not None else None,
-            "sigma": BACKGROUND_SIGMA if background_common_levels is not None else None,
-            "roi_fraction": BACKGROUND_ROI_FRACTION if background_common_levels is not None else None,
-            "sample_step": BACKGROUND_SAMPLE_STEP if background_common_levels is not None else None,
-            "common_levels_adu": background_common_levels.tolist() if background_common_levels is not None else None,
+            "estimator": "sigma-clipped median" if background_output_levels is not None else None,
+            "sigma": BACKGROUND_SIGMA if background_output_levels is not None else None,
+            "roi_fraction": BACKGROUND_ROI_FRACTION if args.background_normalization == "offset" else None,
+            "sample_step": BACKGROUND_SAMPLE_STEP if args.background_normalization == "offset" else None,
+            "tile_rows": BACKGROUND_TILE_ROWS if args.background_normalization in {"plane", "quadratic"} else None,
+            "tile_columns": BACKGROUND_TILE_COLUMNS if args.background_normalization in {"plane", "quadratic"} else None,
+            "tile_sample_step": BACKGROUND_TILE_SAMPLE_STEP if args.background_normalization in {"plane", "quadratic"} else None,
+            "fit_outlier_sigma": BACKGROUND_FIT_OUTLIER_SIGMA if args.background_normalization in {"plane", "quadratic"} else None,
+            "frame_background_goal": "zero",
+            "output_offset_purpose": "constant range safeguard applied after stacking",
+            "output_offset_estimator": "arithmetic mean of accepted per-frame DC backgrounds",
+            "output_offset_adu": background_output_levels.tolist() if background_output_levels is not None else None,
         },
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,
         "rankfit_polynomial_degree": 5 if args.stack_method == "rankfit" else None,

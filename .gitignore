@@ -17,6 +17,7 @@ metcalf_output/
 downloads/
 plate_solve/
 developer-tools/plate-solve-benchmark/results/
+developer-tools/background-normalization-benchmark/results/
 plate_solve_benchmark/
 .tmp/
 *.fit
