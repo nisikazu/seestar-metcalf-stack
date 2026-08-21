@@ -1493,7 +1493,11 @@ def north_up_rotation_degrees(wcs: WcsModel, flip_vertical: bool = False) -> flo
     pixel_y = cd11 / det
     display_y = pixel_y if flip_vertical else -pixel_y
     current_angle = math.atan2(display_y, pixel_x)
-    raw_angle = math.degrees(-math.pi / 2.0 - current_angle)
+    # Pillow's positive ``Image.rotate`` angles are visually counterclockwise.
+    # With the display Y axis pointing downward, this *subtracts* the supplied
+    # angle from a display-vector angle. Rotate the current north vector onto
+    # -90 degrees (up), rather than applying the inverse rotation.
+    raw_angle = math.degrees(current_angle + math.pi / 2.0)
     return (raw_angle + 180.0) % 360.0 - 180.0
 
 

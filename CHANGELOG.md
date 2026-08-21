@@ -4,6 +4,12 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## v0.8.1 - 2026-08-22
+
+### 修正
+
+- `--preview-north-up`のPillow回転角の符号を修正しました。斜め向きのWCSでは従来のPNGが天の北からずれていました。科学用FITS、WCS、通常プレビューには影響しません。
+
 ## v0.8.0 - 2026-08-21
 
 ### 追加

@@ -1044,6 +1044,21 @@ class AstrometryHelperTests(unittest.TestCase):
         )
         self.assertAlmostEqual(stacker.north_up_rotation_degrees(wcs), 0.0)
 
+    def test_north_up_rotation_uses_pillow_rotation_sign(self):
+        # This CD matrix is the solved orientation of the 220P test stack.
+        # Its north vector in a default (non-flipped) Pillow preview points
+        # down-right. Pillow's positive rotation is visually counterclockwise,
+        # so the required rotation must be negative, not its inverse.
+        wcs = stacker.WcsModel(
+            header={
+                "CD1_1": -0.0006998436747184175,
+                "CD1_2": 0.000858728776370959,
+                "CD2_1": -0.0008584098669742034,
+                "CD2_2": -0.0006992083214559111,
+            }
+        )
+        self.assertAlmostEqual(stacker.north_up_rotation_degrees(wcs), -129.179221096586, places=9)
+
     def test_north_up_preview_is_generated_without_changing_source_preview(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
