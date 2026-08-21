@@ -1421,6 +1421,9 @@ def export_preview_png(
     flip_vertical: bool = False,
     low_percentile: float = 5.0,
     high_percentile: float = 99.95,
+    stretch: str = "sigma",
+    sigma_low: float = -1.0,
+    sigma_high: float = 3.0,
     warning_mask: np.ndarray | None = None,
     warning_color: tuple[int, int, int] = (255, 0, 0),
 ) -> None:
@@ -1439,12 +1442,24 @@ def export_preview_png(
     for plane in planes:
         # Registration and sub-pixel shifts create exact-zero borders. They
         # are display padding, not samples of the sky background, so exclude
-        # them only from the preview percentile calculation.
+        # them only from the preview stretch calculation.
         finite = plane[np.isfinite(plane) & (plane != 0.0)]
         if finite.size == 0:
             scaled = np.zeros_like(plane, dtype=np.uint8)
         else:
-            lo, hi = np.percentile(finite, [low_percentile, high_percentile])
+            if stretch == "percentile":
+                lo, hi = np.percentile(finite, [low_percentile, high_percentile])
+            elif stretch == "sigma":
+                # Preview scaling intentionally retains bright stars and the
+                # sky variation. Clipping them here would make noise dominate.
+                center = float(np.mean(finite))
+                standard_deviation = float(np.std(finite))
+                if not math.isfinite(standard_deviation) or standard_deviation <= 0.0:
+                    standard_deviation = 1.0
+                lo = center + sigma_low * standard_deviation
+                hi = center + sigma_high * standard_deviation
+            else:
+                raise ValueError(f"Unsupported preview stretch: {stretch}")
             if hi <= lo:
                 hi = lo + 1.0
             scaled = np.clip((plane - lo) / (hi - lo), 0.0, 1.0)
@@ -2398,10 +2413,10 @@ def main() -> int:
     parser.add_argument(
         "--background-normalization",
         choices=("none", "offset", "plane", "quadratic"),
-        default="none",
+        default=None,
         help=(
-            "Keep each frame's original background (none, default), or subtract each usable frame's "
-            "offset, plane, or quadratic fitted background before stacking."
+            "Subtract each usable frame's quadratic fitted background by default, or select none, offset, "
+            "or plane to change the correction. Legacy padding defaults to none."
         ),
     )
     parser.add_argument(
@@ -2434,6 +2449,14 @@ def main() -> int:
     parser.add_argument("--preview-low-percentile", type=float, default=5.0)
     parser.add_argument("--preview-high-percentile", type=float, default=99.95)
     parser.add_argument(
+        "--preview-stretch",
+        choices=("percentile", "sigma"),
+        default="sigma",
+        help="Preview display stretch: simple mean/stddev sigma (default) or percentile.",
+    )
+    parser.add_argument("--preview-sigma-low", type=float, default=-1.0)
+    parser.add_argument("--preview-sigma-high", type=float, default=3.0)
+    parser.add_argument(
         "--saturation-warning",
         type=str.lower,
         choices=("enable", "disable"),
@@ -2463,6 +2486,10 @@ def main() -> int:
 
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
+    if args.background_normalization is None:
+        args.background_normalization = "none" if args.padding_policy == "legacy" else "quadratic"
+    if args.preview_sigma_high <= args.preview_sigma_low:
+        parser.error("--preview-sigma-high must be greater than --preview-sigma-low")
     if args.registration_minpairs < 1:
         parser.error("--registration-minpairs must be at least 1")
     if args.background_normalization != "none" and args.padding_policy != "valid":
@@ -3183,6 +3210,9 @@ def main() -> int:
         flip_vertical=args.preview_flip_vertical,
         low_percentile=args.preview_low_percentile,
         high_percentile=args.preview_high_percentile,
+        stretch=args.preview_stretch,
+        sigma_low=args.preview_sigma_low,
+        sigma_high=args.preview_sigma_high,
     )
     export_preview_png(
         star_output_png,
@@ -3190,6 +3220,9 @@ def main() -> int:
         flip_vertical=args.preview_flip_vertical,
         low_percentile=args.preview_low_percentile,
         high_percentile=args.preview_high_percentile,
+        stretch=args.preview_stretch,
+        sigma_low=args.preview_sigma_low,
+        sigma_high=args.preview_sigma_high,
     )
     export_preview_png(
         comparison_output_png,
@@ -3197,6 +3230,9 @@ def main() -> int:
         flip_vertical=args.preview_flip_vertical,
         low_percentile=args.preview_low_percentile,
         high_percentile=args.preview_high_percentile,
+        stretch=args.preview_stretch,
+        sigma_low=args.preview_sigma_low,
+        sigma_high=args.preview_sigma_high,
     )
     if args.preview_north_up:
         if north_up_angle is None or north_up_output_png is None or north_up_star_output_png is None or north_up_comparison_output_png is None:
@@ -3223,6 +3259,9 @@ def main() -> int:
             flip_vertical=args.preview_flip_vertical,
             low_percentile=args.preview_low_percentile,
             high_percentile=args.preview_high_percentile,
+            stretch=args.preview_stretch,
+            sigma_low=args.preview_sigma_low,
+            sigma_high=args.preview_sigma_high,
             warning_mask=metcalf_saturation_mask,
             warning_color=warning_color_rgb,
         )
@@ -3232,6 +3271,9 @@ def main() -> int:
             flip_vertical=args.preview_flip_vertical,
             low_percentile=args.preview_low_percentile,
             high_percentile=args.preview_high_percentile,
+            stretch=args.preview_stretch,
+            sigma_low=args.preview_sigma_low,
+            sigma_high=args.preview_sigma_high,
             warning_mask=star_saturation_mask,
             warning_color=warning_color_rgb,
         )
@@ -3241,6 +3283,9 @@ def main() -> int:
             flip_vertical=args.preview_flip_vertical,
             low_percentile=args.preview_low_percentile,
             high_percentile=args.preview_high_percentile,
+            stretch=args.preview_stretch,
+            sigma_low=args.preview_sigma_low,
+            sigma_high=args.preview_sigma_high,
             warning_mask=comparison_saturation_mask,
             warning_color=warning_color_rgb,
         )
@@ -3334,6 +3379,9 @@ def main() -> int:
         "preview_flip_vertical": args.preview_flip_vertical,
         "preview_north_up": args.preview_north_up,
         "preview_north_up_rotation_deg": north_up_angle,
+        "preview_stretch": args.preview_stretch,
+        "preview_sigma_low": args.preview_sigma_low,
+        "preview_sigma_high": args.preview_sigma_high,
         "preview_low_percentile": args.preview_low_percentile,
         "preview_high_percentile": args.preview_high_percentile,
         "saturation_warning": {

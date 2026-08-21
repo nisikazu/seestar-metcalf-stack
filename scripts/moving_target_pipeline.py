@@ -253,10 +253,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--background-normalization",
         choices=("none", "offset", "plane", "quadratic"),
-        default="none",
+        default=None,
         help=(
-            "Keep each frame's original background (none, default), or subtract each usable frame's "
-            "offset, plane, or quadratic fitted background before stacking."
+            "Subtract each usable frame's quadratic fitted background by default, or select none, offset, "
+            "or plane to change the correction. Legacy padding defaults to none."
         ),
     )
     parser.add_argument(
@@ -281,6 +281,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scale-high-percentile", type=float, default=100.0)
     parser.add_argument("--preview-low-percentile", type=float, default=5.0)
     parser.add_argument("--preview-high-percentile", type=float, default=99.95)
+    parser.add_argument("--preview-stretch", choices=("percentile", "sigma"), default="sigma")
+    parser.add_argument("--preview-sigma-low", type=float, default=-1.0)
+    parser.add_argument("--preview-sigma-high", type=float, default=3.0)
     parser.add_argument(
         "--saturation-warning",
         type=str.lower,
@@ -324,6 +327,8 @@ def parse_args() -> argparse.Namespace:
     delattr(args, "source_dir_option")
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
+    if args.background_normalization is None:
+        args.background_normalization = "none" if args.padding_policy == "legacy" else "quadratic"
     if args.background_normalization != "none" and args.padding_policy != "valid":
         parser.error("--background-normalization offset, plane, and quadratic require --padding-policy valid")
     if not 0.0 < args.saturation_threshold_percent <= 100.0:
@@ -1347,6 +1352,12 @@ def run_stack(
             str(args.preview_low_percentile),
             "--preview-high-percentile",
             str(args.preview_high_percentile),
+            "--preview-stretch",
+            args.preview_stretch,
+            "--preview-sigma-low",
+            str(args.preview_sigma_low),
+            "--preview-sigma-high",
+            str(args.preview_sigma_high),
             "--saturation-warning",
             args.saturation_warning,
             "--saturation-threshold-percent",

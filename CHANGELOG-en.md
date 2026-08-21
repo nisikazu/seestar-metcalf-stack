@@ -4,6 +4,20 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.8.0 - 2026-08-21
+
+### Added
+
+- Add `--preview-north-up` to write moving-target, star-fixed, and comparison display PNGs rotated with the plate-solved WCS so celestial north is up. Science FITS files and ordinary previews remain unchanged.
+- Add `--background-normalization plane|quadratic` to fit and subtract an RGB first-order plane or second-order surface from real pixels in every registered subframe.
+- Add `--preview-stretch sigma`, `--preview-sigma-low`, and `--preview-sigma-high`.
+
+### Changed
+
+- Make `quadratic` the default background correction: it fits a second-order surface from sigma-clipped medians of a 50x50 tile grid. Use `--background-normalization none` or `offset` for very large comets or DSOs that cannot be protected by the surface model.
+- Subtract each frame's fitted background to near zero during signed arithmetic, then add only a constant range-safeguard offset after stacking.
+- Make the preview default a linear `-1 sigma` to `+3 sigma` stretch using the simple mean and standard deviation in each RGB channel. Bright stars intentionally remain in the estimate so background noise is not over-emphasized. Use `--preview-stretch percentile` for the previous method.
+
 ## v0.7.3 - 2026-08-18
 
 ### Improved

@@ -392,17 +392,19 @@ older release for comparison:
 Changes in altitude, twilight, moonlight, thin cloud, or other conditions can change the background from frame to frame. Even with per-pixel contribution counts, regions covered only by early frames can then remain brighter or darker. `--background-normalization` subtracts the fitted background from every usable registered frame, bringing it close to zero before stacking:
 
 ```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\frames" --background-normalization offset
+.\seestar-metcalf-stack.cmd "C:\path\to\frames"
 ```
 
-`offset` retains the original behaviour: it measures an RGB sigma-clipped median in the central 70% of valid pixels and equalizes only the DC level. For a sky gradient, use `plane` or `quadratic`. These modes split the valid image into a 50x50 tile grid, sample each tile at four-pixel intervals for a sigma-clipped median, and fit a first-order plane or second-order surface. A single residual-MAD rejection pass removes outlying tiles before refitting, producing deterministic results while reducing the influence of stars and ordinary small comets.
+The default `quadratic` mode splits the valid image into a 50x50 tile grid, samples each tile at four-pixel intervals for an RGB sigma-clipped median, and fits a second-order surface. A single residual-MAD rejection pass removes outlying tiles before refitting, producing deterministic results while reducing the influence of stars and ordinary small comets. Select `none` to disable background correction, `offset` to equalize only DC level, or `plane` for a first-order plane. Only when `--padding-policy legacy` is explicitly selected, omitted background correction falls back to `none` for legacy comparisons.
 
 ```bat
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --background-normalization plane
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --background-normalization quadratic
 ```
 
-The correction is applied only to real image pixels; registration and Metcalf-shift padding never contributes to either background estimation or the stack. Arithmetic retains signed values. Only after stacking, the arithmetic mean of the accepted frames' RGB local DC levels is added to real output pixels as a constant range safeguard for non-negative storage formats; it does not restore any fitted slope. `BGNORM`, `BGGOAL=zero`, `BGREF1` through `BGREF3` (the final output offsets), and per-frame background, subtraction, and tile diagnostics in the shifts CSV record the operation. The default `none` remains compatible with earlier output. These modes require the default `--padding-policy valid`.
+The correction is applied only to real image pixels; registration and Metcalf-shift padding never contributes to either background estimation or the stack. Arithmetic retains signed values. Only after stacking, the arithmetic mean of the accepted frames' RGB local DC levels is added to real output pixels as a constant range safeguard for non-negative storage formats; it does not restore any fitted slope. `BGNORM`, `BGGOAL=zero`, `BGREF1` through `BGREF3` (the final output offsets), and per-frame background, subtraction, and tile diagnostics in the shifts CSV record the operation. These modes require the default `--padding-policy valid`.
+
+Preview PNGs now default to a linear `-1 sigma` to `+3 sigma` stretch based on the simple mean and standard deviation of valid pixels in each RGB channel. Bright stars remain in this estimate so that noise and background variation are not over-emphasized. Use `--preview-stretch percentile` to restore the earlier percentile stretch.
 
 This feature is intended for ordinary comet and asteroid fields. A very large comet or an extended DSO can be indistinguishable from the sky background and may be partly subtracted by a surface model. Use `none` or `offset` for those targets.
 

@@ -4,6 +4,20 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## v0.8.0 - 2026-08-21
+
+### 追加
+
+- `--preview-north-up`で、プレートソルブ済みWCSを使い天の北を上にした移動天体固定・星固定・比較表示PNGを追加出力できるようにしました。科学用FITSと通常プレビューは変更しません。
+- `--background-normalization plane|quadratic`を追加しました。登録済み各サブフレームの背景をRGBごとに一次平面または二次曲面として推定し、実データ領域だけから差し引きます。
+- `--preview-stretch sigma`と`--preview-sigma-low`、`--preview-sigma-high`を追加しました。
+
+### 変更
+
+- 背景補正の既定を、50x50タイルのsigma-clipped medianから二次曲面を求める`quadratic`に変更しました。大きな彗星やDSOなど面モデルで守れない対象には`--background-normalization none`または`offset`を指定できます。
+- 背景補正では各フレームの推定背景を演算中に0付近まで差し引き、最後に保存レンジ対策だけの一定オフセットを加える方式にしました。
+- 表示用PNGの既定を、各RGBチャンネルの単純な平均・標準偏差による`-1σ`から`+3σ`の線形伸長へ変更しました。星を外れ値として除外しないため、背景ノイズだけを過大に表示しません。従来の方式は`--preview-stretch percentile`で使えます。
+
 ## v0.7.3 - 2026-08-18
 
 ### 改善

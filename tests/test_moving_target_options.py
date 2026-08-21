@@ -672,7 +672,13 @@ class PreviewTests(unittest.TestCase):
             data = np.zeros((10, 10), dtype=np.float32)
             data[-1] = np.arange(10, 110, 10, dtype=np.float32)
 
-            stacker.export_preview_png(path, data, low_percentile=0.0, high_percentile=100.0)
+            stacker.export_preview_png(
+                path,
+                data,
+                low_percentile=0.0,
+                high_percentile=100.0,
+                stretch="percentile",
+            )
 
             preview = np.asarray(Image.open(path))
             self.assertEqual(int(preview[0, 0]), 0)
@@ -1363,6 +1369,10 @@ class CrossPlatformCliTests(unittest.TestCase):
         self.assertEqual(args.saturation_color, "FF0000")
         self.assertEqual(args.padding_policy, "valid")
         self.assertEqual(args.zero_sample_policy, "exclude")
+        self.assertEqual(args.background_normalization, "quadratic")
+        self.assertEqual(args.preview_stretch, "sigma")
+        self.assertEqual(args.preview_sigma_low, -1.0)
+        self.assertEqual(args.preview_sigma_high, 3.0)
 
     def test_pipeline_accepts_legacy_padding_and_zero_inclusion(self):
         with patch.object(
@@ -1381,6 +1391,7 @@ class CrossPlatformCliTests(unittest.TestCase):
 
         self.assertEqual(args.padding_policy, "legacy")
         self.assertEqual(args.zero_sample_policy, "include")
+        self.assertEqual(args.background_normalization, "none")
 
     def test_pipeline_accepts_explicit_saturation_warning_options(self):
         with patch.object(
