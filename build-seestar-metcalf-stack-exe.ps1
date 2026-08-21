@@ -1,11 +1,16 @@
 param(
-    [string]$Python = "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+    [string]$Python = "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe",
+    [string]$PyInstallerRuntime = ""
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PyInstallerVersion = "6.22.1"
-$PyInstallerPath = Join-Path $Root ".build\pyinstaller-runtime-$PyInstallerVersion"
+$PyInstallerPath = if ([string]::IsNullOrWhiteSpace($PyInstallerRuntime)) {
+    Join-Path $Root ".build\pyinstaller-runtime-$PyInstallerVersion"
+} else {
+    [System.IO.Path]::GetFullPath($PyInstallerRuntime)
+}
 $BuildRoot = Join-Path $Root "build\pyinstaller"
 $DistRoot = Join-Path $Root "build"
 
