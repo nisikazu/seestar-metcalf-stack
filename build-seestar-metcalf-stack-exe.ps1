@@ -19,14 +19,9 @@ if (-not (Test-Path -LiteralPath $Python)) {
 }
 $PyInstallerReady = $false
 if (Test-Path -LiteralPath $PyInstallerPath) {
-    $PreviousPythonPath = $env:PYTHONPATH
-    $env:PYTHONPATH = $PyInstallerPath
-    $PreviousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    & $Python -c "import PyInstaller.__main__" 2>$null
-    $PyInstallerReady = $LASTEXITCODE -eq 0
-    $ErrorActionPreference = $PreviousErrorActionPreference
-    $env:PYTHONPATH = $PreviousPythonPath
+    # The isolated runtime is built by pip --target. Checking its entry module
+    # avoids a probe subprocess whose exit status is unreliable in PowerShell.
+    $PyInstallerReady = Test-Path -LiteralPath (Join-Path $PyInstallerPath "PyInstaller\__main__.py") -PathType Leaf
 }
 if (-not $PyInstallerReady) {
     Write-Host "Installing PyInstaller build dependencies into $PyInstallerPath"
