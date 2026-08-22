@@ -215,11 +215,10 @@ Metcalf stack for compatibility.
   are excluded from the final moving-target stack.
 
 Orientation note: Siril's FITS-to-PNG export keeps the visual orientation
-expected for Seestar subframes, so the moving-target PNG preview is not flipped
-by default. FITS/WCS pixel coordinates are still 1-based FITS coordinates; when
-overlaying coordinates on an external top-left-origin image, convert the display
-y coordinate explicitly. If a comparison image requires it, pass
-`--preview-flip-vertical`.
+expected for Seestar subframes, so the moving-target PNG preview is not flipped.
+FITS/WCS pixel coordinates are still 1-based FITS coordinates; when overlaying
+coordinates on an external top-left-origin image, convert the display y
+coordinate explicitly.
 
 The CSV ephemeris format is:
 

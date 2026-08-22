@@ -269,7 +269,6 @@ def parse_args() -> argparse.Namespace:
         "--reference-frame-file",
         help="Use this FITS filename as the registration/WCS reference; overrides --reference-frame.",
     )
-    parser.add_argument("--preview-flip-vertical", action="store_true")
     parser.add_argument(
         "--preview-north-up",
         action="store_true",
@@ -1390,8 +1389,6 @@ def run_stack(
         cmd.extend(["--before", args.before])
     if args.session_gap_min is not None and not args.frame_manifest:
         cmd.extend(["--session-gap-min", str(args.session_gap_min), "--session-index", str(args.session_index)])
-    if args.preview_flip_vertical:
-        cmd.append("--preview-flip-vertical")
     if args.preview_north_up:
         cmd.append("--preview-north-up")
     if args.no_cleanup:

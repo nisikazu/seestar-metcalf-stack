@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- Correct the Pillow rotation-angle sign used by `--preview-north-up`. The previous PNG output was not aligned with celestial north for an oblique WCS. Science FITS files, WCS, and ordinary previews are unaffected.
+- Correct the WCS array-Y convention and Pillow rotation used by `--preview-north-up`. The previous PNG output was not aligned with celestial north for an oblique WCS. Science FITS files, WCS, and ordinary previews are unaffected.
 
 ## v0.8.0 - 2026-08-21
 

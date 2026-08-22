@@ -1033,22 +1033,22 @@ class PlateSolveCacheTests(unittest.TestCase):
 
 
 class AstrometryHelperTests(unittest.TestCase):
-    def test_north_up_rotation_is_zero_for_standard_north_up_wcs(self):
+    def test_north_up_rotation_is_zero_for_native_north_up_wcs(self):
         wcs = stacker.WcsModel(
             header={
                 "CD1_1": -1.0,
                 "CD1_2": 0.0,
                 "CD2_1": 0.0,
-                "CD2_2": 1.0,
+                "CD2_2": -1.0,
             }
         )
         self.assertAlmostEqual(stacker.north_up_rotation_degrees(wcs), 0.0)
 
-    def test_north_up_rotation_uses_pillow_rotation_sign(self):
+    def test_north_up_rotation_uses_native_stack_y_axis_and_pillow_rotation_sign(self):
         # This CD matrix is the solved orientation of the 220P test stack.
-        # Its north vector in a default (non-flipped) Pillow preview points
-        # down-right. Pillow's positive rotation is visually counterclockwise,
-        # so the required rotation must be negative, not its inverse.
+        # WcsModel uses the same array-row convention as the default preview.
+        # Its north vector points up-left, so Pillow's counterclockwise-positive
+        # rotation must turn it clockwise by about 50.8 degrees to reach up.
         wcs = stacker.WcsModel(
             header={
                 "CD1_1": -0.0006998436747184175,
@@ -1057,7 +1057,7 @@ class AstrometryHelperTests(unittest.TestCase):
                 "CD2_2": -0.0006992083214559111,
             }
         )
-        self.assertAlmostEqual(stacker.north_up_rotation_degrees(wcs), -129.179221096586, places=9)
+        self.assertAlmostEqual(stacker.north_up_rotation_degrees(wcs), -50.820778903414, places=9)
 
     def test_north_up_preview_is_generated_without_changing_source_preview(self):
         with tempfile.TemporaryDirectory() as temporary:

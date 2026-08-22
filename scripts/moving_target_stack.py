@@ -1418,7 +1418,6 @@ class MedianAccumulator:
 def export_preview_png(
     path: Path,
     data: np.ndarray,
-    flip_vertical: bool = False,
     low_percentile: float = 5.0,
     high_percentile: float = 99.95,
     stretch: str = "sigma",
@@ -1427,17 +1426,10 @@ def export_preview_png(
     warning_mask: np.ndarray | None = None,
     warning_color: tuple[int, int, int] = (255, 0, 0),
 ) -> None:
-    # Siril's FITS-to-PNG export keeps the visual orientation expected for
-    # Seestar subframes, so the default preview is not flipped. Use
-    # --preview-flip-vertical only when comparing against a top-left display
-    # coordinate conversion.
     if data.ndim == 2:
-        planes = [np.flipud(data) if flip_vertical else data]
+        planes = [data]
     else:
-        planes = [
-            np.flipud(data[i]) if flip_vertical else data[i]
-            for i in range(min(3, data.shape[0]))
-        ]
+        planes = [data[i] for i in range(min(3, data.shape[0]))]
     stretched = []
     for plane in planes:
         # Registration and sub-pixel shifts create exact-zero borders. They
@@ -1476,23 +1468,23 @@ def export_preview_png(
                 raise ValueError(
                     f"Warning mask shape {warning_mask.shape} does not match image shape {data.shape[-2:]}"
                 )
-            display_mask = np.flipud(warning_mask) if flip_vertical else warning_mask
-            rgb[display_mask] = np.asarray(warning_color, dtype=np.uint8)
+            rgb[warning_mask] = np.asarray(warning_color, dtype=np.uint8)
         image = Image.fromarray(rgb, mode="RGB")
     image.save(path)
 
 
-def north_up_rotation_degrees(wcs: WcsModel, flip_vertical: bool = False) -> float:
+def north_up_rotation_degrees(wcs: WcsModel) -> float:
     """Return the PIL rotation that puts increasing Declination upward."""
     cd11, cd12, cd21, cd22 = wcs.cd_matrix()
     det = cd11 * cd22 - cd12 * cd21
     if abs(det) < 1e-20:
         raise ValueError("Cannot orient preview: WCS CD matrix is singular")
-    # Inverse CD times the sky-north vector (dRA, dDec)=(0, 1).
+    # Inverse CD times the sky-north vector (dRA, dDec)=(0, 1). WcsModel
+    # returns this in the same native row coordinates used by the stack and
+    # by the preview PNG.
     pixel_x = -cd12 / det
     pixel_y = cd11 / det
-    display_y = pixel_y if flip_vertical else -pixel_y
-    current_angle = math.atan2(display_y, pixel_x)
+    current_angle = math.atan2(pixel_y, pixel_x)
     # Pillow's positive ``Image.rotate`` angles are visually counterclockwise.
     # With the display Y axis pointing downward, this *subtracts* the supplied
     # angle from a display-vector angle. Rotate the current north vector onto
@@ -2440,7 +2432,6 @@ def main() -> int:
         "--output-prefix",
         help="Output filename stem. Defaults to '<OBJECT>_<start>-<end>_<N>frames'.",
     )
-    parser.add_argument("--preview-flip-vertical", action="store_true")
     parser.add_argument(
         "--preview-north-up",
         action="store_true",
@@ -3070,7 +3061,7 @@ def main() -> int:
     north_up_star_output_png = None
     north_up_comparison_output_png = None
     if args.preview_north_up:
-        north_up_angle = north_up_rotation_degrees(wcs, args.preview_flip_vertical)
+        north_up_angle = north_up_rotation_degrees(wcs)
         north_up_output_png = work_dir / f"{output_stem}_metcalf_north_up_preview.png"
         north_up_star_output_png = work_dir / f"{output_stem}_star_north_up_preview.png"
         north_up_comparison_output_png = work_dir / f"{output_stem}_star_left_metcalf_right_north_up_preview.png"
@@ -3211,7 +3202,6 @@ def main() -> int:
     export_preview_png(
         output_png,
         stack,
-        flip_vertical=args.preview_flip_vertical,
         low_percentile=args.preview_low_percentile,
         high_percentile=args.preview_high_percentile,
         stretch=args.preview_stretch,
@@ -3221,7 +3211,6 @@ def main() -> int:
     export_preview_png(
         star_output_png,
         star_stack,
-        flip_vertical=args.preview_flip_vertical,
         low_percentile=args.preview_low_percentile,
         high_percentile=args.preview_high_percentile,
         stretch=args.preview_stretch,
@@ -3231,7 +3220,6 @@ def main() -> int:
     export_preview_png(
         comparison_output_png,
         comparison_stack,
-        flip_vertical=args.preview_flip_vertical,
         low_percentile=args.preview_low_percentile,
         high_percentile=args.preview_high_percentile,
         stretch=args.preview_stretch,
@@ -3260,7 +3248,6 @@ def main() -> int:
         export_preview_png(
             saturation_output_png,
             stack,
-            flip_vertical=args.preview_flip_vertical,
             low_percentile=args.preview_low_percentile,
             high_percentile=args.preview_high_percentile,
             stretch=args.preview_stretch,
@@ -3272,7 +3259,6 @@ def main() -> int:
         export_preview_png(
             star_saturation_output_png,
             star_stack,
-            flip_vertical=args.preview_flip_vertical,
             low_percentile=args.preview_low_percentile,
             high_percentile=args.preview_high_percentile,
             stretch=args.preview_stretch,
@@ -3284,7 +3270,6 @@ def main() -> int:
         export_preview_png(
             comparison_saturation_output_png,
             comparison_stack,
-            flip_vertical=args.preview_flip_vertical,
             low_percentile=args.preview_low_percentile,
             high_percentile=args.preview_high_percentile,
             stretch=args.preview_stretch,
@@ -3380,7 +3365,6 @@ def main() -> int:
         "preprocessing": preprocessing_plan.to_dict(),
         "registration_minpairs": args.registration_minpairs,
         "registration_seq": str(registration_seq),
-        "preview_flip_vertical": args.preview_flip_vertical,
         "preview_north_up": args.preview_north_up,
         "preview_north_up_rotation_deg": north_up_angle,
         "preview_stretch": args.preview_stretch,
