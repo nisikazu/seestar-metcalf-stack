@@ -325,6 +325,9 @@ Sirilの背景星位置合わせでは、デベイヤ済み画像と登録済み
 - `*_star_left_metcalf_right.fit`: 左に星固定、右に移動天体固定を並べたFITS。WCSは左半分に有効
 - `*_metcalf_preview.png`、`*_star_preview.png`: 表示用ストレッチ画像。測光には使用しません
 - `*_metcalf_north_up_preview.png`、`*_star_north_up_preview.png`、`*_star_left_metcalf_right_north_up_preview.png`: `--preview-north-up`指定時に、プレートソルブしたWCSを使って天の北を上に回転した表示用PNG。元のFITSと通常プレビューは変更しません
+- `*_metcalf_sun_pa_left_preview.png`: `--preview-sun-pa-left`指定時に、太陽方向を左、反太陽方向を右に置いた移動天体固定の表示用PNG。通常、ダストテイルを右向きに表示できます
+- `*_annotated_preview.png`: `--preview-annotate`指定時に作る、N/E方位マークと太陽方向矢印を重ねた表示用PNG。北上または太陽左と併用した場合は、その回転済み画像へ重ねます
+- `*_annotation_overlay.png`: `--preview-annotate`指定時に作る、N/E方位マークと太陽方向矢印だけの小型・透過RGBA PNG。元の画像サイズではなく、`--annotate-size`で指定した描画半径と保護余白だけを持つため、資料や投稿画像へ任意の位置に重ねられます
 - `*_metcalf_saturation_warning.png`、`*_star_saturation_warning.png`: `--saturation-warning enable` 時だけ作る飽和警告PNG
 - `*_star_left_metcalf_right_saturation_warning.png`: 星固定と移動天体固定の飽和警告を並べたPNG
 - `*_shifts.csv`: 各フレームの星位置合わせ量と天体移動量
@@ -335,6 +338,18 @@ Sirilの背景星位置合わせでは、デベイヤ済み画像と登録済み
 
 ```bat
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --preview-north-up
+```
+
+太陽方向を左にしてダストテイルを右向きに表示したい場合は、`--preview-sun-pa-left`を使います。通常はJPL Horizonsから、基準フレーム時刻・対象座標・観測地に対する太陽の位置角を取得し、移動天体固定FITSへ`SUN_PA`（北から東回りの太陽方向）と`ASUN_PA`（反太陽方向）を記録します。通信できない場合でも通常のスタックは完走しますが、太陽方向を使う表示オプションは利用できません。
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --preview-sun-pa-left
+```
+
+N/Eと太陽方向を表示へ書き込むには`--preview-annotate`を追加します。既定は左上、半径60pxです。`--annotate-at UL|UR|LL|LR`で注釈付き表示PNGの角を、`--annotate-size 120`のように描画半径を変えられます。併せて出力される`*_annotation_overlay.png`は角指定に依存しない小型の透過PNGなので、画像編集ソフトや資料側で好きな場所に配置できます。
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --preview-sun-pa-left --preview-annotate --annotate-at LR --annotate-size 60
 ```
 
 位置合わせ診断表は、index、元ファイル名、基準フレームか、採用/除外、除外理由、FWHM、weighted FWHM、roundness、検出星数、初期対応星数、フィッティング後の対応星数、inlier率、背景星位置合わせのX/Y移動量・回転角・倍率を記録します。`fwhm_px`はSirilの代表FWHM、`weighted_fwhm_px`はSirilの星品質を考慮したweighted FWHMです。値が小さいほど星像は鋭く、roundnessは1に近いほど丸い星像です。

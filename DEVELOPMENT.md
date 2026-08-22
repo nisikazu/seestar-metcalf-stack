@@ -2,6 +2,12 @@
 
 利用者に影響する変更は[変更履歴](CHANGELOG.md)と[改訂内容とトラブルシュート](TROUBLESHOOTING.md)にまとめています。この文書は実装判断、検証、引き継ぎを目的とした開発者向け資料です。
 
+## 2026-08-22: FITSプレビュー実験ツール
+
+- `scripts/fits_preview.py`へ表示PNGの伸長・回転処理を集約し、スタッカーと開発者ツールが共有する。科学用FITS、WCS、スタック配列を変更する処理は置かない。
+- `developer-tools/fits-preview/create_fits_preview.py`は1枚のFITSを同じ既定の`-1 sigma`〜`+3 sigma`伸長でPNGへ変換する最小CLIである。N/E方位マーカーや太陽方向などの表示専用オーバーレイはこの場所で実験する。
+- `--preview-annotate`では、注釈を合成した表示PNGに加え、`*_annotation_overlay.png`をRGBAで出力する。後者は`--annotate-size`の半径で描いた小型の独立スプライトで、角指定に依存しない。合成先の配置は利用者側が自由に決める。描画ロジックは`_draw_annotation()`だけに置き、合成PNGと透過PNGで方位・太陽方向・線幅がずれないようにする。
+
 ## 2026-08-20: 時間変化する背景の面モデル補正（開発中）
 
 - `--background-normalization`に`plane`と`quadratic`を追加した。`offset`、`plane`、`quadratic`の全モードで、各フレームの推定背景を演算中に完全に差し引いて0付近へ置く。スタック後には、採用フレームのRGB局所DC値を算術平均した一定値だけを加える。これは負値を保存形式へ渡さないための表現レンジ対策であり、共通背景面ではない。

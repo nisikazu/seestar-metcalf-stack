@@ -511,6 +511,16 @@ and combine method, for example:
   `*_star_left_metcalf_right_north_up_preview.png`: display PNGs rotated with
   the plate-solved WCS so celestial north is up, created by
   `--preview-north-up`; the FITS files and ordinary previews are unchanged
+- `*_metcalf_sun_pa_left_preview.png`: moving-target preview with the solar
+  direction at left and the anti-solar direction at right, created by
+  `--preview-sun-pa-left`; this usually puts a dust tail on the right
+- `*_annotated_preview.png`: display preview with N/E orientation sticks and a
+  Sun-direction arrow, created by `--preview-annotate`; it is drawn after a
+  requested north-up or Sun-left display rotation
+- `*_annotation_overlay.png`: compact transparent RGBA PNG containing only the
+  same N/E/Sun mark. Its physical marker radius is `--annotate-size`, and it
+  has only protective padding, so it can be placed freely in a presentation or
+  image editor
 - `*_metcalf_saturation_warning.png`, `*_star_saturation_warning.png`: optional
   warning previews created by `--saturation-warning enable`
 - `*_star_left_metcalf_right_saturation_warning.png`: side-by-side warning
@@ -525,6 +535,28 @@ solution or valid cached WCS is required.
 
 ```bat
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --preview-north-up
+```
+
+Use `--preview-sun-pa-left` to put the solar direction at left and show a dust
+tail toward the right. The normal pipeline queries JPL Horizons at the reference
+time and writes `SUN_PA` (solar position angle, north through east) and
+`ASUN_PA` (anti-solar direction) into the moving-target FITS. A solar-query
+failure does not stop the ordinary stack, but solar-direction preview options
+then cannot be created.
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --preview-sun-pa-left
+```
+
+Add `--preview-annotate` to draw N/E sticks and a Sun arrow. Its defaults are
+the upper-left corner and a 60-pixel radius. Set the corner of the annotated
+preview with `--annotate-at UL|UR|LL|LR`, and change the physical radius with,
+for example, `--annotate-size 120`. The accompanying
+`*_annotation_overlay.png` is a compact transparent sprite independent of the
+corner setting, so place it anywhere when composing a figure.
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --preview-sun-pa-left --preview-annotate --annotate-at LR --annotate-size 60
 ```
 
 The registration diagnostics table records the index, source filename,

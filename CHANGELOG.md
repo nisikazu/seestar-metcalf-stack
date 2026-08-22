@@ -4,6 +4,13 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## Unreleased
+
+### 追加
+
+- `--preview-sun-pa-left`で、JPL Horizonsから求めた太陽方向を左に置く移動天体固定プレビューを追加しました。通常、反太陽方向のダストテイルを右向きに表示できます。移動天体固定FITSには`SUN_PA`、`ASUN_PA`、太陽座標と観測地情報も記録します。
+- `--preview-annotate`、`--annotate-at UL|UR|LL|LR`、`--annotate-size`で、N/E方位マークと太陽方向矢印をプレビューへ描けるようにしました。注釈付きPNGに加え、任意配置用の小型透過`*_annotation_overlay.png`も出力します。
+
 ## v0.8.1 - 2026-08-22
 
 ### 修正

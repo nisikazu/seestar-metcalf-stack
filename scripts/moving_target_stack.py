@@ -32,8 +32,10 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from fits_preview import annotate_preview_png, export_preview_png, rotate_preview_png, write_annotation_overlay_png
 from sharpcap_stacklog import load_manifest
 from siril_preprocessing import PreprocessingPlan, build_sequence_preprocess_script, stage_preprocessing_files
+from sun_pa import fetch_sun_position, observer_center_from_ephemeris_csv, sun_pa_fits_header
 
 
 REPO_ROOT = (
@@ -516,6 +518,35 @@ def format_card(key: str, value: object | None = None, comment: str | None = Non
         if comment:
             text += f" / {comment}"
     return text[:80].ljust(80)
+
+
+def update_fits_header_cards(path: Path, updates: dict[str, tuple[object, str]]) -> None:
+    """Update primary-HDU keywords in place without moving the FITS data."""
+    _header, cards, data_offset = read_fits_header(path)
+    replacement_keys = {key.upper() for key in updates}
+    end_index = next((index for index, card in enumerate(cards) if card[:8].strip() == "END"), None)
+    if end_index is None:
+        raise ValueError(f"FITS END card not found in {path}")
+    kept = [card for card in cards[:end_index] if card[:8].strip().upper() not in replacement_keys]
+    kept.extend(format_card(key, value, comment) for key, (value, comment) in updates.items())
+    kept.append("END".ljust(80))
+    header_capacity = data_offset // 80
+    if len(kept) > header_capacity:
+        raise ValueError(f"FITS header has no room for {len(updates)} additional cards: {path}")
+    encoded = "".join(kept).encode("ascii", errors="replace").ljust(data_offset, b" ")
+    with path.open("r+b") as handle:
+        handle.write(encoded)
+
+
+def sun_pa_header_comments(values: dict[str, object]) -> dict[str, tuple[object, str]]:
+    return {
+        "SUN_PA": (values["SUN_PA"], "deg; Sun PA from north through east"),
+        "ASUN_PA": (values["ASUN_PA"], "deg; anti-solar PA from north through east"),
+        "SUNRA": (values["SUNRA"], "deg; Horizons solar RA at DATE-OBS"),
+        "SUNDEC": (values["SUNDEC"], "deg; Horizons solar Dec at DATE-OBS"),
+        "SUNCENTR": (values["SUNCENTR"], "Horizons observer center"),
+        "SUNSRC": (values["SUNSRC"], "solar ephemeris source"),
+    }
 
 
 def image_shape_chw(data: np.ndarray) -> tuple[int, int, int, np.ndarray]:
@@ -1415,64 +1446,6 @@ class MedianAccumulator:
         return False
 
 
-def export_preview_png(
-    path: Path,
-    data: np.ndarray,
-    low_percentile: float = 5.0,
-    high_percentile: float = 99.95,
-    stretch: str = "sigma",
-    sigma_low: float = -1.0,
-    sigma_high: float = 3.0,
-    warning_mask: np.ndarray | None = None,
-    warning_color: tuple[int, int, int] = (255, 0, 0),
-) -> None:
-    if data.ndim == 2:
-        planes = [data]
-    else:
-        planes = [data[i] for i in range(min(3, data.shape[0]))]
-    stretched = []
-    for plane in planes:
-        # Registration and sub-pixel shifts create exact-zero borders. They
-        # are display padding, not samples of the sky background, so exclude
-        # them only from the preview stretch calculation.
-        finite = plane[np.isfinite(plane) & (plane != 0.0)]
-        if finite.size == 0:
-            scaled = np.zeros_like(plane, dtype=np.uint8)
-        else:
-            if stretch == "percentile":
-                lo, hi = np.percentile(finite, [low_percentile, high_percentile])
-            elif stretch == "sigma":
-                # Preview scaling intentionally retains bright stars and the
-                # sky variation. Clipping them here would make noise dominate.
-                center = float(np.mean(finite))
-                standard_deviation = float(np.std(finite))
-                if not math.isfinite(standard_deviation) or standard_deviation <= 0.0:
-                    standard_deviation = 1.0
-                lo = center + sigma_low * standard_deviation
-                hi = center + sigma_high * standard_deviation
-            else:
-                raise ValueError(f"Unsupported preview stretch: {stretch}")
-            if hi <= lo:
-                hi = lo + 1.0
-            scaled = np.clip((plane - lo) / (hi - lo), 0.0, 1.0)
-            scaled = (scaled * 255.0 + 0.5).astype(np.uint8)
-        stretched.append(scaled)
-    if len(stretched) == 1 and warning_mask is None:
-        image = Image.fromarray(stretched[0], mode="L")
-    else:
-        while len(stretched) < 3:
-            stretched.append(stretched[-1])
-        rgb = np.stack(stretched[:3], axis=2)
-        if warning_mask is not None:
-            if warning_mask.shape != data.shape[-2:]:
-                raise ValueError(
-                    f"Warning mask shape {warning_mask.shape} does not match image shape {data.shape[-2:]}"
-                )
-            rgb[warning_mask] = np.asarray(warning_color, dtype=np.uint8)
-        image = Image.fromarray(rgb, mode="RGB")
-    image.save(path)
-
-
 def north_up_rotation_degrees(wcs: WcsModel) -> float:
     """Return the PIL rotation that puts increasing Declination upward."""
     cd11, cd12, cd21, cd22 = wcs.cd_matrix()
@@ -1493,18 +1466,41 @@ def north_up_rotation_degrees(wcs: WcsModel) -> float:
     return (raw_angle + 180.0) % 360.0 - 180.0
 
 
-def rotate_preview_png(source: Path, destination: Path, angle_degrees: float) -> None:
-    """Rotate an already-stretched preview without changing its FITS data.
+def position_angle_rotation_degrees(
+    wcs: WcsModel,
+    reference_dec_deg: float,
+    position_angle_deg: float,
+    target_display_angle_deg: float,
+) -> float:
+    """Return the PIL rotation that maps a sky PA to a display direction.
 
-    The source PNG is deliberately stretched before this function is called.
-    Therefore the black fill pixels introduced by ``expand=True`` cannot
-    affect the brightness range; north-up and ordinary previews share the
-    same display scaling.
+    Position angle is measured from celestial north through east. The WCS CD
+    matrix uses RA/Dec coordinate increments, so the RA component is divided
+    by cos(Dec) before the vector is transformed back to image coordinates.
     """
-    with Image.open(source) as source_image:
-        image = source_image.convert("RGB") if source_image.mode not in ("L", "RGB") else source_image.copy()
-    fill = 0 if image.mode == "L" else (0, 0, 0)
-    image.rotate(angle_degrees, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=fill).save(destination)
+    cd11, cd12, cd21, cd22 = wcs.cd_matrix()
+    determinant = cd11 * cd22 - cd12 * cd21
+    if abs(determinant) < 1e-20:
+        raise ValueError("Cannot orient preview: WCS CD matrix is singular")
+    cos_dec = math.cos(math.radians(reference_dec_deg))
+    if abs(cos_dec) < 1e-12:
+        raise ValueError("Cannot orient preview at a celestial pole")
+    pa_radians = math.radians(position_angle_deg)
+    # Unit local tangent vector expressed as coordinate deltas (dRA, dDec).
+    world_ra = math.sin(pa_radians) / cos_dec
+    world_dec = math.cos(pa_radians)
+    pixel_x = (cd22 * world_ra - cd12 * world_dec) / determinant
+    pixel_y = (-cd21 * world_ra + cd11 * world_dec) / determinant
+    current_angle = math.atan2(pixel_y, pixel_x)
+    # PIL positive rotations subtract from the display-vector angle because
+    # the display Y axis points down. Rotate current onto the requested angle.
+    rotation = math.degrees(current_angle - target_display_angle_deg)
+    return (rotation + 180.0) % 360.0 - 180.0
+
+
+def sun_pa_left_rotation_degrees(wcs: WcsModel, reference_dec_deg: float, sun_pa_deg: float) -> float:
+    """Return the display rotation that places the Sun direction at image left."""
+    return position_angle_rotation_degrees(wcs, reference_dec_deg, sun_pa_deg, math.pi)
 
 
 def rotate_comparison_preview_png(
@@ -2343,6 +2339,15 @@ def main() -> int:
         help="Bayer pattern for SharpCap RAW PNG/TIFF when metadata is unavailable.",
     )
     parser.add_argument("--ephemeris-csv", required=True, type=Path)
+    parser.add_argument(
+        "--sun-pa",
+        choices=("auto", "off"),
+        default="auto",
+        help=(
+            "Write SUN_PA/ASUN_PA from a Horizons solar query at the reference DATE-OBS when "
+            "the ephemeris CSV records its observer center. Defaults to auto."
+        ),
+    )
     parser.add_argument("--wcs-fits", type=Path)
     parser.add_argument("--astrometry-json", type=Path)
     parser.add_argument("--work-dir", type=Path, help="Use this exact work directory instead of creating one under --work-root")
@@ -2437,6 +2442,28 @@ def main() -> int:
         action="store_true",
         help="Add preview PNGs rotated using the solved WCS so celestial north is up.",
     )
+    parser.add_argument(
+        "--preview-sun-pa-left",
+        action="store_true",
+        help="Add a Metcalf preview PNG rotated using WCS so the SUN_PA direction is left.",
+    )
+    parser.add_argument(
+        "--preview-annotate",
+        action="store_true",
+        help="Add N/E orientation sticks and a Sun-direction arrow to the selected Metcalf display preview.",
+    )
+    parser.add_argument(
+        "--annotate-at",
+        choices=("UL", "UR", "LL", "LR"),
+        default="UL",
+        help="Corner for --preview-annotate: UL, UR, LL, or LR. Defaults to UL.",
+    )
+    parser.add_argument(
+        "--annotate-size",
+        type=float,
+        default=60.0,
+        help="Annotation radius in pixels for --preview-annotate. Defaults to 60.",
+    )
     parser.add_argument("--output-bitpix", choices=("float32", "uint16"), default="float32")
     parser.add_argument("--uint16-scale", choices=("none", "global", "per-channel"), default="none")
     parser.add_argument("--scale-low-percentile", type=float, default=0.0)
@@ -2485,6 +2512,10 @@ def main() -> int:
         args.background_normalization = "none" if args.padding_policy == "legacy" else "quadratic"
     if args.preview_sigma_high <= args.preview_sigma_low:
         parser.error("--preview-sigma-high must be greater than --preview-sigma-low")
+    if args.preview_north_up and args.preview_sun_pa_left:
+        parser.error("choose either --preview-north-up or --preview-sun-pa-left, not both")
+    if args.annotate_size <= 0.0:
+        parser.error("--annotate-size must be positive")
     if args.registration_minpairs < 1:
         parser.error("--registration-minpairs must be at least 1")
     if args.background_normalization != "none" and args.padding_policy != "valid":
@@ -2789,6 +2820,29 @@ def main() -> int:
     reference_time = parse_time(reference.header["DATE-OBS"])
     reference_target = interpolate_ephemeris(ephemeris, reference_time)
     reference_x, reference_y = wcs.world_to_pixel(reference_target.ra_deg, reference_target.dec_deg)
+    sun_header: dict[str, object] = {}
+    sun_pa_status = "off"
+    if args.sun_pa == "auto":
+        observer_center = observer_center_from_ephemeris_csv(args.ephemeris_csv)
+        if observer_center is None:
+            sun_pa_status = "unavailable-observer"
+            print(
+                "SUN_PA not written: the ephemeris CSV does not record a usable Horizons observer center.",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                sun = fetch_sun_position(reference_time, observer_center, verbose=args.verbose)
+                sun_header = sun_pa_fits_header(reference_target.ra_deg, reference_target.dec_deg, sun)
+                sun_pa_status = "written"
+                if args.verbose:
+                    print(
+                        f"SUN_PA={sun_header['SUN_PA']:.5f} deg "
+                        f"(anti-solar={sun_header['ASUN_PA']:.5f} deg; {sun_header['SUNCENTR']})"
+                    )
+            except Exception as exc:
+                sun_pa_status = f"query-failed: {exc.__class__.__name__}"
+                print(f"SUN_PA not written: Horizons solar query failed: {exc}", file=sys.stderr)
     background_output_levels: np.ndarray | None = None
     background_models_by_index: dict[int, BackgroundModel] = {}
     background_corrections_by_index: dict[int, np.ndarray] = {}
@@ -3065,6 +3119,43 @@ def main() -> int:
         north_up_output_png = work_dir / f"{output_stem}_metcalf_north_up_preview.png"
         north_up_star_output_png = work_dir / f"{output_stem}_star_north_up_preview.png"
         north_up_comparison_output_png = work_dir / f"{output_stem}_star_left_metcalf_right_north_up_preview.png"
+    sun_pa_left_angle = None
+    sun_pa_left_output_png = None
+    if args.preview_sun_pa_left:
+        if "SUN_PA" not in sun_header:
+            raise RuntimeError(
+                "--preview-sun-pa-left requires a Horizons solar position. "
+                "Use an ephemeris CSV with observer metadata and do not set --sun-pa off."
+            )
+        sun_pa_left_angle = sun_pa_left_rotation_degrees(
+            wcs,
+            reference_target.dec_deg,
+            float(sun_header["SUN_PA"]),
+        )
+        sun_pa_left_output_png = work_dir / f"{output_stem}_metcalf_sun_pa_left_preview.png"
+    annotated_output_png = None
+    annotation_overlay_png = None
+    annotation_rotation = 0.0
+    annotation_source_png = output_png
+    if args.preview_annotate:
+        if "SUN_PA" not in sun_header:
+            raise RuntimeError(
+                "--preview-annotate requires a Horizons solar position. "
+                "Use an ephemeris CSV with observer metadata and do not set --sun-pa off."
+            )
+        if args.preview_north_up:
+            annotation_rotation = north_up_angle if north_up_angle is not None else 0.0
+            annotation_source_png = north_up_output_png if north_up_output_png is not None else output_png
+            annotated_output_png = work_dir / f"{output_stem}_metcalf_north_up_annotated_preview.png"
+            annotation_overlay_png = work_dir / f"{output_stem}_metcalf_north_up_annotation_overlay.png"
+        elif args.preview_sun_pa_left:
+            annotation_rotation = sun_pa_left_angle if sun_pa_left_angle is not None else 0.0
+            annotation_source_png = sun_pa_left_output_png if sun_pa_left_output_png is not None else output_png
+            annotated_output_png = work_dir / f"{output_stem}_metcalf_sun_pa_left_annotated_preview.png"
+            annotation_overlay_png = work_dir / f"{output_stem}_metcalf_sun_pa_left_annotation_overlay.png"
+        else:
+            annotated_output_png = work_dir / f"{output_stem}_metcalf_annotated_preview.png"
+            annotation_overlay_png = work_dir / f"{output_stem}_metcalf_annotation_overlay.png"
     saturation_output_png = (
         work_dir / f"{output_stem}_metcalf_saturation_warning.png" if saturation_enabled else None
     )
@@ -3123,6 +3214,7 @@ def main() -> int:
         "REFMODE": reference_mode,
         "REFINDEX": reference_index,
         "MTUNITS": "ADU",
+        **sun_header,
         **background_header,
     }
     star_extra_header = {
@@ -3238,6 +3330,37 @@ def main() -> int:
             north_up_angle,
         )
         print(f"[preview] North-up PNGs written (rotation={north_up_angle:.3f} deg)", flush=True)
+    if args.preview_sun_pa_left:
+        if sun_pa_left_angle is None or sun_pa_left_output_png is None:
+            raise RuntimeError("Sun-PA-left preview path was not initialized")
+        rotate_preview_png(output_png, sun_pa_left_output_png, sun_pa_left_angle)
+        print(
+            f"[preview] Sun-PA-left PNG written (rotation={sun_pa_left_angle:.3f} deg; "
+            f"SUN_PA={sun_header['SUN_PA']:.3f} deg)",
+            flush=True,
+        )
+    if args.preview_annotate:
+        if annotated_output_png is None or annotation_overlay_png is None:
+            raise RuntimeError("Annotated preview path was not initialized")
+        annotate_preview_png(
+            annotation_source_png,
+            annotated_output_png,
+            wcs.cd_matrix(),
+            reference_target.dec_deg,
+            float(sun_header["SUN_PA"]),
+            image_rotation_degrees=annotation_rotation,
+            corner=args.annotate_at,
+            radius_px=args.annotate_size,
+        )
+        write_annotation_overlay_png(
+            annotation_overlay_png,
+            wcs.cd_matrix(),
+            reference_target.dec_deg,
+            float(sun_header["SUN_PA"]),
+            image_rotation_degrees=annotation_rotation,
+            radius_px=args.annotate_size,
+        )
+        print(f"[preview] Annotated PNG and transparent overlay written at {args.annotate_at}", flush=True)
     if saturation_enabled:
         if metcalf_saturation_mask is None or star_saturation_mask is None:
             raise RuntimeError("Saturation warning masks were not initialized")
@@ -3367,6 +3490,11 @@ def main() -> int:
         "registration_seq": str(registration_seq),
         "preview_north_up": args.preview_north_up,
         "preview_north_up_rotation_deg": north_up_angle,
+        "preview_sun_pa_left": args.preview_sun_pa_left,
+        "preview_sun_pa_left_rotation_deg": sun_pa_left_angle,
+        "preview_annotate": args.preview_annotate,
+        "annotate_at": args.annotate_at if args.preview_annotate else None,
+        "annotate_size_px": args.annotate_size if args.preview_annotate else None,
         "preview_stretch": args.preview_stretch,
         "preview_sigma_low": args.preview_sigma_low,
         "preview_sigma_high": args.preview_sigma_high,
@@ -3435,6 +3563,11 @@ def main() -> int:
             "x_1based": reference_x,
             "y_1based": reference_y,
         },
+        "sun_position_angle": {
+            "mode": args.sun_pa,
+            "status": sun_pa_status,
+            **({"sun_pa_deg": sun_header["SUN_PA"], "anti_solar_pa_deg": sun_header["ASUN_PA"]} if sun_header else {}),
+        },
         "linear_units": "ADU",
         "outputs": {
             "fits": str(output_fits),
@@ -3448,6 +3581,9 @@ def main() -> int:
             "north_up_preview_png": str(north_up_output_png) if north_up_output_png else None,
             "north_up_star_preview_png": str(north_up_star_output_png) if north_up_star_output_png else None,
             "north_up_comparison_preview_png": str(north_up_comparison_output_png) if north_up_comparison_output_png else None,
+            "sun_pa_left_preview_png": str(sun_pa_left_output_png) if sun_pa_left_output_png else None,
+            "annotated_preview_png": str(annotated_output_png) if annotated_output_png else None,
+            "annotation_overlay_png": str(annotation_overlay_png) if annotation_overlay_png else None,
             "metcalf_saturation_warning_png": (
                 str(saturation_output_png) if saturation_output_png else None
             ),

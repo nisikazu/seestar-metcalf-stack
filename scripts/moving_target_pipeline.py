@@ -274,7 +274,35 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Add preview PNGs rotated using the solved WCS so celestial north is up.",
     )
+    parser.add_argument(
+        "--preview-sun-pa-left",
+        action="store_true",
+        help="Add a Metcalf preview PNG rotated using WCS so the SUN_PA direction is left.",
+    )
+    parser.add_argument(
+        "--preview-annotate",
+        action="store_true",
+        help="Add N/E orientation sticks and a Sun-direction arrow to the selected Metcalf display preview.",
+    )
+    parser.add_argument(
+        "--annotate-at",
+        choices=("UL", "UR", "LL", "LR"),
+        default="UL",
+        help="Corner for --preview-annotate: UL, UR, LL, or LR. Defaults to UL.",
+    )
+    parser.add_argument(
+        "--annotate-size",
+        type=float,
+        default=60.0,
+        help="Annotation radius in pixels for --preview-annotate. Defaults to 60.",
+    )
     parser.add_argument("--output-bitpix", choices=("float32", "uint16"), default="uint16")
+    parser.add_argument(
+        "--sun-pa",
+        choices=("auto", "off"),
+        default="auto",
+        help="Write SUN_PA/ASUN_PA into the moving-target FITS when its Horizons observer metadata is available.",
+    )
     parser.add_argument("--uint16-scale", choices=("none", "global", "per-channel"), default="none")
     parser.add_argument("--scale-low-percentile", type=float, default=0.0)
     parser.add_argument("--scale-high-percentile", type=float, default=100.0)
@@ -1341,6 +1369,8 @@ def run_stack(
             args.reference_frame,
             "--output-bitpix",
             args.output_bitpix,
+            "--sun-pa",
+            args.sun_pa,
             "--uint16-scale",
             args.uint16_scale,
             "--scale-low-percentile",
@@ -1391,6 +1421,12 @@ def run_stack(
         cmd.extend(["--session-gap-min", str(args.session_gap_min), "--session-index", str(args.session_index)])
     if args.preview_north_up:
         cmd.append("--preview-north-up")
+    if args.preview_sun_pa_left:
+        cmd.append("--preview-sun-pa-left")
+    if args.preview_annotate:
+        cmd.extend(
+            ["--preview-annotate", "--annotate-at", args.annotate_at, "--annotate-size", str(args.annotate_size)]
+        )
     if args.no_cleanup:
         cmd.append("--no-cleanup")
     if args.include_failed_frames:
