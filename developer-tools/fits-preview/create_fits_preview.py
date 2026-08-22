@@ -41,8 +41,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Rotate the display PNG from FITS WCS so the SUN_PA direction is left.",
     )
-    parser.add_argument("--annotate", "--preview-annotate", dest="annotate", action="store_true")
-    parser.add_argument("--annotate-at", choices=("UL", "UR", "LL", "LR"), default="UL")
+    parser.add_argument("--preview-at", choices=("none", "UL", "UR", "LL", "LR"), default="none")
     parser.add_argument("--annotate-size", type=float, default=60.0, help="Annotation radius in pixels. Defaults to 60.")
     return parser.parse_args()
 
@@ -97,12 +96,12 @@ def main() -> int:
                 raise ValueError("--sun-pa-left requires numeric SUN_PA and MTREFDEC (or CRVAL2) FITS headers") from exc
             rotation = sun_pa_left_rotation_degrees(WcsModel(header=image.header), reference_dec, sun_pa)
             rotate_preview_png(intermediate, output, rotation)
-        if args.annotate:
+        if args.preview_at != "none":
             try:
                 sun_pa = float(image.header["SUN_PA"])
                 reference_dec = float(image.header.get("MTREFDEC", image.header["CRVAL2"]))
             except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError("--annotate requires numeric SUN_PA and MTREFDEC (or CRVAL2) FITS headers") from exc
+                raise ValueError("--preview-at requires numeric SUN_PA and MTREFDEC (or CRVAL2) FITS headers") from exc
             wcs = WcsModel(header=image.header)
             annotate_preview_png(
                 output,
@@ -111,7 +110,7 @@ def main() -> int:
                 reference_dec,
                 sun_pa,
                 image_rotation_degrees=rotation or 0.0,
-                corner=args.annotate_at,
+                corner=args.preview_at,
                 radius_px=args.annotate_size,
             )
             overlay_output = output.with_name(f"{output.stem}_annotation_overlay.png")
@@ -133,8 +132,8 @@ def main() -> int:
     if rotation is not None:
         orientation = "north-up" if args.north_up else "sun-pa-left"
         print(f"{orientation} rotation: {rotation:.6f} deg")
-    if args.annotate:
-        print(f"Annotation: N/E/Sun at {args.annotate_at}; radius={args.annotate_size:g}px")
+    if args.preview_at != "none":
+        print(f"Annotation: N/E/Sun at {args.preview_at}; radius={args.annotate_size:g}px")
         print(f"Overlay: {overlay_output}")
     return 0
 

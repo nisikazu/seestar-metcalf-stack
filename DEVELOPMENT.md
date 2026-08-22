@@ -6,7 +6,7 @@
 
 - `scripts/fits_preview.py`へ表示PNGの伸長・回転処理を集約し、スタッカーと開発者ツールが共有する。科学用FITS、WCS、スタック配列を変更する処理は置かない。
 - `developer-tools/fits-preview/create_fits_preview.py`は1枚のFITSを同じ既定の`-1 sigma`〜`+3 sigma`伸長でPNGへ変換する最小CLIである。N/E方位マーカーや太陽方向などの表示専用オーバーレイはこの場所で実験する。
-- `--preview-annotate`では、注釈を合成した表示PNGに加え、`*_annotation_overlay.png`をRGBAで出力する。後者は`--annotate-size`の半径で描いた小型の独立スプライトで、角指定に依存しない。合成先の配置は利用者側が自由に決める。描画ロジックは`_draw_annotation()`だけに置き、合成PNGと透過PNGで方位・太陽方向・線幅がずれないようにする。
+- `--preview-at UL|UR|LL|LR`では、注釈を合成した表示PNGに加え、`*_annotation_overlay.png`をRGBAで出力する。既定は`UL`で、`none`なら注釈を作らない。後者は`--annotate-size`の半径で描いた小型の独立スプライトで、角指定に依存しない。合成先の配置は利用者側が自由に決める。描画ロジックは`_draw_annotation()`だけに置き、合成PNGと透過PNGで方位・太陽方向・線幅がずれないようにする。
 
 ## 2026-08-20: 時間変化する背景の面モデル補正（開発中）
 

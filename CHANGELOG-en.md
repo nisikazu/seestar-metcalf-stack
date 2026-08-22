@@ -4,6 +4,13 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.8.2 - 2026-08-23
+
+### Added
+
+- Add `--preview-sun-pa-left`, which places the JPL Horizons solar direction at left in a moving-target preview. This normally puts an anti-solar dust tail to the right. Moving-target FITS files now record `SUN_PA`, `ASUN_PA`, solar coordinates, and observer information.
+- Add `--preview-at UL|UR|LL|LR` and `--annotate-size` to draw N/E orientation sticks and a Sun-direction arrow into display previews. `--preview-at UL` is the default. Alongside the annotated preview, the stacker writes a compact transparent `*_annotation_overlay.png` for free placement in a figure; use `--preview-at none` to omit annotations.
+
 ## v0.8.1 - 2026-08-22
 
 ### Fixed

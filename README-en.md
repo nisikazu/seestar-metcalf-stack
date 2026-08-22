@@ -515,7 +515,7 @@ and combine method, for example:
   direction at left and the anti-solar direction at right, created by
   `--preview-sun-pa-left`; this usually puts a dust tail on the right
 - `*_annotated_preview.png`: display preview with N/E orientation sticks and a
-  Sun-direction arrow, created by `--preview-annotate`; it is drawn after a
+  Sun-direction arrow, created by `--preview-at UL|UR|LL|LR`; it is drawn after a
   requested north-up or Sun-left display rotation
 - `*_annotation_overlay.png`: compact transparent RGBA PNG containing only the
   same N/E/Sun mark. Its physical marker radius is `--annotate-size`, and it
@@ -548,15 +548,16 @@ then cannot be created.
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --preview-sun-pa-left
 ```
 
-Add `--preview-annotate` to draw N/E sticks and a Sun arrow. Its defaults are
-the upper-left corner and a 60-pixel radius. Set the corner of the annotated
-preview with `--annotate-at UL|UR|LL|LR`, and change the physical radius with,
-for example, `--annotate-size 120`. The accompanying
+N/E sticks and a Sun arrow are created at the upper-left corner by default
+(`--preview-at UL`) with a 60-pixel radius. Set the corner of the annotated
+preview with `--preview-at UR|LL|LR`, change the physical radius with, for
+example, `--annotate-size 120`, or use `--preview-at none` to omit annotations.
+The accompanying
 `*_annotation_overlay.png` is a compact transparent sprite independent of the
 corner setting, so place it anywhere when composing a figure.
 
 ```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\frames" --preview-sun-pa-left --preview-annotate --annotate-at LR --annotate-size 60
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --preview-sun-pa-left --preview-at LR --annotate-size 60
 ```
 
 The registration diagnostics table records the index, source filename,

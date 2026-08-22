@@ -31,15 +31,16 @@ Use `--sun-pa-left` (or `--preview-sun-pa-left`) with a Metcalf FITS that has
 This puts the anti-solar direction, where a dust tail usually extends, to the
 right. It uses the FITS WCS and is mutually exclusive with `--north-up`.
 
-Add `--annotate` (or `--preview-annotate`) to write N/E sticks and a pale-yellow
-Sun arrow into the PNG. Use `--annotate-at UL|UR|LL|LR` to select its corner and
-`--annotate-size 60` to set its radius in pixels; the defaults are `UL` and 60.
+Use `--preview-at UL|UR|LL|LR` to write N/E sticks and a pale-yellow Sun arrow
+into the PNG, and `--annotate-size 60` to set its radius in pixels. This
+developer tool defaults to `--preview-at none` because it can preview arbitrary
+FITS files that do not have solar headers.
 The FITS must have numeric `SUN_PA` and `MTREFDEC` (or `CRVAL2`) headers.
 Annotation is applied after any requested display rotation. This also writes a
 compact `*_annotation_overlay.png`: an RGBA PNG containing only the N/E/Sun
 marks, with every other pixel fully transparent. Its marker uses the requested
 radius (`--annotate-size`), is centered in a small square with protective
-padding, and is independent of `--annotate-at`; place it anywhere when
+padding, and is independent of `--preview-at`; place it anywhere when
 compositing in another presentation tool.
 
 This is the intended experimental home for further display-only additions. It

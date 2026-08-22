@@ -2448,21 +2448,16 @@ def main() -> int:
         help="Add a Metcalf preview PNG rotated using WCS so the SUN_PA direction is left.",
     )
     parser.add_argument(
-        "--preview-annotate",
-        action="store_true",
-        help="Add N/E orientation sticks and a Sun-direction arrow to the selected Metcalf display preview.",
-    )
-    parser.add_argument(
-        "--annotate-at",
-        choices=("UL", "UR", "LL", "LR"),
+        "--preview-at",
+        choices=("none", "UL", "UR", "LL", "LR"),
         default="UL",
-        help="Corner for --preview-annotate: UL, UR, LL, or LR. Defaults to UL.",
+        help="Draw N/E and Sun annotations at this preview corner. Defaults to UL; use none to omit annotations.",
     )
     parser.add_argument(
         "--annotate-size",
         type=float,
         default=60.0,
-        help="Annotation radius in pixels for --preview-annotate. Defaults to 60.",
+        help="Annotation radius in pixels for --preview-at. Defaults to 60.",
     )
     parser.add_argument("--output-bitpix", choices=("float32", "uint16"), default="float32")
     parser.add_argument("--uint16-scale", choices=("none", "global", "per-channel"), default="none")
@@ -3137,12 +3132,13 @@ def main() -> int:
     annotation_overlay_png = None
     annotation_rotation = 0.0
     annotation_source_png = output_png
-    if args.preview_annotate:
-        if "SUN_PA" not in sun_header:
-            raise RuntimeError(
-                "--preview-annotate requires a Horizons solar position. "
-                "Use an ephemeris CSV with observer metadata and do not set --sun-pa off."
-            )
+    if args.preview_at != "none" and "SUN_PA" not in sun_header:
+        print(
+            "Preview annotation skipped: SUN_PA is unavailable. "
+            "The stack succeeded; use --preview-at none to suppress this warning.",
+            file=sys.stderr,
+        )
+    if args.preview_at != "none" and "SUN_PA" in sun_header:
         if args.preview_north_up:
             annotation_rotation = north_up_angle if north_up_angle is not None else 0.0
             annotation_source_png = north_up_output_png if north_up_output_png is not None else output_png
@@ -3339,7 +3335,7 @@ def main() -> int:
             f"SUN_PA={sun_header['SUN_PA']:.3f} deg)",
             flush=True,
         )
-    if args.preview_annotate:
+    if annotated_output_png is not None:
         if annotated_output_png is None or annotation_overlay_png is None:
             raise RuntimeError("Annotated preview path was not initialized")
         annotate_preview_png(
@@ -3349,7 +3345,7 @@ def main() -> int:
             reference_target.dec_deg,
             float(sun_header["SUN_PA"]),
             image_rotation_degrees=annotation_rotation,
-            corner=args.annotate_at,
+            corner=args.preview_at,
             radius_px=args.annotate_size,
         )
         write_annotation_overlay_png(
@@ -3360,7 +3356,7 @@ def main() -> int:
             image_rotation_degrees=annotation_rotation,
             radius_px=args.annotate_size,
         )
-        print(f"[preview] Annotated PNG and transparent overlay written at {args.annotate_at}", flush=True)
+        print(f"[preview] Annotated PNG and transparent overlay written at {args.preview_at}", flush=True)
     if saturation_enabled:
         if metcalf_saturation_mask is None or star_saturation_mask is None:
             raise RuntimeError("Saturation warning masks were not initialized")
@@ -3492,9 +3488,9 @@ def main() -> int:
         "preview_north_up_rotation_deg": north_up_angle,
         "preview_sun_pa_left": args.preview_sun_pa_left,
         "preview_sun_pa_left_rotation_deg": sun_pa_left_angle,
-        "preview_annotate": args.preview_annotate,
-        "annotate_at": args.annotate_at if args.preview_annotate else None,
-        "annotate_size_px": args.annotate_size if args.preview_annotate else None,
+        "preview_at": args.preview_at,
+        "preview_annotate": annotated_output_png is not None,
+        "annotate_size_px": args.annotate_size if annotated_output_png else None,
         "preview_stretch": args.preview_stretch,
         "preview_sigma_low": args.preview_sigma_low,
         "preview_sigma_high": args.preview_sigma_high,

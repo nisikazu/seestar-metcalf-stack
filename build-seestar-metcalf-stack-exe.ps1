@@ -49,10 +49,12 @@ $env:PYTHONPATH = $PyInstallerPath
     --specpath $BuildRoot `
     --paths (Join-Path $Root "scripts") `
     --hidden-import astrometry_solve `
+    --hidden-import fits_preview `
     --hidden-import horizons_ephemeris `
     --hidden-import moving_target_stack `
     --hidden-import sharpcap_stacklog `
     --hidden-import siril_preprocessing `
+    --hidden-import sun_pa `
     (Join-Path $Root "scripts\moving_target_pipeline.py")
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"

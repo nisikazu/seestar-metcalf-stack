@@ -81,16 +81,24 @@ class FitsPatternTests(unittest.TestCase):
 
         self.assertTrue(args.preview_sun_pa_left)
 
+    def test_pipeline_defaults_to_upper_left_annotation_and_allows_none(self):
+        with patch.object(sys, "argv", ["seestar-metcalf-stack", "frames"]):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.preview_at, "UL")
+        with patch.object(sys, "argv", ["seestar-metcalf-stack", "frames", "--preview-at", "none"]):
+            args = pipeline.parse_args()
+        self.assertEqual(args.preview_at, "none")
+
     def test_pipeline_accepts_annotation_size(self):
         with patch.object(
             sys,
             "argv",
-            ["seestar-metcalf-stack", "frames", "--preview-annotate", "--annotate-at", "LR", "--annotate-size", "72"],
+            ["seestar-metcalf-stack", "frames", "--preview-at", "LR", "--annotate-size", "72"],
         ):
             args = pipeline.parse_args()
 
-        self.assertTrue(args.preview_annotate)
-        self.assertEqual(args.annotate_at, "LR")
+        self.assertEqual(args.preview_at, "LR")
         self.assertEqual(args.annotate_size, 72.0)
 
     def test_explicit_solve_center_is_embedded_for_raster_reference(self):
