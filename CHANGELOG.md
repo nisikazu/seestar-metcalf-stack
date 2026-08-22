@@ -8,7 +8,7 @@
 
 ### 追加
 
-- `--preview-sun-pa-left`で、JPL Horizonsから求めた太陽方向を左に置く移動天体固定プレビューを追加しました。通常、反太陽方向のダストテイルを右向きに表示できます。移動天体固定FITSには`SUN_PA`、`ASUN_PA`、太陽座標と観測地情報も記録します。
+- `--preview-sun-pa-left`で、JPL Horizonsから求めた太陽方向を左に置く移動天体固定プレビューを追加しました。通常、反太陽方向のダストテイルを右向きに表示できます。移動天体固定FITSには拡張ヘッダ`SUN_PA`（太陽の位置角）、`ASUN_PA`（反太陽方向）、`SUNRA`、`SUNDEC`、`SUNCENTR`、`SUNSRC`も記録します。
 - `--preview-at UL|UR|LL|LR`と`--annotate-size`で、N/E方位マークと太陽方向矢印をプレビューへ描けるようにしました。既定は`--preview-at UL`です。注釈付きPNGに加え、任意配置用の小型透過`*_annotation_overlay.png`も出力します。不要な場合は`--preview-at none`を指定します。
 
 ## v0.8.1 - 2026-08-22
