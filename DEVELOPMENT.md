@@ -7,10 +7,11 @@
 - production経路は`moving_target_pipeline.main()`から`moving_target_stack.main()`へ入り、Sirilの前処理・Reference registration後、登録済みFITSを背景補正、星固定加算、Metcalf pure translation、移動天体固定加算の順に処理する。従来は背景統計の全フレームpassとスタックpassで登録FITSを2回読んでいたが、fit・適用・スタックを1回の読込へ統合した。
 - pure translationはfull-frame座標gridを毎RGB面で作らず、共通のsource/output sliceと一定のbilinear weightを使う。一次・二次背景面の適用も1次元X/Y項と必要な交差項だけで評価し、星固定画像は現行Reference footprintならzero-shift resamplingせず直接加算する。平均加算は`np.add(..., out=..., where=mask)`を使う。
 - `StackCanvas(shape, origin_x, origin_y)`はregistration座標系とoutput canvasを分離する。現行のcanvas policyは従来どおりReference frame footprintだが、resampler、valid mask、accumulator、WCS `CRPIX`再基準化は任意shape/originを受け取る。将来のN枚以上/M%以上のexpanded canvasはcanvas policyの追加として実装し、translation本体を置換しない。
-- frame workerはFITS読込、背景fit・適用、Metcalf shiftまでを行い、global sum/countへ書かない。bounded ThreadPoolは入力順に最大worker数だけresultを保持し、main threadが決定的に加算する。`--stack-workers 1|2|4`の既定は2である。
+- frame workerはFITS読込、背景fit・適用、Metcalf shiftまでを行い、global sum/countへ書かない。main threadは、バッチ内の全workerが成功した後だけlocal resultを入力順に決定的に加算する。既定の`--stack-workers auto`はavailable RAM、source shape、独立したstack canvas shapeから固定配列とworker配列を見積もり、RAMの25%または512 MiBを予約して最大4 workerから`4/2/1`を選ぶ。明示した`--stack-workers 1|2|4`は初期選択に優先する。
+- workerで`MemoryError`が起きた場合はpending futureをcancelし、executorを`shutdown(wait=True)`して全worker停止を待つ。成功した兄弟resultを含む未確定バッチ全体とtraceback参照を破棄してから、同じバッチ構成を`4→2→1`で最初から再実行する。バッチ成功前にはglobal accumulatorへ一切反映しないためrollbackは不要で、既に確定した過去バッチも再処理しない。
 - summary JSONの`stack_timing_seconds`へ`fits_read`、`background_fit`、`background_apply`、`star_resample`、`star_accumulation`、`metcalf_shift`、`metcalf_accumulation`、`saturation`、`total_stacking_wall`を記録する。worker側項目はCPU時間の合計であり、wall timeとは一致しない。
 - cleanup有効時は、前処理成功後にsource copy・変換像・staged calibrationを、登録成功後に最終前処理画像を削除し、各登録FITSは加算と診断行の確定後に削除する。242枚実測ディレクトリ換算では、登録中peakを約13.23 GiBから約11.33 GiBへ、スタック開始時を約5.61 GiBへ下げる。登録世代自体をなくすには、将来Siril `register -2pass`のmatrix統合が必要である。
-- 実画像で旧slice前実装とのfull valid mask一致、最大画素差`8.10623e-6 ADU`、中心天体・基準星開口の最大差`1.3e-6 ADU`以下を確認した。最終コードの20枚productionは`1/2/4 worker = 12.35/8.29/6.15秒`で、Metcalf・星固定・左右比較の3出力は全worker条件で全画素一致した。早期cleanup前後も最大差`0 ADU`であり、全154テストが成功した。詳細は[stack performance results](developer-tools/stack-performance-analysis/RESULTS-20260823.md)を参照する。
+- 実画像で旧slice前実装とのfull valid mask一致、最大画素差`8.10623e-6 ADU`、中心天体・基準星開口の最大差`1.3e-6 ADU`以下を確認した。最終コードの20枚productionは`1/2/4 worker = 12.35/8.29/6.15秒`で、Metcalf・星固定・左右比較の3出力は全worker条件で全画素一致した。早期cleanup前後も最大差`0 ADU`である。242枚をauto=4で2回処理したstack wall timeは`84.510/73.418秒`、3種類のfloat32 FITSは2回ともSHA-256まで一致した。MemoryErrorとcleanupのfailure injectionを含む全162テストが成功した。詳細は[stack performance results](developer-tools/stack-performance-analysis/RESULTS-20260823.md)を参照する。
 
 ## 2026-08-22: FITSプレビュー実験ツール
 

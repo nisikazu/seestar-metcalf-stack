@@ -4,8 +4,10 @@ import tempfile
 import threading
 import time
 import unittest
+import weakref
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -220,6 +222,46 @@ class SeparableBackgroundRegressionTests(unittest.TestCase):
 
 
 class BoundedFrameProcessingTests(unittest.TestCase):
+    def worker_estimate(self, shape=(3, 1080, 1920)):
+        return stacker.estimate_stack_worker_memory(
+            shape,
+            stacker.StackCanvas.reference_footprint(shape[-2:]),
+            "quadratic",
+            False,
+        )
+
+    def test_auto_worker_selection_uses_available_ram_and_frame_size(self):
+        estimate = self.worker_estimate()
+        abundant = stacker.select_stack_worker_plan("auto", estimate, 16 * stacker.GIBIBYTE)
+        self.assertEqual(abundant.initial_workers, 4)
+
+        two_worker_available = estimate.projected_bytes(2) + stacker.AUTO_WORKER_RESERVE_MIN_BYTES
+        moderate = stacker.select_stack_worker_plan("auto", estimate, two_worker_available)
+        self.assertEqual(moderate.initial_workers, 2)
+
+        one_worker_available = estimate.projected_bytes(1) + stacker.AUTO_WORKER_RESERVE_MIN_BYTES
+        constrained = stacker.select_stack_worker_plan("auto", estimate, one_worker_available)
+        self.assertEqual(constrained.initial_workers, 1)
+
+        large = self.worker_estimate((3, 4320, 7680))
+        self.assertLessEqual(
+            stacker.select_stack_worker_plan("auto", large, 2 * stacker.GIBIBYTE).initial_workers,
+            constrained.initial_workers,
+        )
+
+    def test_explicit_worker_selection_overrides_ram_estimate(self):
+        estimate = self.worker_estimate()
+        plan = stacker.select_stack_worker_plan(4, estimate, 128 * stacker.MEBIBYTE)
+        self.assertEqual(plan.initial_workers, 4)
+        self.assertEqual(plan.reason, "explicit user setting")
+
+    def test_auto_worker_selection_falls_back_to_two_when_ram_is_unknown(self):
+        estimate = self.worker_estimate()
+        with patch.object(stacker, "available_ram_bytes", return_value=None):
+            plan = stacker.select_stack_worker_plan("auto", estimate)
+        self.assertEqual(plan.initial_workers, 2)
+        self.assertIn("could not be measured", plan.reason)
+
     def test_ordered_bounded_map_preserves_order_and_worker_limit(self):
         lock = threading.Lock()
         active = 0
@@ -239,6 +281,101 @@ class BoundedFrameProcessingTests(unittest.TestCase):
         self.assertEqual(actual, [value * value for value in range(8)])
         self.assertLessEqual(maximum_active, 2)
         self.assertGreaterEqual(maximum_active, 2)
+
+    def test_memory_failure_discards_uncommitted_batch_before_retry(self):
+        estimate = self.worker_estimate((3, 20, 30))
+        plan = stacker.select_stack_worker_plan(4, estimate, 16 * stacker.GIBIBYTE)
+        lock = threading.Lock()
+        active = 0
+        failed_once = False
+        accepted: list[int] = []
+        accumulator = 0
+        fallback_snapshots = []
+        discarded_refs = []
+
+        class Payload:
+            def __init__(self, value):
+                self.value = value
+
+        def worker(value):
+            nonlocal active, failed_once
+            with lock:
+                active += 1
+            try:
+                time.sleep(0.005)
+                with lock:
+                    if value == 2 and not failed_once:
+                        failed_once = True
+                        raise MemoryError("injected worker allocation failure")
+                payload = Payload(value)
+                if plan.current_workers == 4:
+                    discarded_refs.append(weakref.ref(payload))
+                return payload
+            finally:
+                with lock:
+                    active -= 1
+
+        def on_fallback(event):
+            fallback_snapshots.append(
+                (dict(event), active, list(accepted), accumulator, all(ref() is None for ref in discarded_refs))
+            )
+
+        for result in stacker.adaptive_ordered_bounded_map(worker, list(range(7)), plan, on_fallback):
+            accepted.append(result.value)
+            accumulator += result.value
+
+        self.assertEqual(accepted, list(range(7)))
+        self.assertEqual(accumulator, sum(range(7)))
+        self.assertEqual(plan.current_workers, 2)
+        self.assertEqual(len(plan.fallback_events), 1)
+        event, active_at_fallback, accepted_at_fallback, accumulator_at_fallback, locals_released = fallback_snapshots[0]
+        self.assertEqual((event["from_workers"], event["to_workers"]), (4, 2))
+        self.assertEqual(active_at_fallback, 0)
+        self.assertEqual(accepted_at_fallback, [])
+        self.assertEqual(accumulator_at_fallback, 0)
+        self.assertTrue(locals_released)
+
+    def test_memory_failure_can_fall_back_from_four_to_two_to_one(self):
+        estimate = self.worker_estimate((3, 20, 30))
+        plan = stacker.select_stack_worker_plan(4, estimate, 16 * stacker.GIBIBYTE)
+        attempts = []
+
+        def injected_batch(_function, batch, max_workers):
+            attempts.append((max_workers, list(batch)))
+            if max_workers in {4, 2}:
+                raise MemoryError(f"injected at {max_workers}")
+            return list(batch)
+
+        with patch.object(stacker, "run_worker_batch", side_effect=injected_batch):
+            actual = list(stacker.adaptive_ordered_bounded_map(lambda value: value, list(range(5)), plan))
+        self.assertEqual(actual, list(range(5)))
+        self.assertEqual(plan.current_workers, 1)
+        self.assertEqual(
+            attempts,
+            [
+                (4, [0, 1, 2, 3]),
+                (2, [0, 1, 2, 3]),
+                (1, [0, 1, 2, 3]),
+                (1, [4]),
+            ],
+        )
+        self.assertEqual(
+            [(event["from_workers"], event["to_workers"]) for event in plan.fallback_events],
+            [(4, 2), (2, 1)],
+        )
+
+    def test_memory_failure_with_one_worker_reports_exhaustion(self):
+        estimate = self.worker_estimate((3, 20, 30))
+        plan = stacker.select_stack_worker_plan(1, estimate, 16 * stacker.GIBIBYTE)
+
+        with self.assertRaisesRegex(MemoryError, "failed with one stack worker"):
+            list(
+                stacker.adaptive_ordered_bounded_map(
+                    lambda _value: (_ for _ in ()).throw(MemoryError("injected final failure")),
+                    [0],
+                    plan,
+                )
+            )
 
     def test_one_and_two_workers_produce_identical_frame_products_and_stacks(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -338,6 +475,48 @@ class ProgressiveCleanupTests(unittest.TestCase):
             self.assertTrue(all(path.is_file() for path in processed))
             self.assertTrue(metadata.is_file())
             self.assertFalse(calibration_dir.exists())
+
+    def test_preprocessing_cleanup_failure_never_deletes_final_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            registration_dir = Path(temporary)
+            processed = [registration_dir / "pp_frame_00001.fit", registration_dir / "pp_frame_00002.fit"]
+            obsolete = registration_dir / "frame_00001.fit"
+            for path in [*processed, obsolete]:
+                path.write_bytes(b"test")
+            original_unlink = Path.unlink
+
+            def fail_obsolete(path, *args, **kwargs):
+                if path == obsolete:
+                    raise OSError("injected cleanup failure")
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", new=fail_obsolete):
+                with self.assertRaisesRegex(OSError, "injected cleanup failure"):
+                    stacker.cleanup_after_preprocessing(registration_dir, processed)
+
+            self.assertTrue(all(path.is_file() for path in processed))
+            self.assertTrue(obsolete.is_file())
+
+    def test_cleanup_failure_stops_before_later_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidates = [root / f"frame_{index}.fit" for index in range(3)]
+            for path in candidates:
+                path.write_bytes(b"test")
+            original_unlink = Path.unlink
+
+            def fail_second(path, *args, **kwargs):
+                if path == candidates[1]:
+                    raise OSError("injected cleanup failure")
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", new=fail_second):
+                with self.assertRaisesRegex(OSError, "injected cleanup failure"):
+                    stacker.remove_intermediate_paths(candidates)
+
+            self.assertFalse(candidates[0].exists())
+            self.assertTrue(candidates[1].exists())
+            self.assertTrue(candidates[2].exists())
 
 
 if __name__ == "__main__":

@@ -334,12 +334,21 @@ the output folder opens in Explorer. When invoking the EXE or Python entry
 point directly. Add `--no-verbose` to suppress detailed progress. Use
 `--no-open-output` to keep Explorer or Finder from opening after success.
 
-The stacker uses two workers by default. Use `--stack-workers 1` to reduce RAM
-or `--stack-workers 4` on a machine with ample memory for a smaller additional
-speedup. Results are accumulated deterministically in input order, so worker
-count does not change output pixel values. FITS read, background fit/application,
-star and Metcalf accumulation, Metcalf shift, and total stacking timings are
-printed and recorded in the summary JSON.
+The default is `--stack-workers auto`. Immediately before stacking, the program
+checks available RAM and the subframe/output-canvas dimensions. It reserves the
+larger of 25% of available RAM or 512 MiB, then selects the largest safe count
+from 4, 2, and 1. The decision and memory estimate are printed and recorded in
+the summary JSON. An explicit `--stack-workers 1|2|4` overrides the initial
+automatic choice.
+
+If a worker allocation fails, every worker is stopped and all local results from
+the still-uncommitted batch are discarded. The complete same batch is retried at
+4 -> 2 -> 1 workers. Workers never write directly to global sum/count arrays;
+the main thread accumulates only fully successful batches in input order. A
+retry therefore cannot mix partial results, and worker count does not change
+output pixels. FITS read, background fit/application, star and Metcalf
+accumulation, Metcalf shift, and total stacking timings are also printed and
+recorded in the summary JSON.
 
 For Python installation, Siril discovery, Terminal use, and Finder drag and
 drop on macOS, see [the macOS setup guide](README-macOS.md).

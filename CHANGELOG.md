@@ -4,18 +4,21 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
-## Unreleased
+## v0.9.0 - 2026-08-24
 
 ### 改善
 
 - Metcalf pure translationをslice-based bilinear処理へ変更し、背景面適用、星固定加算、平均加算も不要なfull-frame一時配列を避けるよう高速化しました。
-- `--stack-workers 1|2|4`を追加し、既定の2 workerで重いフレーム変換を並列実行します。加算は入力順にmain threadで行うため、worker数によらず同じ画素値を得ます。
+- `--stack-workers auto|1|2|4`を追加しました。既定の`auto`はavailable RAMとサブフレーム・出力canvasの大きさを保守的に見積もり、最大4 workerから安全な並列数を選びます。明示したworker数は初期値として優先します。
+- workerのメモリ確保に失敗した場合、全workerを停止し、未加算バッチのlocal resultを破棄して、同じバッチ全体を`4→2→1`で再実行します。加算は成功済みバッチだけを入力順にmain threadで行うため、部分結果が混ざらず、worker数によらず同じ画素値を得ます。
 - 登録済みFITSの背景fit・適用・スタックを1回の読込へ統合しました。source copy・変換像・staged calibrationは前処理成功後、最終前処理画像は登録完了後、登録画像は寄与確定後に順次削除します。
 - summary JSONと画面へ、FITS読込、背景fit・適用、星固定加算、Metcalf shift・加算、スタック全体の処理時間を出力します。
+- 220Pの242採用フレームを2回測定し、auto=4でstack wall time `84.510/73.418秒`を確認しました。両実行のMetcalf・星固定・比較float32 FITSはSHA-256まで一致しています。
 
 ### 内部設計
 
 - registration座標系とstack output canvasを`StackCanvas`で分離しました。現行出力は従来どおりReference frame範囲ですが、将来の寄与枚数・割合に基づくexpanded canvasでresamplerを置き換えずに済む構造です。
+- MemoryError時のworker停止・未確定result破棄・global accumulator非変更・同一バッチ再実行、および中間ファイル削除失敗をfailure injectionで検証しました。
 
 ## v0.8.2 - 2026-08-23
 

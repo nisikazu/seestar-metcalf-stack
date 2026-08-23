@@ -65,8 +65,8 @@ the release build.
 
 ## Release Assets
 
-Before creating a release, update the `Unreleased` sections in both changelogs
-to the release version and date, then verify the public tree:
+Before creating a release, add the release version and date to both changelogs,
+then verify the public tree:
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"

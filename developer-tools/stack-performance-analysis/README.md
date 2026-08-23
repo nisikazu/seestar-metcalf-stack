@@ -17,4 +17,6 @@ and reports centre-target/reference-star aperture differences. It also measures
 bounded NumPy thread parallelism at 1, 2, and 4 workers.
 
 See [RESULTS-20260823.md](RESULTS-20260823.md) for the original prototype result
-and the production-integration measurements.
+and the production-integration measurements. The two full 242-frame v0.9.0
+runs are also available as machine-readable
+[`LONG-RUN-20260824.csv`](LONG-RUN-20260824.csv).

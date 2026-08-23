@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import csv
+import gc
 import json
 import math
 import os
@@ -881,6 +882,13 @@ BACKGROUND_MIN_TILE_PIXELS = 96
 BACKGROUND_TILE_SAMPLE_STEP = 4
 BACKGROUND_MIN_TILE_SAMPLES = 12
 BACKGROUND_FIT_OUTLIER_SIGMA = 3.0
+MEBIBYTE = 1024 * 1024
+GIBIBYTE = 1024 * MEBIBYTE
+AUTO_WORKER_COUNTS = (4, 2, 1)
+AUTO_WORKER_UNKNOWN_RAM_DEFAULT = 2
+AUTO_WORKER_RESERVE_MIN_BYTES = 512 * MEBIBYTE
+AUTO_WORKER_RESERVE_FRACTION = 0.25
+AUTO_WORKER_FIXED_OVERHEAD_BYTES = 64 * MEBIBYTE
 
 
 @dataclass
@@ -936,6 +944,245 @@ class StackFrameResult:
     timings: dict[str, float]
 
 
+@dataclass(frozen=True)
+class StackWorkerMemoryEstimate:
+    """Conservative array-allocation estimate used by automatic worker selection."""
+
+    source_shape: tuple[int, ...]
+    canvas_shape: tuple[int, int]
+    fixed_bytes: int
+    per_worker_bytes: int
+
+    def projected_bytes(self, workers: int) -> int:
+        return self.fixed_bytes + self.per_worker_bytes * workers
+
+
+@dataclass
+class StackWorkerPlan:
+    """Initial worker decision and any runtime allocation fallbacks."""
+
+    requested: str | int
+    initial_workers: int
+    current_workers: int
+    available_bytes: int | None
+    reserve_bytes: int | None
+    estimate: StackWorkerMemoryEstimate
+    reason: str
+    fallback_events: list[dict[str, object]]
+
+
+def parse_stack_workers(value: str) -> str | int:
+    normalized = str(value).strip().lower()
+    if normalized == "auto":
+        return "auto"
+    try:
+        workers = int(normalized)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("--stack-workers must be auto, 1, 2, or 4") from error
+    if workers not in {1, 2, 4}:
+        raise argparse.ArgumentTypeError("--stack-workers must be auto, 1, 2, or 4")
+    return workers
+
+
+def format_memory_size(byte_count: int | None) -> str:
+    if byte_count is None:
+        return "unknown"
+    if byte_count >= GIBIBYTE:
+        return f"{byte_count / GIBIBYTE:.2f} GiB"
+    return f"{byte_count / MEBIBYTE:.1f} MiB"
+
+
+def available_ram_bytes() -> int | None:
+    """Return conservatively usable physical RAM reported by the host OS."""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullAvailPhys)
+        except (AttributeError, OSError, ValueError):
+            pass
+
+    meminfo = Path("/proc/meminfo")
+    if meminfo.is_file():
+        try:
+            for line in meminfo.read_text(encoding="ascii", errors="replace").splitlines():
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+        except (OSError, ValueError, IndexError):
+            pass
+
+    if sys.platform == "darwin":
+        try:
+            output = subprocess.check_output(["vm_stat"], text=True, encoding="utf-8", errors="replace")
+            page_match = re.search(r"page size of\s+(\d+)\s+bytes", output)
+            if page_match:
+                pages: dict[str, int] = {}
+                for line in output.splitlines():
+                    match = re.match(r"Pages (free|inactive|speculative):\s+(\d+)\.", line.strip())
+                    if match:
+                        pages[match.group(1)] = int(match.group(2))
+                if pages:
+                    return sum(pages.values()) * int(page_match.group(1))
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+
+    try:
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        available_pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+        if page_size > 0 and available_pages > 0:
+            return page_size * available_pages
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def estimate_stack_worker_memory(
+    source_shape: tuple[int, ...],
+    canvas: StackCanvas,
+    background_mode: str,
+    saturation_enabled: bool,
+) -> StackWorkerMemoryEstimate:
+    """Estimate peak live arrays from source/canvas dimensions, without assuming equal footprints."""
+    if len(source_shape) == 2:
+        channels = 1
+        source_height, source_width = source_shape
+    elif len(source_shape) == 3:
+        channels, source_height, source_width = source_shape
+    else:
+        raise ValueError(f"Unsupported stack frame shape for RAM estimation: {source_shape}")
+    source_pixels = int(source_height) * int(source_width)
+    canvas_pixels = int(canvas.shape[0]) * int(canvas.shape[1])
+    source_samples = channels * source_pixels
+    canvas_samples = channels * canvas_pixels
+
+    # Fixed arrays are budgeted as the common mean-stack case even for median/rankfit.
+    # This deliberately leaves room for the reference image and Python/output overhead.
+    fixed_bytes = (
+        source_samples * np.dtype(np.float32).itemsize
+        + 2 * canvas_samples * np.dtype(np.float64).itemsize
+        + 2 * canvas_pixels * np.dtype(np.uint32).itemsize
+        + AUTO_WORKER_FIXED_OVERHEAD_BYTES
+    )
+    if saturation_enabled:
+        fixed_bytes += 2 * canvas_pixels * np.dtype(bool).itemsize
+
+    # Model the largest processing phase rather than summing arrays whose lifetimes do
+    # not overlap. Registered-unit restoration and background correction can both be
+    # float64, while translated products remain float32.
+    read_phase = 2 * source_samples * np.dtype(np.float32).itemsize
+    background_phase = source_samples * np.dtype(np.float64).itemsize
+    if background_mode != "none":
+        background_phase += source_samples * np.dtype(np.float64).itemsize
+        background_phase += source_pixels * np.dtype(np.float64).itemsize
+    translation_phase = (
+        source_samples * np.dtype(np.float64).itemsize
+        + canvas_samples * np.dtype(np.float32).itemsize
+        + canvas_pixels * np.dtype(np.float64).itemsize
+        + source_pixels * np.dtype(bool).itemsize
+        + 2 * canvas_pixels * np.dtype(bool).itemsize
+    )
+    if not canvas.is_identity_for((int(source_height), int(source_width))):
+        translation_phase += canvas_samples * np.dtype(np.float32).itemsize
+    if saturation_enabled:
+        translation_phase += source_pixels * np.dtype(bool).itemsize + 2 * canvas_pixels * np.dtype(bool).itemsize
+    per_worker_bytes = max(read_phase, background_phase, translation_phase) + 16 * MEBIBYTE
+    return StackWorkerMemoryEstimate(
+        source_shape=tuple(int(value) for value in source_shape),
+        canvas_shape=canvas.shape,
+        fixed_bytes=int(fixed_bytes),
+        per_worker_bytes=int(per_worker_bytes),
+    )
+
+
+def select_stack_worker_plan(
+    requested: str | int,
+    estimate: StackWorkerMemoryEstimate,
+    available_bytes: int | None = None,
+) -> StackWorkerPlan:
+    available = available_ram_bytes() if available_bytes is None else available_bytes
+    if requested != "auto":
+        workers = int(requested)
+        return StackWorkerPlan(
+            requested=requested,
+            initial_workers=workers,
+            current_workers=workers,
+            available_bytes=available,
+            reserve_bytes=None,
+            estimate=estimate,
+            reason="explicit user setting",
+            fallback_events=[],
+        )
+    if available is None:
+        workers = AUTO_WORKER_UNKNOWN_RAM_DEFAULT
+        return StackWorkerPlan(
+            requested=requested,
+            initial_workers=workers,
+            current_workers=workers,
+            available_bytes=None,
+            reserve_bytes=None,
+            estimate=estimate,
+            reason="available RAM could not be measured; conservative fallback",
+            fallback_events=[],
+        )
+
+    reserve = max(AUTO_WORKER_RESERVE_MIN_BYTES, int(available * AUTO_WORKER_RESERVE_FRACTION))
+    budget = max(0, available - reserve)
+    workers = 1
+    for candidate in AUTO_WORKER_COUNTS:
+        if estimate.projected_bytes(candidate) <= budget:
+            workers = candidate
+            break
+    reason = "largest worker count fitting the conservative RAM budget"
+    if estimate.projected_bytes(1) > budget:
+        reason = "even one worker exceeds the conservative estimate; using the minimum"
+    return StackWorkerPlan(
+        requested=requested,
+        initial_workers=workers,
+        current_workers=workers,
+        available_bytes=available,
+        reserve_bytes=reserve,
+        estimate=estimate,
+        reason=reason,
+        fallback_events=[],
+    )
+
+
+def describe_stack_worker_plan(plan: StackWorkerPlan) -> str:
+    estimate = plan.estimate
+    frame_text = "x".join(str(value) for value in estimate.source_shape)
+    canvas_text = "x".join(str(value) for value in estimate.canvas_shape)
+    projected = estimate.projected_bytes(plan.initial_workers)
+    if plan.requested == "auto":
+        return (
+            f"[workers:auto] available RAM={format_memory_size(plan.available_bytes)}; "
+            f"reserve={format_memory_size(plan.reserve_bytes)}; frame={frame_text}; canvas={canvas_text}; "
+            f"fixed={format_memory_size(estimate.fixed_bytes)}; "
+            f"per-worker={format_memory_size(estimate.per_worker_bytes)}; "
+            f"projected={format_memory_size(projected)}; selected={plan.initial_workers}; {plan.reason}"
+        )
+    return (
+        f"[workers] explicit={plan.initial_workers}; available RAM={format_memory_size(plan.available_bytes)}; "
+        f"frame={frame_text}; canvas={canvas_text}; projected={format_memory_size(projected)}; "
+        "the user setting takes precedence over the estimate"
+    )
+
+
 def ordered_bounded_map(function, items, max_workers: int):
     """Run at most ``max_workers`` frame jobs while yielding input order."""
     if max_workers < 1:
@@ -962,6 +1209,88 @@ def ordered_bounded_map(function, items, max_workers: int):
             except StopIteration:
                 continue
             pending.append((item, executor.submit(function, item)))
+
+
+def run_worker_batch(function, batch: list[object], max_workers: int) -> list[object]:
+    """Finish a whole batch before exposing any result to the accumulator."""
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
+    if not batch:
+        return []
+    if max_workers == 1:
+        return [function(item) for item in batch]
+
+    executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="metcalf-frame")
+    futures: list[Future] = []
+    results: list[object] = []
+    try:
+        futures = [executor.submit(function, item) for item in batch]
+        # Keep results local until every future succeeds. This is the transaction
+        # boundary that prevents a failed batch from dirtying global accumulators.
+        results = [future.result() for future in futures]
+        return results
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        results.clear()
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+def lower_stack_worker_count(workers: int) -> int | None:
+    if workers == 4:
+        return 2
+    if workers == 2:
+        return 1
+    return None
+
+
+def adaptive_ordered_bounded_map(function, items, plan: StackWorkerPlan, on_fallback=None):
+    """Yield committed batches in order, retrying an uncommitted batch after MemoryError."""
+    sequence = list(items)
+    offset = 0
+    while offset < len(sequence):
+        # Keep the transaction membership fixed even if its executor is reduced
+        # from 4 -> 2 -> 1 workers. No subset becomes visible to the accumulator
+        # until every item from this original batch succeeds together.
+        batch = sequence[offset : offset + plan.current_workers]
+        while True:
+            try:
+                results = run_worker_batch(function, batch, plan.current_workers)
+                break
+            except MemoryError as error:
+                error_text = str(error) or error.__class__.__name__
+                # A Future keeps its exception traceback, and that traceback can retain
+                # successful sibling results through the dead batch frame. Break it before
+                # retrying so the lower-worker attempt starts after local arrays are freed.
+                error.__traceback__ = None
+                previous_workers = plan.current_workers
+                next_workers = lower_stack_worker_count(previous_workers)
+                if next_workers is None:
+                    raise MemoryError(
+                        "A frame allocation failed with one stack worker. Close other applications, "
+                        "reduce the image size, or use a machine with more available RAM."
+                    ) from error
+                # run_worker_batch waits for the executor before returning here. No result
+                # from this batch has been yielded, so only earlier batches are committed.
+                plan.current_workers = next_workers
+                event = {
+                    "batch_offset": offset,
+                    "batch_first_frame": getattr(batch[0], "index", offset + 1),
+                    "batch_size": len(batch),
+                    "from_workers": previous_workers,
+                    "to_workers": next_workers,
+                    "available_bytes_after_failure": available_ram_bytes(),
+                    "error": error_text,
+                }
+                plan.fallback_events.append(event)
+                gc.collect()
+                if on_fallback is not None:
+                    on_fallback(event)
+        for result in results:
+            yield result
+        offset += len(batch)
 
 
 def sigma_clipped_median(values: np.ndarray, sigma: float = BACKGROUND_SIGMA, iterations: int = BACKGROUND_ITERATIONS) -> float:
@@ -2721,10 +3050,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--stack-workers",
-        type=int,
-        choices=(1, 2, 4),
-        default=2,
-        help="Parallel workers for per-frame FITS/background/shift processing. Defaults to 2.",
+        type=parse_stack_workers,
+        default="auto",
+        metavar="auto|1|2|4",
+        help=(
+            "Parallel workers for per-frame FITS/background/shift processing. "
+            "auto selects 1, 2, or 4 from available RAM and frame size (default)."
+        ),
     )
     parser.add_argument(
         "--rankfit-fraction",
@@ -3307,11 +3639,32 @@ def main() -> int:
             flush=True,
         )
 
+    worker_memory_estimate = estimate_stack_worker_memory(
+        tuple(reference.data.shape),
+        stack_canvas,
+        args.background_normalization,
+        saturation_enabled,
+    )
+    worker_plan = select_stack_worker_plan(args.stack_workers, worker_memory_estimate)
+    print(describe_stack_worker_plan(worker_plan), flush=True)
+
     if args.verbose:
         print(
-            f"[stack] processing {len(stack_tasks)} usable frame(s) with {args.stack_workers} worker(s)",
+            f"[stack] processing {len(stack_tasks)} usable frame(s) with {worker_plan.initial_workers} worker(s)",
             flush=True,
         )
+
+    def report_worker_fallback(event: dict[str, object]) -> None:
+        print(
+            "[workers:fallback] Memory allocation failed with "
+            f"{event['from_workers']} workers at uncommitted batch starting frame "
+            f"{event['batch_first_frame']}. All workers stopped and local batch results were discarded; "
+            f"retrying the same batch with {event['to_workers']} worker(s). "
+            f"Available RAM now={format_memory_size(event['available_bytes_after_failure'])}",
+            file=sys.stderr,
+            flush=True,
+        )
+
     worker = lambda task: process_stack_frame(
         task,
         stack_canvas,
@@ -3320,7 +3673,7 @@ def main() -> int:
         saturation_enabled,
         args.saturation_threshold_percent,
     )
-    for result in ordered_bounded_map(worker, stack_tasks, args.stack_workers):
+    for result in adaptive_ordered_bounded_map(worker, stack_tasks, worker_plan, report_worker_fallback):
         task = result.task
         i = task.index
         if args.verbose:
@@ -3527,7 +3880,8 @@ def main() -> int:
         if name != "total_stacking_wall"
     )
     print(
-        f"[timing] workers={args.stack_workers}; {timing_parts}; "
+        f"[timing] workers={worker_plan.current_workers}; requested={args.stack_workers}; "
+        f"initial={worker_plan.initial_workers}; fallbacks={len(worker_plan.fallback_events)}; {timing_parts}; "
         f"total_stacking_wall={stack_timing_seconds['total_stacking_wall']:.3f}s",
         flush=True,
     )
@@ -3980,7 +4334,21 @@ def main() -> int:
         "used_frames": used,
         "stack_method": args.stack_method,
         "stack_method_token": method_token,
-        "stack_workers": args.stack_workers,
+        "stack_workers": worker_plan.current_workers,
+        "stack_workers_requested": args.stack_workers,
+        "stack_worker_selection": {
+            "initial_workers": worker_plan.initial_workers,
+            "final_workers": worker_plan.current_workers,
+            "reason": worker_plan.reason,
+            "available_ram_bytes": worker_plan.available_bytes,
+            "reserve_bytes": worker_plan.reserve_bytes,
+            "fixed_estimate_bytes": worker_plan.estimate.fixed_bytes,
+            "per_worker_estimate_bytes": worker_plan.estimate.per_worker_bytes,
+            "initial_projected_bytes": worker_plan.estimate.projected_bytes(worker_plan.initial_workers),
+            "source_shape": list(worker_plan.estimate.source_shape),
+            "canvas_shape": list(worker_plan.estimate.canvas_shape),
+            "fallback_events": worker_plan.fallback_events,
+        },
         "stack_canvas": {
             "policy": "reference-footprint",
             "shape": [canvas_height, canvas_width],

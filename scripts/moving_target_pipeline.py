@@ -29,6 +29,7 @@ from typing import TextIO
 from moving_target_stack import (
     SirilRegistrationError,
     normalize_saturation_color,
+    parse_stack_workers,
     parse_time,
     processing_method_token,
     read_source_image,
@@ -231,10 +232,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stack-workers",
-        type=int,
-        choices=(1, 2, 4),
-        default=2,
-        help="Parallel workers for per-frame FITS/background/shift processing. Defaults to 2.",
+        type=parse_stack_workers,
+        default="auto",
+        metavar="auto|1|2|4",
+        help=(
+            "Parallel workers for per-frame FITS/background/shift processing. "
+            "auto selects 1, 2, or 4 from available RAM and frame size (default)."
+        ),
     )
     parser.add_argument(
         "--rankfit-fraction",

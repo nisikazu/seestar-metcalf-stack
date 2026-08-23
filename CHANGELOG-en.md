@@ -4,6 +4,22 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.9.0 - 2026-08-24
+
+### Improved
+
+- Replace Metcalf pure translation with slice-based bilinear processing and avoid unnecessary full-frame temporary arrays in background application, zero-shift star accumulation, and mean accumulation.
+- Add `--stack-workers auto|1|2|4`. The default `auto` conservatively estimates fixed and per-worker memory from available RAM and independent source/canvas dimensions, then selects up to four workers. An explicit count overrides the initial choice.
+- If a worker allocation fails, stop all workers, discard the complete uncommitted batch, and retry that same batch at 4 -> 2 -> 1 workers. Only fully successful batches reach the deterministic main-thread accumulator.
+- Read each registered FITS only once for background fit, application, and stacking. Remove source copies, converted images, staged calibration files, preprocessed images, and accepted registered images at the earliest safe stage.
+- Print and record FITS read, background fit/application, star accumulation, Metcalf shift/accumulation, total stack timing, RAM estimate, selected worker count, and any fallback events.
+- Two 242-frame production runs selected four workers and completed stacking in 84.510 and 73.418 seconds. Their Metcalf, star-aligned, and comparison float32 FITS outputs were byte-identical by SHA-256.
+
+### Internal design
+
+- Separate registration coordinates from the output canvas through `StackCanvas`; the current reference-footprint output remains unchanged while a future contribution-count/percentage expanded canvas can reuse the same resampler.
+- Add failure-injection coverage for worker shutdown, local-result disposal, untouched global accumulators, same-batch retry, one-worker exhaustion, and progressive-cleanup failures.
+
 ## v0.8.2 - 2026-08-23
 
 ### Added

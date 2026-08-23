@@ -208,7 +208,9 @@ Pythonコードを改造した場合は、古いEXEが優先実行されない�
 
 詳細表示はCMD、シェル、EXE、Pythonのどの入口でも標準で有効です。最初に全セッションと選択されたセッションを表示し、その後は処理段階、Sirilの出力、スタック方式、`現在枚数/総枚数`を表示します。同じ内容が実行中から `metcalf_output\metcalf-YYYYMMDD-HHMMSS.log` へ追記されます。正常終了時には成果物の出力フォルダをExplorerまたはFinderで開きます。詳細表示を抑制する場合は `--no-verbose`、成果物フォルダを開かない場合は `--no-open-output` を指定してください。macOSの準備とFinderドラッグ&ドロップについては [macOSセットアップ](README-macOS.md) を参照してください。
 
-スタック本体は既定で2 workerを使います。メモリを抑えたい場合は`--stack-workers 1`、十分なRAMがあり少しでも短縮したい場合は`--stack-workers 4`を指定できます。worker数が違っても入力順で決定的に加算するため、出力画素値は変わりません。FITS読込、背景fit・適用、星固定加算、Metcalf shift・加算、スタック全体の所要時間は画面とsummary JSONへ記録します。
+スタック本体の既定は`--stack-workers auto`です。スタック開始直前のavailable RAMとサブフレーム・出力canvasの大きさを調べ、RAMの25%または512 MiBの大きいほうを予約したうえで、最大4 workerから`4`、`2`、`1`の順に安全な並列数を選びます。選択根拠と推定容量は画面とsummary JSONへ記録します。`--stack-workers 1|2|4`を指定した場合は、その初期値を優先します。
+
+処理中にworkerのメモリ確保が失敗した場合は、実行中のworkerをすべて停止し、まだ加算していないバッチのlocal resultを破棄して、同じバッチ全体を`4→2→1`の順で再実行します。workerはglobal sum/countへ直接書かず、main threadが成功済みバッチだけを入力順に加算するため、再試行で途中結果が混ざらず、worker数によって出力画素値も変わりません。FITS読込、背景fit・適用、星固定加算、Metcalf shift・加算、スタック全体の所要時間も画面とsummary JSONへ記録します。
 
 ### 大規模セッションの空き容量
 

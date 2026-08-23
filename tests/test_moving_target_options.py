@@ -1414,7 +1414,7 @@ class CrossPlatformCliTests(unittest.TestCase):
         self.assertEqual(args.preview_stretch, "sigma")
         self.assertEqual(args.preview_sigma_low, -1.0)
         self.assertEqual(args.preview_sigma_high, 3.0)
-        self.assertEqual(args.stack_workers, 2)
+        self.assertEqual(args.stack_workers, "auto")
 
     def test_pipeline_accepts_explicit_stack_worker_count(self):
         with patch.object(

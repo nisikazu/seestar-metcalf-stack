@@ -78,9 +78,11 @@ Terminalで`YOUR_API_KEY`をコピーした文字列に置き換えて実行し�
 詳細な進行表示は標準で有効です。抑制するときは`--no-verbose`、正常終了時に
 Finderを開かないときは`--no-open-output`を追加します。
 
-スタック本体は既定で2 workerです。RAMを抑える場合は`--stack-workers 1`、
-十分なRAMがあり追加の高速化を試す場合は`--stack-workers 4`を指定できます。
-worker数によらず入力順で加算するため、最終画素値は変わりません。
+スタック本体は既定の`--stack-workers auto`で、available RAMとサブフレーム・
+出力canvasの大きさから`4`、`2`、`1`の順に安全な並列数を選びます。
+`--stack-workers 1|2|4`を指定すれば初期値を固定できます。メモリ確保失敗時は
+未加算バッチを破棄してworkerを停止し、同じバッチ全体を少ないworkerで再実行します。
+global加算はmain threadが入力順に行うため、worker数によって最終画素値は変わりません。
 
 SharpCap Live StackのPNG/TIFFは対象天体と画素スケールの明示が必要なため、FinderへのドロップではなくTerminalから実行します。フォルダ構造と下処理の制限はメインREADMEの「SharpCapで撮影する場合」を先に確認してください。
 
