@@ -334,6 +334,13 @@ the output folder opens in Explorer. When invoking the EXE or Python entry
 point directly. Add `--no-verbose` to suppress detailed progress. Use
 `--no-open-output` to keep Explorer or Finder from opening after success.
 
+The stacker uses two workers by default. Use `--stack-workers 1` to reduce RAM
+or `--stack-workers 4` on a machine with ample memory for a smaller additional
+speedup. Results are accumulated deterministically in input order, so worker
+count does not change output pixel values. FITS read, background fit/application,
+star and Metcalf accumulation, Metcalf shift, and total stacking timings are
+printed and recorded in the summary JSON.
+
 For Python installation, Siril discovery, Terminal use, and Finder drag and
 drop on macOS, see [the macOS setup guide](README-macOS.md).
 
@@ -344,8 +351,12 @@ background-star registration. Sessions containing hundreds of frames can
 therefore require substantially more free space than the source FITS files.
 If Siril reports `Not enough free disk space`, free more space, select another
 drive with `--work-root D:\metcalf_output`, or reduce the run with an option
-such as `--count 400`. Intermediate FITS files are removed automatically after
-a registration failure unless `--no-cleanup` is specified.
+such as `--count 400`. Source copies, conversion images, and staged calibration
+files are removed after preprocessing succeeds. The final preprocessed sequence
+is removed after registration, and registered FITS files are removed after each
+accepted stack contribution. Preprocessed and partially generated registered
+images still coexist during registration. Use `--no-cleanup` to retain
+intermediates for diagnosis.
 
 ### Plate-solve cache
 
@@ -584,8 +595,10 @@ point. The default unsigned 16-bit output uses no rescaling; use
 `--output-bitpix float32` when you want to preserve fractional interpolation
 values directly.
 
-Large Siril and median temporary image arrays are removed after a successful
-run. Use `--no-cleanup` to keep them for diagnosis.
+Source/conversion/calibration staging is removed after preprocessing, final
+preprocessed images after registration, registered Siril images after each
+accepted stack contribution, and median temporary arrays after finalization.
+Use `--no-cleanup` to keep them for diagnosis.
 
 ## When Horizons cannot identify the target
 

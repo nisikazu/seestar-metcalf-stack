@@ -24,9 +24,13 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import warnings
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -59,6 +63,56 @@ class FitsImage:
     header: dict[str, object]
     cards: list[str]
     data: np.ndarray
+
+
+@dataclass(frozen=True)
+class StackCanvas:
+    """Output footprint expressed in the background-registration coordinate system."""
+
+    shape: tuple[int, int]
+    origin_x: float = 0.0
+    origin_y: float = 0.0
+
+    def __post_init__(self) -> None:
+        height, width = self.shape
+        if height <= 0 or width <= 0:
+            raise ValueError(f"Stack canvas dimensions must be positive: {self.shape}")
+
+    @classmethod
+    def reference_footprint(cls, shape: tuple[int, int]) -> "StackCanvas":
+        return cls(shape=(int(shape[0]), int(shape[1])))
+
+    def is_identity_for(self, source_shape: tuple[int, int]) -> bool:
+        return self.shape == source_shape and self.origin_x == 0.0 and self.origin_y == 0.0
+
+    def registration_to_output_pixel(self, x_1based: float, y_1based: float) -> tuple[float, float]:
+        """Convert a registration-coordinate pixel to this canvas' FITS pixel coordinates."""
+        return x_1based - self.origin_x, y_1based - self.origin_y
+
+    def rebase_wcs_header(self, header: dict[str, object]) -> dict[str, object]:
+        """Move a registration-coordinate WCS origin onto this output canvas."""
+        rebased = dict(header)
+        if "CRPIX1" in rebased:
+            rebased["CRPIX1"] = float(rebased["CRPIX1"]) - self.origin_x
+        if "CRPIX2" in rebased:
+            rebased["CRPIX2"] = float(rebased["CRPIX2"]) - self.origin_y
+        return rebased
+
+
+@dataclass(frozen=True)
+class BilinearTranslationPlan:
+    """Reusable source/output slices and mask for one translation onto a canvas."""
+
+    output_shape: tuple[int, int]
+    output_slice: tuple[slice, slice] | None
+    source_y0: int
+    source_y1: int
+    source_x0: int
+    source_x1: int
+    weight_x: float
+    weight_y: float
+    valid_mask: np.ndarray
+    identity: bool = False
 
 
 @dataclass
@@ -480,9 +534,14 @@ def detect_saturation(
     return mask, level, threshold, maximum
 
 
-def shift_boolean_mask(mask: np.ndarray, dx: float, dy: float) -> np.ndarray:
+def shift_boolean_mask(
+    mask: np.ndarray,
+    dx: float,
+    dy: float,
+    canvas: StackCanvas | None = None,
+) -> np.ndarray:
     """Conservatively mark every output pixel touched by a shifted true pixel."""
-    shifted, valid = shift_plane(mask.astype(np.float32, copy=False), dx, dy)
+    shifted, valid = shift_plane(mask.astype(np.float32, copy=False), dx, dy, canvas=canvas)
     return valid & (shifted > 0.0)
 
 
@@ -840,6 +899,71 @@ class BackgroundModel:
         return self.coefficients[:, 0]
 
 
+@dataclass(frozen=True)
+class StackFrameTask:
+    """Metadata needed to process one registered frame without shared state."""
+
+    index: int
+    source_name: str
+    registered: Path
+    source_header: dict[str, object]
+    frame_time: datetime
+    target: TargetPoint
+    target_x: float
+    target_y: float
+    dx: float
+    dy: float
+
+
+@dataclass
+class StackFrameResult:
+    """Heavy per-frame products returned for deterministic serial accumulation."""
+
+    task: StackFrameTask
+    star_data: np.ndarray
+    star_mask: np.ndarray
+    metcalf_data: np.ndarray
+    metcalf_mask: np.ndarray
+    registered_unit_scale: float
+    background_model: BackgroundModel | None
+    background_correction: np.ndarray | None
+    star_saturation_mask: np.ndarray | None
+    metcalf_saturation_mask: np.ndarray | None
+    saturation_level: float | None
+    saturation_threshold_count: float | None
+    subframe_max_count: float | None
+    saturated_pixel_count: int
+    timings: dict[str, float]
+
+
+def ordered_bounded_map(function, items, max_workers: int):
+    """Run at most ``max_workers`` frame jobs while yielding input order."""
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
+    iterator = iter(items)
+    if max_workers == 1:
+        for item in iterator:
+            yield function(item)
+        return
+
+    pending: deque[tuple[object, Future]] = deque()
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="metcalf-frame") as executor:
+        for _ in range(max_workers):
+            try:
+                item = next(iterator)
+            except StopIteration:
+                break
+            pending.append((item, executor.submit(function, item)))
+        while pending:
+            _item, future = pending.popleft()
+            yield future.result()
+            try:
+                item = next(iterator)
+            except StopIteration:
+                continue
+            pending.append((item, executor.submit(function, item)))
+
+
 def sigma_clipped_median(values: np.ndarray, sigma: float = BACKGROUND_SIGMA, iterations: int = BACKGROUND_ITERATIONS) -> float:
     """Return a robust background level without letting stars set the DC level."""
     samples = np.asarray(values, dtype=np.float64)
@@ -919,6 +1043,16 @@ def background_grid(height: int, width: int, mode: str) -> np.ndarray:
     raise ValueError(f"Unsupported background normalization mode: {mode}")
 
 
+@lru_cache(maxsize=8)
+def background_axes(height: int, width: int) -> tuple[np.ndarray, np.ndarray]:
+    """Cache separable normalized coordinates without retaining full-frame term grids."""
+    x = np.linspace(-1.0, 1.0, width, dtype=np.float64)
+    y = np.linspace(-1.0, 1.0, height, dtype=np.float64)
+    x.setflags(write=False)
+    y.setflags(write=False)
+    return x, y
+
+
 def background_tile_samples(data: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return robust RGB background values sampled from a deterministic 50x50 grid."""
     if valid_mask.shape != data.shape[-2:]:
@@ -945,36 +1079,51 @@ def background_tile_samples(data: np.ndarray, valid_mask: np.ndarray) -> tuple[n
         -1, sampled_tile_height * sampled_tile_width
     )
     sampled_weights = np.count_nonzero(sampled_valid, axis=1)
-    x_coordinates = np.broadcast_to(np.arange(padded_width, dtype=np.float64), (padded_height, padded_width))
-    y_coordinates = np.broadcast_to(np.arange(padded_height, dtype=np.float64)[:, np.newaxis], (padded_height, padded_width))
-
-    def sampled_coordinates(coordinates: np.ndarray) -> np.ndarray:
-        grid = coordinates.reshape(BACKGROUND_TILE_ROWS, tile_height, BACKGROUND_TILE_COLUMNS, tile_width)
-        grid = grid[:, ::BACKGROUND_TILE_SAMPLE_STEP, :, ::BACKGROUND_TILE_SAMPLE_STEP]
-        return grid.transpose(0, 2, 1, 3).reshape(-1, sampled_tile_height * sampled_tile_width)
-
-    sampled_x = sampled_coordinates(x_coordinates)
-    sampled_y = sampled_coordinates(y_coordinates)
+    tile_x = np.arange(padded_width, dtype=np.float64).reshape(BACKGROUND_TILE_COLUMNS, tile_width)
+    tile_x = tile_x[:, ::BACKGROUND_TILE_SAMPLE_STEP]
+    tile_y = np.arange(padded_height, dtype=np.float64).reshape(BACKGROUND_TILE_ROWS, tile_height)
+    tile_y = tile_y[:, ::BACKGROUND_TILE_SAMPLE_STEP]
+    sampled_shape = (
+        BACKGROUND_TILE_ROWS,
+        BACKGROUND_TILE_COLUMNS,
+        sampled_tile_height,
+        sampled_tile_width,
+    )
+    sampled_x = np.broadcast_to(tile_x[np.newaxis, :, np.newaxis, :], sampled_shape).reshape(
+        -1, sampled_tile_height * sampled_tile_width
+    )
+    sampled_y = np.broadcast_to(tile_y[:, np.newaxis, :, np.newaxis], sampled_shape).reshape(
+        -1, sampled_tile_height * sampled_tile_width
+    )
     values_by_channel: list[np.ndarray] = []
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        for plane in planes:
-            padded = np.full((padded_height, padded_width), np.nan, dtype=np.float64)
-            padded[:height, :width] = np.where(valid_mask, plane, np.nan)
-            tiles = padded.reshape(BACKGROUND_TILE_ROWS, tile_height, BACKGROUND_TILE_COLUMNS, tile_width)
-            tiles = tiles[:, ::BACKGROUND_TILE_SAMPLE_STEP, :, ::BACKGROUND_TILE_SAMPLE_STEP]
-            tiles = tiles.transpose(0, 2, 1, 3).reshape(-1, sampled_tile_height * sampled_tile_width)
-            initial = np.nanmedian(tiles, axis=1)
-            mad = np.nanmedian(np.abs(tiles - initial[:, np.newaxis]), axis=1)
-            robust_sigma = 1.4826 * mad
-            keep = np.isfinite(tiles)
-            clipping_tiles = robust_sigma > 0.0
-            if np.any(clipping_tiles):
-                keep[clipping_tiles] &= (
-                    np.abs(tiles[clipping_tiles] - initial[clipping_tiles, np.newaxis])
-                    <= BACKGROUND_SIGMA * robust_sigma[clipping_tiles, np.newaxis]
-                )
-            values_by_channel.append(np.nanmedian(np.where(keep, tiles, np.nan), axis=1))
+    active_tiles = sampled_weights > 0
+    for plane in planes:
+        padded = np.full((padded_height, padded_width), np.nan, dtype=np.float64)
+        padded[:height, :width] = np.where(valid_mask, plane, np.nan)
+        tiles = padded.reshape(BACKGROUND_TILE_ROWS, tile_height, BACKGROUND_TILE_COLUMNS, tile_width)
+        tiles = tiles[:, ::BACKGROUND_TILE_SAMPLE_STEP, :, ::BACKGROUND_TILE_SAMPLE_STEP]
+        tiles = tiles.transpose(0, 2, 1, 3).reshape(-1, sampled_tile_height * sampled_tile_width)
+        initial = np.full(tiles.shape[0], np.nan, dtype=np.float64)
+        initial[active_tiles] = np.nanmedian(tiles[active_tiles], axis=1)
+        mad = np.full(tiles.shape[0], np.nan, dtype=np.float64)
+        mad[active_tiles] = np.nanmedian(
+            np.abs(tiles[active_tiles] - initial[active_tiles, np.newaxis]),
+            axis=1,
+        )
+        robust_sigma = 1.4826 * mad
+        keep = np.isfinite(tiles)
+        clipping_tiles = active_tiles & (robust_sigma > 0.0)
+        if np.any(clipping_tiles):
+            keep[clipping_tiles] &= (
+                np.abs(tiles[clipping_tiles] - initial[clipping_tiles, np.newaxis])
+                <= BACKGROUND_SIGMA * robust_sigma[clipping_tiles, np.newaxis]
+            )
+        channel_values = np.full(tiles.shape[0], np.nan, dtype=np.float64)
+        channel_values[active_tiles] = np.nanmedian(
+            np.where(keep[active_tiles], tiles[active_tiles], np.nan),
+            axis=1,
+        )
+        values_by_channel.append(channel_values)
 
     samples = np.column_stack(values_by_channel)
     center_x = np.sum(np.where(sampled_valid, sampled_x, 0.0), axis=1) / np.maximum(sampled_weights, 1)
@@ -1056,7 +1205,8 @@ def apply_background_offset(data: np.ndarray, valid_mask: np.ndarray, offset_lev
     if offsets.size != planes.shape[0]:
         raise ValueError(f"Background offset channel count changed: {offsets.size} != {planes.shape[0]}")
     result = planes.astype(np.float64, copy=True)
-    result[:, valid_mask] += offsets[:, np.newaxis]
+    for channel, offset in enumerate(offsets):
+        np.add(result[channel], offset, out=result[channel], where=valid_mask)
     return result[0] if data.ndim == 2 else result
 
 
@@ -1078,9 +1228,30 @@ def apply_background_model(
             f"Background coefficient shape changed: {coefficients.shape} != "
             f"{(planes.shape[0], background_term_count(mode))}"
         )
-    correction = np.tensordot(coefficients, background_grid(*valid_mask.shape, mode), axes=(1, 0))
     result = planes.astype(np.float64, copy=True)
-    result[:, valid_mask] += correction[:, valid_mask]
+    height, width = valid_mask.shape
+    x, y = background_axes(height, width)
+    x_row = x[np.newaxis, :]
+    y_column = y[:, np.newaxis]
+    x_squared = (x * x)[np.newaxis, :]
+    y_squared = (y * y)[:, np.newaxis]
+    for channel, coefficient in enumerate(coefficients):
+        terms = (
+            (float(coefficient[0]), None),
+            (float(coefficient[1]), x_row),
+            (float(coefficient[2]), y_column),
+        )
+        for scalar, basis in terms:
+            value = scalar if basis is None else scalar * basis
+            np.add(result[channel], value, out=result[channel], where=valid_mask)
+        if mode == "quadratic":
+            for scalar, basis in (
+                (float(coefficient[3]), x_squared),
+                (float(coefficient[5]), y_squared),
+            ):
+                np.add(result[channel], scalar * basis, out=result[channel], where=valid_mask)
+            cross_term = (float(coefficient[4]) * y_column) * x_row
+            np.add(result[channel], cross_term, out=result[channel], where=valid_mask)
     return result[0] if data.ndim == 2 else result
 
 
@@ -1111,75 +1282,23 @@ def mean_background_dc_levels(models_by_index: dict[int, BackgroundModel]) -> np
     )
 
 
-def collect_background_normalization(
-    copied: list[Path],
-    source_files: list[Path],
-    registration_dir: Path,
-    processed_basename: str,
-    registration_issues: dict[int, list[str]],
-    mode: str,
-    verbose_mode: bool,
-) -> tuple[np.ndarray, dict[int, BackgroundModel], dict[int, np.ndarray]]:
-    """Fit and remove each frame's background, retaining a final output range offset."""
-    models_by_index: dict[int, BackgroundModel] = {}
-    for index, source in enumerate(copied, start=1):
-        if registration_issues.get(index):
-            continue
-        registered = registration_dir / f"r_{processed_basename}_{index:05d}.fit"
-        source_header, _cards, _offset = read_fits_header(source)
-        image, _registered_unit_scale = restore_registered_units(read_fits(registered), source_header)
-        try:
-            models_by_index[index] = fit_background_surface(image.data, registered_valid_mask(image.data), mode)
-        except ValueError as error:
-            raise RuntimeError(
-                f"Cannot estimate the background of usable frame {index} ({source_files[index - 1].name}): {error}"
-            ) from error
-        if verbose_mode:
-            model = models_by_index[index]
-            rendered = ", ".join(f"{level:.3f}" for level in model.levels)
-            details = "" if mode == "offset" else f"; tiles={model.tile_count}; rejected={model.rejected_tile_counts.tolist()}"
-            print(f"[background] frame {index}/{len(copied)}: [{rendered}] ADU{details}", flush=True)
-    if not models_by_index:
-        raise RuntimeError("No registered frames were available for background normalization")
-    coefficient_shapes = {model.coefficients.shape for model in models_by_index.values()}
-    if len(coefficient_shapes) != 1:
-        raise RuntimeError("Registered frames have inconsistent channel counts for background normalization")
-    # Arithmetic is performed around a zero background. The arithmetic mean
-    # DC level is retained only as a post-stack output-range offset for
-    # non-negative formats.
-    output_levels = mean_background_dc_levels(models_by_index)
-    corrections_by_index = {
-        index: -model.coefficients for index, model in models_by_index.items()
-    }
-    channel_counts = {model.levels.size for model in models_by_index.values()}
-    if len(channel_counts) != 1:
-        raise RuntimeError("Registered frames have inconsistent channel counts for background normalization")
-    if verbose_mode:
-        rendered = ", ".join(f"{level:.3f}" for level in output_levels)
-        details = "" if mode == "offset" else f"; model={mode}; tiles={BACKGROUND_TILE_ROWS}x{BACKGROUND_TILE_COLUMNS}"
-        print(
-            f"[background] each frame is fitted to zero; final output offset: [{rendered}] ADU{details}",
-            flush=True,
-        )
-    return output_levels, models_by_index, corrections_by_index
-
-
 def shift_image(
     data: np.ndarray,
     dx: float,
     dy: float,
     source_valid: np.ndarray | None = None,
+    canvas: StackCanvas | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    output_canvas = canvas or StackCanvas.reference_footprint(data.shape[-2:])
+    plan = build_bilinear_translation_plan(data.shape[-2:], dx, dy, source_valid, output_canvas)
     if data.ndim == 2:
-        shifted, mask = shift_plane(data, dx, dy, source_valid)
+        shifted, mask = apply_bilinear_translation_plan(data, plan)
         return shifted, mask
     planes = []
-    common_mask = None
     for plane in data:
-        shifted, mask = shift_plane(plane, dx, dy, source_valid)
+        shifted, _mask = apply_bilinear_translation_plan(plane, plan)
         planes.append(shifted)
-        common_mask = mask if common_mask is None else (common_mask & mask)
-    return np.stack(planes, axis=0), common_mask
+    return np.stack(planes, axis=0), plan.valid_mask
 
 
 def transform_image(
@@ -1254,49 +1373,120 @@ def shift_plane(
     dx: float,
     dy: float,
     source_valid: np.ndarray | None = None,
+    canvas: StackCanvas | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    height, width = data.shape
-    if source_valid is not None and source_valid.shape != (height, width):
-        raise ValueError(f"Validity mask shape changed: {source_valid.shape} != {(height, width)}")
-    if abs(dx) < 1.0e-9 and abs(dy) < 1.0e-9:
-        valid = np.ones((height, width), dtype=bool) if source_valid is None else source_valid.copy()
-        return data.astype(np.float64, copy=True), valid
-    yy, xx = np.indices((height, width), dtype=np.float32)
-    src_x = xx - np.float32(dx)
-    src_y = yy - np.float32(dy)
-    x0 = np.floor(src_x).astype(np.int32)
-    y0 = np.floor(src_y).astype(np.int32)
-    x1 = x0 + 1
-    y1 = y0 + 1
-    valid = (x0 >= 0) & (y0 >= 0) & (x1 < width) & (y1 < height)
-    if source_valid is not None and np.any(valid):
-        valid_indices = np.flatnonzero(valid)
-        valid_y = valid_indices // width
-        valid_x = valid_indices % width
-        kernel_valid = (
-            source_valid[y0[valid_y, valid_x], x0[valid_y, valid_x]]
-            & source_valid[y0[valid_y, valid_x], x1[valid_y, valid_x]]
-            & source_valid[y1[valid_y, valid_x], x0[valid_y, valid_x]]
-            & source_valid[y1[valid_y, valid_x], x1[valid_y, valid_x]]
-        )
-        valid[valid_y, valid_x] = kernel_valid
+    output_canvas = canvas or StackCanvas.reference_footprint(data.shape)
+    plan = build_bilinear_translation_plan(data.shape, dx, dy, source_valid, output_canvas)
+    return apply_bilinear_translation_plan(data, plan)
 
-    out = np.zeros((height, width), dtype=np.float32)
-    if not np.any(valid):
-        return out, valid
-    wx = src_x[valid] - x0[valid]
-    wy = src_y[valid] - y0[valid]
-    v00 = data[y0[valid], x0[valid]]
-    v10 = data[y0[valid], x1[valid]]
-    v01 = data[y1[valid], x0[valid]]
-    v11 = data[y1[valid], x1[valid]]
-    out[valid] = (
-        (1.0 - wx) * (1.0 - wy) * v00
-        + wx * (1.0 - wy) * v10
-        + (1.0 - wx) * wy * v01
-        + wx * wy * v11
+
+def build_bilinear_translation_plan(
+    source_shape: tuple[int, int],
+    dx: float,
+    dy: float,
+    source_valid: np.ndarray | None,
+    canvas: StackCanvas,
+) -> BilinearTranslationPlan:
+    """Map a registered source image onto an independently defined output canvas."""
+    source_height, source_width = source_shape
+    if source_valid is not None and source_valid.shape != source_shape:
+        raise ValueError(f"Validity mask shape changed: {source_valid.shape} != {source_shape}")
+    output_height, output_width = canvas.shape
+    identity = (
+        canvas.is_identity_for(source_shape)
+        and abs(dx) < 1.0e-9
+        and abs(dy) < 1.0e-9
     )
-    return out, valid
+    if identity:
+        valid = np.ones(source_shape, dtype=bool) if source_valid is None else source_valid.copy()
+        return BilinearTranslationPlan(
+            output_shape=canvas.shape,
+            output_slice=(slice(0, source_height), slice(0, source_width)),
+            source_y0=0,
+            source_y1=source_height,
+            source_x0=0,
+            source_x1=source_width,
+            weight_x=0.0,
+            weight_y=0.0,
+            valid_mask=valid,
+            identity=True,
+        )
+
+    # Canvas pixel (u, v) represents registration coordinate
+    # (u + origin_x, v + origin_y). Inverse sampling therefore reads source
+    # coordinate (u + origin_x - dx, v + origin_y - dy).
+    source_x_offset = int(math.floor(canvas.origin_x - dx))
+    source_y_offset = int(math.floor(canvas.origin_y - dy))
+    weight_x = float(canvas.origin_x - dx - source_x_offset)
+    weight_y = float(canvas.origin_y - dy - source_y_offset)
+    output_x0 = max(0, -source_x_offset)
+    output_x1 = min(output_width, source_width - 1 - source_x_offset)
+    output_y0 = max(0, -source_y_offset)
+    output_y1 = min(output_height, source_height - 1 - source_y_offset)
+    valid = np.zeros(canvas.shape, dtype=bool)
+    if output_x1 <= output_x0 or output_y1 <= output_y0:
+        return BilinearTranslationPlan(
+            output_shape=canvas.shape,
+            output_slice=None,
+            source_y0=0,
+            source_y1=0,
+            source_x0=0,
+            source_x1=0,
+            weight_x=weight_x,
+            weight_y=weight_y,
+            valid_mask=valid,
+        )
+
+    source_x0 = output_x0 + source_x_offset
+    source_x1 = output_x1 + source_x_offset
+    source_y0 = output_y0 + source_y_offset
+    source_y1 = output_y1 + source_y_offset
+    output_slice = (slice(output_y0, output_y1), slice(output_x0, output_x1))
+    valid_region = np.ones((output_y1 - output_y0, output_x1 - output_x0), dtype=bool)
+    if source_valid is not None:
+        valid_region &= source_valid[source_y0:source_y1, source_x0:source_x1]
+        valid_region &= source_valid[source_y0:source_y1, source_x0 + 1 : source_x1 + 1]
+        valid_region &= source_valid[source_y0 + 1 : source_y1 + 1, source_x0:source_x1]
+        valid_region &= source_valid[source_y0 + 1 : source_y1 + 1, source_x0 + 1 : source_x1 + 1]
+    valid[output_slice] = valid_region
+    return BilinearTranslationPlan(
+        output_shape=canvas.shape,
+        output_slice=output_slice,
+        source_y0=source_y0,
+        source_y1=source_y1,
+        source_x0=source_x0,
+        source_x1=source_x1,
+        weight_x=weight_x,
+        weight_y=weight_y,
+        valid_mask=valid,
+    )
+
+
+def apply_bilinear_translation_plan(
+    data: np.ndarray,
+    plan: BilinearTranslationPlan,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply a pure-translation plan without constructing full coordinate grids."""
+    if data.ndim != 2:
+        raise ValueError(f"Translation plan expects a 2D plane, received shape {data.shape}")
+    if plan.identity:
+        return data.astype(np.float64, copy=True), plan.valid_mask
+    output = np.zeros(plan.output_shape, dtype=np.float32)
+    if plan.output_slice is None or not np.any(plan.valid_mask):
+        return output, plan.valid_mask
+    y0, y1 = plan.source_y0, plan.source_y1
+    x0, x1 = plan.source_x0, plan.source_x1
+    wx, wy = plan.weight_x, plan.weight_y
+    blended = (
+        (1.0 - wx) * (1.0 - wy) * data[y0:y1, x0:x1]
+        + wx * (1.0 - wy) * data[y0:y1, x0 + 1 : x1 + 1]
+        + (1.0 - wx) * wy * data[y0 + 1 : y1 + 1, x0:x1]
+        + wx * wy * data[y0 + 1 : y1 + 1, x0 + 1 : x1 + 1]
+    )
+    target = output[plan.output_slice]
+    valid_region = plan.valid_mask[plan.output_slice]
+    target[valid_region] = blended[valid_region]
+    return output, plan.valid_mask
 
 
 def add_to_average(
@@ -1311,11 +1501,9 @@ def add_to_average(
         count_image = np.zeros(count_shape, dtype=np.uint32)
     if count_image is None:
         raise ValueError("count_image must be initialized with sum_image")
-    if image.ndim == 3:
-        sum_image += image * mask2d[np.newaxis, :, :]
-    else:
-        sum_image += image * mask2d
-    count_image += mask2d.astype(np.uint16)
+    where = mask2d[np.newaxis, :, :] if image.ndim == 3 else mask2d
+    np.add(sum_image, image, out=sum_image, where=where)
+    np.add(count_image, mask2d, out=count_image, casting="unsafe")
     return sum_image, count_image
 
 
@@ -1330,6 +1518,121 @@ def finalize_average(sum_image: np.ndarray | None, count_image: np.ndarray | Non
         stack = sum_image / safe_count
         stack[count_image == 0] = 0
     return stack
+
+
+def process_stack_frame(
+    task: StackFrameTask,
+    canvas: StackCanvas,
+    padding_policy: str,
+    background_mode: str,
+    saturation_enabled: bool,
+    saturation_threshold_percent: float,
+) -> StackFrameResult:
+    """Read and transform one frame without mutating any stack accumulator."""
+    timings = {
+        "fits_read": 0.0,
+        "background_fit": 0.0,
+        "background_apply": 0.0,
+        "star_resample": 0.0,
+        "metcalf_shift": 0.0,
+        "saturation": 0.0,
+    }
+    started = time.perf_counter()
+    image, registered_unit_scale = restore_registered_units(
+        read_fits(task.registered),
+        task.source_header,
+    )
+    source_valid = registered_valid_mask(image.data) if padding_policy == "valid" else None
+    timings["fits_read"] = time.perf_counter() - started
+
+    saturation_level: float | None = None
+    saturation_threshold_count: float | None = None
+    subframe_max_count: float | None = None
+    saturated_pixel_count = 0
+    frame_saturation_mask: np.ndarray | None = None
+    if saturation_enabled:
+        started = time.perf_counter()
+        (
+            frame_saturation_mask,
+            saturation_level,
+            saturation_threshold_count,
+            subframe_max_count,
+        ) = detect_saturation(image.data, task.source_header, saturation_threshold_percent)
+        saturated_pixel_count = int(np.count_nonzero(frame_saturation_mask))
+        timings["saturation"] = time.perf_counter() - started
+
+    background_model: BackgroundModel | None = None
+    background_correction: np.ndarray | None = None
+    stack_data = image.data
+    if background_mode != "none":
+        if source_valid is None:
+            raise RuntimeError(
+                f"Background normalization requires a validity mask for frame {task.index} ({task.source_name})"
+            )
+        started = time.perf_counter()
+        try:
+            background_model = fit_background_surface(image.data, source_valid, background_mode)
+        except ValueError as error:
+            raise RuntimeError(
+                f"Cannot estimate the background of usable frame {task.index} ({task.source_name}): {error}"
+            ) from error
+        timings["background_fit"] = time.perf_counter() - started
+        background_correction = -background_model.coefficients
+        started = time.perf_counter()
+        stack_data = apply_background_model(
+            image.data,
+            source_valid,
+            background_correction,
+            background_mode,
+        )
+        timings["background_apply"] = time.perf_counter() - started
+
+    started = time.perf_counter()
+    metcalf_data, metcalf_mask = shift_image(
+        stack_data,
+        task.dx,
+        task.dy,
+        source_valid,
+        canvas,
+    )
+    timings["metcalf_shift"] = time.perf_counter() - started
+
+    if canvas.is_identity_for(stack_data.shape[-2:]):
+        star_data = stack_data
+        star_mask = np.ones(canvas.shape, dtype=bool) if source_valid is None else source_valid
+    else:
+        started = time.perf_counter()
+        star_data, star_mask = shift_image(stack_data, 0.0, 0.0, source_valid, canvas)
+        timings["star_resample"] = time.perf_counter() - started
+
+    star_saturation_mask: np.ndarray | None = None
+    metcalf_saturation_mask: np.ndarray | None = None
+    if frame_saturation_mask is not None and saturated_pixel_count > 0:
+        started = time.perf_counter()
+        if canvas.is_identity_for(frame_saturation_mask.shape):
+            star_saturation_mask = frame_saturation_mask & star_mask
+        else:
+            star_saturation_mask = shift_boolean_mask(frame_saturation_mask, 0.0, 0.0, canvas) & star_mask
+        metcalf_saturation_mask = shift_boolean_mask(frame_saturation_mask, task.dx, task.dy, canvas)
+        timings["saturation"] += time.perf_counter() - started
+
+    return StackFrameResult(
+        task=task,
+        star_data=star_data,
+        star_mask=star_mask,
+        metcalf_data=metcalf_data,
+        metcalf_mask=metcalf_mask,
+        registered_unit_scale=registered_unit_scale,
+        background_model=background_model,
+        background_correction=background_correction,
+        star_saturation_mask=star_saturation_mask,
+        metcalf_saturation_mask=metcalf_saturation_mask,
+        saturation_level=saturation_level,
+        saturation_threshold_count=saturation_threshold_count,
+        subframe_max_count=subframe_max_count,
+        saturated_pixel_count=saturated_pixel_count,
+        timings=timings,
+    )
 
 
 class MedianAccumulator:
@@ -1682,9 +1985,15 @@ def cleanup_intermediate_images(
         if processed_basename and processed_basename != basename:
             candidates.append(work_dir / f"{processed_basename}_{i:05d}.fit")
             candidates.append(work_dir / f"r_{processed_basename}_{i:05d}.fit")
+    return remove_intermediate_paths(candidates)
+
+
+def remove_intermediate_paths(candidates) -> list[str]:
+    """Remove existing intermediate files once no later stage can read them."""
     removed: list[str] = []
     seen: set[Path] = set()
     for path in candidates:
+        path = Path(path)
         try:
             resolved = path.resolve()
         except OSError:
@@ -1696,6 +2005,27 @@ def cleanup_intermediate_images(
             continue
         path.unlink()
         removed.append(str(path))
+    return removed
+
+
+def cleanup_after_preprocessing(registration_dir: Path, processed_files: list[Path]) -> list[str]:
+    """Keep only the final sequence needed by registration plus small Siril metadata."""
+    preserved = {path.resolve() for path in processed_files}
+    candidates = [
+        path
+        for pattern in ("*.fit", "*.fits", "*.fts")
+        for path in registration_dir.glob(pattern)
+        if path.resolve() not in preserved
+    ]
+    calibration_dir = registration_dir / "calibration"
+    if calibration_dir.is_dir():
+        candidates.extend(path for path in calibration_dir.iterdir() if path.is_file())
+    removed = remove_intermediate_paths(candidates)
+    if calibration_dir.is_dir():
+        try:
+            calibration_dir.rmdir()
+        except OSError:
+            pass
     return removed
 
 
@@ -2390,6 +2720,13 @@ def main() -> int:
         help="Per-pixel combination method. median and rankfit exclude exact-zero samples. Defaults to mean.",
     )
     parser.add_argument(
+        "--stack-workers",
+        type=int,
+        choices=(1, 2, 4),
+        default=2,
+        help="Parallel workers for per-frame FITS/background/shift processing. Defaults to 2.",
+    )
+    parser.add_argument(
         "--rankfit-fraction",
         type=int,
         default=50,
@@ -2570,7 +2907,9 @@ def main() -> int:
         preprocessing_payload = manifest.get("preprocessing")
     preprocessing_plan = PreprocessingPlan.from_dict(preprocessing_payload)
 
+    removed_intermediate_images: list[str] = []
     copied: list[Path] = []
+    source_headers: list[dict[str, object]] = []
     cfa = False
     try:
         if args.verbose:
@@ -2583,6 +2922,7 @@ def main() -> int:
             if manifest is not None:
                 row = manifest_rows[i - 1]
                 image = read_source_image(source, args.bayer_pattern, debayer=False)
+                source_headers.append(dict(image.header))
                 if image.data.ndim == 2:
                     pattern = str(image.header.get("BAYERPAT") or "").strip()
                     if not pattern:
@@ -2599,6 +2939,8 @@ def main() -> int:
                 )
             else:
                 shutil.copy2(source, destination)
+                source_header, _cards, _offset = read_fits_header(source)
+                source_headers.append(source_header)
                 if i == 1:
                     raw_image = read_source_image(source, args.bayer_pattern, debayer=False)
                     cfa = raw_image.data.ndim == 2 and bool(
@@ -2634,6 +2976,13 @@ def main() -> int:
     if missing_processed:
         raise RuntimeError(
             f"Siril preprocessing produced only {len(processed_files) - len(missing_processed)}/{len(processed_files)} frame(s)"
+        )
+    if not args.no_cleanup:
+        preprocessing_removed = cleanup_after_preprocessing(registration_dir, processed_files)
+        removed_intermediate_images.extend(preprocessing_removed)
+        print(
+            f"[cleanup] Removed {len(preprocessing_removed)} source/conversion/calibration files after preprocessing",
+            flush=True,
         )
 
     if use_sharpcap_registration:
@@ -2807,6 +3156,12 @@ def main() -> int:
     reference = read_fits(processed_files[reference_index - 1])
     height = int(reference.header["NAXIS2"])
     width = int(reference.header["NAXIS1"])
+    # The current product uses the reference footprint, but translation and
+    # accumulation receive an explicit registration-coordinate canvas so a
+    # future expanded footprint can change shape/origin without replacing the
+    # resampler.
+    stack_canvas = StackCanvas.reference_footprint((height, width))
+    canvas_height, canvas_width = stack_canvas.shape
     if args.wcs_fits:
         wcs = WcsModel.from_wcs_fits(args.wcs_fits)
     else:
@@ -2815,6 +3170,7 @@ def main() -> int:
     reference_time = parse_time(reference.header["DATE-OBS"])
     reference_target = interpolate_ephemeris(ephemeris, reference_time)
     reference_x, reference_y = wcs.world_to_pixel(reference_target.ra_deg, reference_target.dec_deg)
+    output_reference_x, output_reference_y = stack_canvas.registration_to_output_pixel(reference_x, reference_y)
     sun_header: dict[str, object] = {}
     sun_pa_status = "off"
     if args.sun_pa == "auto":
@@ -2842,24 +3198,14 @@ def main() -> int:
     background_models_by_index: dict[int, BackgroundModel] = {}
     background_corrections_by_index: dict[int, np.ndarray] = {}
     if args.background_normalization != "none":
-        print(f"[background] Estimating per-frame {args.background_normalization} models", flush=True)
-        (
-            background_output_levels,
-            background_models_by_index,
-            background_corrections_by_index,
-        ) = collect_background_normalization(
-            copied,
-            files,
-            registration_dir,
-            processed_basename,
-            registration_issues,
-            args.background_normalization,
-            args.verbose,
+        print(
+            f"[background] Fitting and applying per-frame {args.background_normalization} models during stacking",
+            flush=True,
         )
     saturation_enabled = args.saturation_warning == "enable"
     warning_color_rgb = saturation_rgb(args.saturation_color)
-    metcalf_saturation_mask = np.zeros((height, width), dtype=bool) if saturation_enabled else None
-    star_saturation_mask = np.zeros((height, width), dtype=bool) if saturation_enabled else None
+    metcalf_saturation_mask = np.zeros(stack_canvas.shape, dtype=bool) if saturation_enabled else None
+    star_saturation_mask = np.zeros(stack_canvas.shape, dtype=bool) if saturation_enabled else None
     saturated_frame_count = 0
     saturation_level_unavailable_frames = 0
 
@@ -2881,13 +3227,21 @@ def main() -> int:
             flush=True,
         )
 
+    stack_wall_started = time.perf_counter()
+    stack_timing_seconds = {
+        "fits_read": 0.0,
+        "background_fit": 0.0,
+        "background_apply": 0.0,
+        "star_resample": 0.0,
+        "star_accumulation": 0.0,
+        "metcalf_shift": 0.0,
+        "metcalf_accumulation": 0.0,
+        "saturation": 0.0,
+        "total_stacking_wall": 0.0,
+    }
+    stack_tasks: list[StackFrameTask] = []
+    registration_metrics_by_index: dict[int, dict[str, object]] = {}
     for i, source in enumerate(copied, start=1):
-        if args.verbose:
-            print(
-                f"[stack:{args.stack_method}] frame {i}/{len(copied)}: {files[i - 1].name}",
-                flush=True,
-            )
-        registered = registration_dir / f"r_{processed_basename}_{i:05d}.fit"
         star_reg = star_registrations.get(i, SirilRegistration(index=i))
         match_diag = match_diagnostics.get(i, SirilMatchDiagnostics(index=i))
         registration_metrics = {
@@ -2907,6 +3261,7 @@ def main() -> int:
             "star_rotation_deg": star_reg.star_rotation_deg,
             "star_scale": star_reg.star_scale,
         }
+        registration_metrics_by_index[i] = registration_metrics
         issues = registration_issues.get(i)
         if issues:
             frame_rows.append(
@@ -2919,76 +3274,128 @@ def main() -> int:
                 }
             )
             continue
-        source_header, _cards, _offset = read_fits_header(source)
+        source_header = source_headers[i - 1]
         frame_time = parse_time(source_header["DATE-OBS"])
         target = interpolate_ephemeris(ephemeris, frame_time)
         x, y = wcs.world_to_pixel(target.ra_deg, target.dec_deg)
-        dx = reference_x - x
-        dy = reference_y - y
-        image, registered_unit_scale = restore_registered_units(read_fits(registered), source_header)
-        source_valid = registered_valid_mask(image.data) if args.padding_policy == "valid" else None
-        saturation_level: float | None = None
-        saturation_threshold_count: float | None = None
-        subframe_max_count: float | None = None
-        saturated_pixel_count = 0
-        frame_saturation_warning = False
-        background_model = background_models_by_index.get(i)
-        background_correction = background_corrections_by_index.get(i)
-        stack_data = image.data
-        if args.background_normalization != "none":
-            if source_valid is None or background_model is None or background_correction is None:
-                raise RuntimeError(f"Background normalization data is missing for usable frame {i}")
-            stack_data = apply_background_model(
-                image.data,
-                source_valid,
-                background_correction,
-                args.background_normalization,
+        stack_tasks.append(
+            StackFrameTask(
+                index=i,
+                source_name=files[i - 1].name,
+                registered=registration_dir / f"r_{processed_basename}_{i:05d}.fit",
+                source_header=source_header,
+                frame_time=frame_time,
+                target=target,
+                target_x=x,
+                target_y=y,
+                dx=reference_x - x,
+                dy=reference_y - y,
             )
-        shifted, mask2d = shift_image(stack_data, dx, dy, source_valid)
-        star_shifted, star_mask2d = shift_image(stack_data, 0.0, 0.0, source_valid)
+        )
+
+    if not stack_tasks:
+        raise RuntimeError("No registered frames were available for moving-target stacking")
+    if not args.no_cleanup:
+        skipped_registered = [
+            registration_dir / f"r_{processed_basename}_{index:05d}.fit"
+            for index in registration_issues
+        ]
+        pre_stack_removed = remove_intermediate_paths([*copied, *processed_files, *skipped_registered])
+        removed_intermediate_images.extend(pre_stack_removed)
+        print(
+            f"[cleanup] Removed {len(pre_stack_removed)} completed preprocessing/unused FITS files before stacking",
+            flush=True,
+        )
+
+    if args.verbose:
+        print(
+            f"[stack] processing {len(stack_tasks)} usable frame(s) with {args.stack_workers} worker(s)",
+            flush=True,
+        )
+    worker = lambda task: process_stack_frame(
+        task,
+        stack_canvas,
+        args.padding_policy,
+        args.background_normalization,
+        saturation_enabled,
+        args.saturation_threshold_percent,
+    )
+    for result in ordered_bounded_map(worker, stack_tasks, args.stack_workers):
+        task = result.task
+        i = task.index
+        if args.verbose:
+            print(
+                f"[stack:{args.stack_method}] frame {i}/{len(copied)}: {task.source_name}",
+                flush=True,
+            )
+        for operation, elapsed in result.timings.items():
+            stack_timing_seconds[operation] += elapsed
+        background_model = result.background_model
+        background_correction = result.background_correction
+        if background_model is not None:
+            background_models_by_index[i] = background_model
+            if background_correction is None:
+                raise RuntimeError(f"Background correction is missing for usable frame {i}")
+            background_corrections_by_index[i] = background_correction
+            if args.verbose:
+                rendered = ", ".join(f"{level:.3f}" for level in background_model.levels)
+                details = (
+                    ""
+                    if args.background_normalization == "offset"
+                    else f"; tiles={background_model.tile_count}; rejected={background_model.rejected_tile_counts.tolist()}"
+                )
+                print(f"[background] frame {i}/{len(copied)}: [{rendered}] ADU{details}", flush=True)
+
+        frame_saturation_warning = result.saturated_pixel_count > 0 and result.saturation_level is not None
         if saturation_enabled:
-            (
-                frame_saturation_mask,
-                saturation_level,
-                saturation_threshold_count,
-                subframe_max_count,
-            ) = detect_saturation(image.data, source_header, args.saturation_threshold_percent)
-            if saturation_level is None:
+            if result.saturation_level is None:
                 saturation_level_unavailable_frames += 1
                 if args.verbose:
                     print(
-                        f"[saturation] level unavailable for {files[i - 1].name}; no pixels marked",
+                        f"[saturation] level unavailable for {task.source_name}; no pixels marked",
                         flush=True,
                     )
-            else:
-                saturated_pixel_count = int(np.count_nonzero(frame_saturation_mask))
-                frame_saturation_warning = saturated_pixel_count > 0
-                if frame_saturation_warning:
-                    saturated_frame_count += 1
-                    if star_saturation_mask is None or metcalf_saturation_mask is None:
-                        raise RuntimeError("Saturation warning masks were not initialized")
-                    star_saturation_mask |= frame_saturation_mask & star_mask2d
-                    metcalf_saturation_mask |= shift_boolean_mask(frame_saturation_mask, dx, dy)
-                    if args.verbose:
-                        print(
-                            f"[saturation] {files[i - 1].name}: max={subframe_max_count:.3f}, "
-                            f"threshold={saturation_threshold_count:.3f}, pixels={saturated_pixel_count}",
-                            flush=True,
-                        )
+            elif frame_saturation_warning:
+                saturated_frame_count += 1
+                if (
+                    star_saturation_mask is None
+                    or metcalf_saturation_mask is None
+                    or result.star_saturation_mask is None
+                    or result.metcalf_saturation_mask is None
+                ):
+                    raise RuntimeError("Saturation warning masks were not initialized")
+                star_saturation_mask |= result.star_saturation_mask
+                metcalf_saturation_mask |= result.metcalf_saturation_mask
+                if args.verbose:
+                    print(
+                        f"[saturation] {task.source_name}: max={result.subframe_max_count:.3f}, "
+                        f"threshold={result.saturation_threshold_count:.3f}, pixels={result.saturated_pixel_count}",
+                        flush=True,
+                    )
+
         if args.stack_method == "mean":
-            sum_image, count_image = add_to_average(sum_image, count_image, shifted, mask2d)
+            started = time.perf_counter()
             star_sum_image, star_count_image = add_to_average(
                 star_sum_image,
                 star_count_image,
-                star_shifted,
-                star_mask2d,
+                result.star_data,
+                result.star_mask,
             )
+            stack_timing_seconds["star_accumulation"] += time.perf_counter() - started
+            started = time.perf_counter()
+            sum_image, count_image = add_to_average(
+                sum_image,
+                count_image,
+                result.metcalf_data,
+                result.metcalf_mask,
+            )
+            stack_timing_seconds["metcalf_accumulation"] += time.perf_counter() - started
         else:
             if median_stack is None:
                 median_stack = MedianAccumulator(
                     work_dir / f"{args.stack_method}_metcalf_frames.npy",
                     len(files),
-                    shifted.shape,
+                    result.metcalf_data.shape,
                     exclude_zero_samples=(
                         args.zero_sample_policy == "exclude" and args.background_normalization == "none"
                     ),
@@ -2996,39 +3403,44 @@ def main() -> int:
                 median_star_stack = MedianAccumulator(
                     work_dir / f"{args.stack_method}_star_frames.npy",
                     len(files),
-                    star_shifted.shape,
+                    result.star_data.shape,
                     exclude_zero_samples=(
                         args.zero_sample_policy == "exclude" and args.background_normalization == "none"
                     ),
                 )
-            median_stack.add(shifted, mask2d)
             if median_star_stack is None:
                 raise RuntimeError("Star median accumulator was not initialized")
-            median_star_stack.add(star_shifted, star_mask2d)
-        if metcalf_coverage is None:
-            metcalf_coverage = np.zeros(mask2d.shape, dtype=np.uint32)
-            star_coverage = np.zeros(star_mask2d.shape, dtype=np.uint32)
-        if star_coverage is None:
-            raise RuntimeError("Star coverage image was not initialized")
-        metcalf_coverage += mask2d.astype(np.uint16)
-        star_coverage += star_mask2d.astype(np.uint16)
+            started = time.perf_counter()
+            median_star_stack.add(result.star_data, result.star_mask)
+            stack_timing_seconds["star_accumulation"] += time.perf_counter() - started
+            started = time.perf_counter()
+            median_stack.add(result.metcalf_data, result.metcalf_mask)
+            stack_timing_seconds["metcalf_accumulation"] += time.perf_counter() - started
+            if metcalf_coverage is None:
+                metcalf_coverage = np.zeros(result.metcalf_mask.shape, dtype=np.uint32)
+                star_coverage = np.zeros(result.star_mask.shape, dtype=np.uint32)
+            if star_coverage is None:
+                raise RuntimeError("Star coverage image was not initialized")
+            np.add(metcalf_coverage, result.metcalf_mask, out=metcalf_coverage, casting="unsafe")
+            np.add(star_coverage, result.star_mask, out=star_coverage, casting="unsafe")
         used += 1
-        used_times.append(frame_time)
+        used_times.append(task.frame_time)
+        registration_metrics = registration_metrics_by_index[i]
         frame_rows.append(
             {
                 "index": i,
-                "source": files[i - 1].name,
-                "registered": registered.name,
+                "source": task.source_name,
+                "registered": task.registered.name,
                 "used": True,
-                "date_obs": frame_time.isoformat(),
-                "ra_deg": target.ra_deg,
-                "dec_deg": target.dec_deg,
-                "target_x_1based": x,
-                "target_y_1based": y,
-                "extra_dx_px": dx,
-                "extra_dy_px": dy,
+                "date_obs": task.frame_time.isoformat(),
+                "ra_deg": task.target.ra_deg,
+                "dec_deg": task.target.dec_deg,
+                "target_x_1based": task.target_x,
+                "target_y_1based": task.target_y,
+                "extra_dx_px": task.dx,
+                "extra_dy_px": task.dy,
                 **registration_metrics,
-                "registered_unit_scale": registered_unit_scale,
+                "registered_unit_scale": result.registered_unit_scale,
                 "background_ch1_adu": float(background_model.levels[0]) if background_model is not None else None,
                 "background_ch2_adu": float(background_model.levels[1]) if background_model is not None and background_model.levels.size > 1 else None,
                 "background_ch3_adu": float(background_model.levels[2]) if background_model is not None and background_model.levels.size > 2 else None,
@@ -3046,15 +3458,33 @@ def main() -> int:
                 "background_coefficients": json.dumps(background_model.coefficients.tolist()) if background_model is not None else None,
                 "background_correction_coefficients": json.dumps(background_correction.tolist()) if background_correction is not None else None,
                 "saturation_warning": frame_saturation_warning if saturation_enabled else None,
-                "saturation_level": saturation_level,
-                "saturation_threshold_count": saturation_threshold_count,
-                "subframe_max_count": subframe_max_count,
-                "saturated_pixel_count": saturated_pixel_count if saturation_enabled else None,
+                "saturation_level": result.saturation_level,
+                "saturation_threshold_count": result.saturation_threshold_count,
+                "subframe_max_count": result.subframe_max_count,
+                "saturated_pixel_count": result.saturated_pixel_count if saturation_enabled else None,
             }
         )
+        if not args.no_cleanup:
+            removed_intermediate_images.extend(remove_intermediate_paths([task.registered]))
+
+    frame_rows.sort(key=lambda row: int(row["index"]))
 
     if used == 0:
         raise RuntimeError("No registered frames were available for moving-target stacking")
+
+    if args.background_normalization != "none":
+        background_output_levels = mean_background_dc_levels(background_models_by_index)
+        if args.verbose:
+            rendered = ", ".join(f"{level:.3f}" for level in background_output_levels)
+            details = (
+                ""
+                if args.background_normalization == "offset"
+                else f"; model={args.background_normalization}; tiles={BACKGROUND_TILE_ROWS}x{BACKGROUND_TILE_COLUMNS}"
+            )
+            print(
+                f"[background] each frame was fitted to zero; final output offset: [{rendered}] ADU{details}",
+                flush=True,
+            )
 
     median_temp_removed: list[str] = []
     if args.verbose:
@@ -3065,6 +3495,8 @@ def main() -> int:
     if args.stack_method == "mean":
         stack = finalize_average(sum_image, count_image)
         star_stack = finalize_average(star_sum_image, star_count_image)
+        metcalf_coverage = count_image
+        star_coverage = star_count_image
     elif args.stack_method == "median":
         if median_stack is None or median_star_stack is None:
             raise RuntimeError("Median accumulators were not initialized")
@@ -3088,6 +3520,17 @@ def main() -> int:
             raise RuntimeError("Background output offset data is missing")
         stack = add_background_output_offset(stack, metcalf_coverage > 0, background_output_levels)
         star_stack = add_background_output_offset(star_stack, star_coverage > 0, background_output_levels)
+    stack_timing_seconds["total_stacking_wall"] = time.perf_counter() - stack_wall_started
+    timing_parts = "; ".join(
+        f"{name}={elapsed:.3f}s"
+        for name, elapsed in stack_timing_seconds.items()
+        if name != "total_stacking_wall"
+    )
+    print(
+        f"[timing] workers={args.stack_workers}; {timing_parts}; "
+        f"total_stacking_wall={stack_timing_seconds['total_stacking_wall']:.3f}s",
+        flush=True,
+    )
     comparison_stack = concatenate_side_by_side(star_stack, stack)
     if args.verbose:
         print("[output] Writing Metcalf, star-aligned, comparison FITS, and previews", flush=True)
@@ -3166,7 +3609,9 @@ def main() -> int:
     shifts_csv = work_dir / f"{output_stem}_shifts.csv"
     registration_diagnostics_csv = work_dir / f"{output_stem}_registration_diagnostics.csv"
     summary_json = work_dir / f"{output_stem}_summary.json"
-    star_wcs_header = wcs.to_fits_header(width, height)
+    star_wcs_header = stack_canvas.rebase_wcs_header(
+        wcs.to_fits_header(canvas_width, canvas_height)
+    )
     background_header = {"BGNORM": args.background_normalization}
     if background_output_levels is not None:
         background_header.update(
@@ -3198,8 +3643,8 @@ def main() -> int:
         **star_wcs_header,
         "MTSTACK": True,
         "MTFRAMES": used,
-        "MTXREF": reference_x,
-        "MTYREF": reference_y,
+        "MTXREF": output_reference_x,
+        "MTYREF": output_reference_y,
         "MTREFRA": reference_target.ra_deg,
         "MTREFDEC": reference_target.dec_deg,
         "STKMODE": args.stack_method,
@@ -3233,7 +3678,7 @@ def main() -> int:
         "COMBSTK": True,
         "COMBLEFT": "star_stack",
         "COMBRGHT": "metcalf_stack",
-        "COMBW": width,
+        "COMBW": canvas_width,
         "STARSTK": True,
         "MTSTACK": True,
         "MTFRAMES": used,
@@ -3465,10 +3910,15 @@ def main() -> int:
     write_registration_diagnostics(registration_diagnostics_csv, frame_rows)
     print(f"[result] Registration diagnostics: {registration_diagnostics_csv}", flush=True)
 
-    removed_intermediate_images: list[str] = []
     if not args.no_cleanup:
-        removed_intermediate_images = cleanup_intermediate_images(
-            registration_dir, args.basename, copied, len(files), processed_basename
+        removed_intermediate_images.extend(
+            cleanup_intermediate_images(
+                registration_dir,
+                args.basename,
+                copied,
+                len(files),
+                processed_basename,
+            )
         )
 
     summary = {
@@ -3530,6 +3980,15 @@ def main() -> int:
         "used_frames": used,
         "stack_method": args.stack_method,
         "stack_method_token": method_token,
+        "stack_workers": args.stack_workers,
+        "stack_canvas": {
+            "policy": "reference-footprint",
+            "shape": [canvas_height, canvas_width],
+            "origin_x": stack_canvas.origin_x,
+            "origin_y": stack_canvas.origin_y,
+        },
+        "stack_timing_seconds": stack_timing_seconds,
+        "stack_timing_note": "per-operation worker CPU sums; total_stacking_wall is elapsed wall time",
         "padding_policy": args.padding_policy,
         "zero_sample_policy": effective_zero_sample_policy if args.stack_method != "mean" else None,
         "background_normalization": {
@@ -3556,8 +4015,8 @@ def main() -> int:
         "reference_target": {
             "ra_deg": reference_target.ra_deg,
             "dec_deg": reference_target.dec_deg,
-            "x_1based": reference_x,
-            "y_1based": reference_y,
+            "x_1based": output_reference_x,
+            "y_1based": output_reference_y,
         },
         "sun_position_angle": {
             "mode": args.sun_pa,

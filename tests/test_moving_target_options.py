@@ -1414,6 +1414,17 @@ class CrossPlatformCliTests(unittest.TestCase):
         self.assertEqual(args.preview_stretch, "sigma")
         self.assertEqual(args.preview_sigma_low, -1.0)
         self.assertEqual(args.preview_sigma_high, 3.0)
+        self.assertEqual(args.stack_workers, 2)
+
+    def test_pipeline_accepts_explicit_stack_worker_count(self):
+        with patch.object(
+            sys,
+            "argv",
+            ["seestar-metcalf-stack", "frames", "--stack-workers", "4"],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.stack_workers, 4)
 
     def test_pipeline_accepts_legacy_padding_and_zero_inclusion(self):
         with patch.object(

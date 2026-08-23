@@ -2,6 +2,16 @@
 
 利用者に影響する変更は[変更履歴](CHANGELOG.md)と[改訂内容とトラブルシュート](TROUBLESHOOTING.md)にまとめています。この文書は実装判断、検証、引き継ぎを目的とした開発者向け資料です。
 
+## 2026-08-24: production stack path高速化
+
+- production経路は`moving_target_pipeline.main()`から`moving_target_stack.main()`へ入り、Sirilの前処理・Reference registration後、登録済みFITSを背景補正、星固定加算、Metcalf pure translation、移動天体固定加算の順に処理する。従来は背景統計の全フレームpassとスタックpassで登録FITSを2回読んでいたが、fit・適用・スタックを1回の読込へ統合した。
+- pure translationはfull-frame座標gridを毎RGB面で作らず、共通のsource/output sliceと一定のbilinear weightを使う。一次・二次背景面の適用も1次元X/Y項と必要な交差項だけで評価し、星固定画像は現行Reference footprintならzero-shift resamplingせず直接加算する。平均加算は`np.add(..., out=..., where=mask)`を使う。
+- `StackCanvas(shape, origin_x, origin_y)`はregistration座標系とoutput canvasを分離する。現行のcanvas policyは従来どおりReference frame footprintだが、resampler、valid mask、accumulator、WCS `CRPIX`再基準化は任意shape/originを受け取る。将来のN枚以上/M%以上のexpanded canvasはcanvas policyの追加として実装し、translation本体を置換しない。
+- frame workerはFITS読込、背景fit・適用、Metcalf shiftまでを行い、global sum/countへ書かない。bounded ThreadPoolは入力順に最大worker数だけresultを保持し、main threadが決定的に加算する。`--stack-workers 1|2|4`の既定は2である。
+- summary JSONの`stack_timing_seconds`へ`fits_read`、`background_fit`、`background_apply`、`star_resample`、`star_accumulation`、`metcalf_shift`、`metcalf_accumulation`、`saturation`、`total_stacking_wall`を記録する。worker側項目はCPU時間の合計であり、wall timeとは一致しない。
+- cleanup有効時は、前処理成功後にsource copy・変換像・staged calibrationを、登録成功後に最終前処理画像を削除し、各登録FITSは加算と診断行の確定後に削除する。242枚実測ディレクトリ換算では、登録中peakを約13.23 GiBから約11.33 GiBへ、スタック開始時を約5.61 GiBへ下げる。登録世代自体をなくすには、将来Siril `register -2pass`のmatrix統合が必要である。
+- 実画像で旧slice前実装とのfull valid mask一致、最大画素差`8.10623e-6 ADU`、中心天体・基準星開口の最大差`1.3e-6 ADU`以下を確認した。最終コードの20枚productionは`1/2/4 worker = 12.35/8.29/6.15秒`で、Metcalf・星固定・左右比較の3出力は全worker条件で全画素一致した。早期cleanup前後も最大差`0 ADU`であり、全154テストが成功した。詳細は[stack performance results](developer-tools/stack-performance-analysis/RESULTS-20260823.md)を参照する。
+
 ## 2026-08-22: FITSプレビュー実験ツール
 
 - `scripts/fits_preview.py`へ表示PNGの伸長・回転処理を集約し、スタッカーと開発者ツールが共有する。科学用FITS、WCS、スタック配列を変更する処理は置かない。
@@ -14,7 +24,7 @@
 - 面モデルは登録済みの有効画素を50x50タイルへ分割し、各タイルを4画素間隔でサンプリングしてRGBごとのsigma-clipped medianを得る。全画素をタイルごとにソートすると長時間観測で実用的でないため、面の大域形状を保てるこのサンプリングを採用した。
 - 一次は`[1, x, y]`、二次は`[1, x, y, x^2, xy, y^2]`を、画像中心を原点とする`[-1, 1]`正規化座標で重み付き最小二乗フィットする。初回残差のmedian/MADから3 sigmaを超えるタイルを一回だけ除外して再フィットする。反復乱数・手作業の閾値調整は用いない。
 - 2026-08-21に220P McNaughtの最新セッション（247入力、242採用）で速度測定を行った。背景補正なしのウォームキャッシュ基準579.40秒に対して、`offset`は713.34秒、`plane`は729.83秒、`quadratic`は736.30秒だった。面モデルだけの`offset`からの増分は約16〜23秒である。詳細は`developer-tools/background-normalization-benchmark/RESULTS-20260821.md`を参照。
-- セッション共通モデルは、登録成功フレームの係数ごとの中央値で作る。各フレームは`common - frame`係数の面を有効画素だけに加えるため、画像外paddingの0を変えず、平均時の画素別寄与枚数と整合する。
+- 各フレームは自身のfit面を有効画素だけから完全に差し引き、背景を0付近にする。最終画像へは採用フレームのRGB局所DC値の算術平均だけを一定値として加える。これは符号付き演算結果を保存形式へ収めるrange safeguardであり、傾斜面を戻す処理ではない。
 - `BGCn_m`、`BGTILER`、`BGTILEC`、`BGTSTEP`、`BGOUTSIG`を出力FITSへ、モデル係数・除外タイル数・残差RMSをshifts CSVへ記録する。
 - 通常の小天体向けであり、視野の大半を占める彗星やDSOを保護する対象マスクは実装しない。そのような対象では`none`または`offset`を選ぶ。
 - 合成面と単一の破損タイルを使う単体試験、および220P/McNaughtの20枚実写で`plane`/`quadratic`各20/20枚の完走、出力FITSヘッダー、shifts CSVを確認した。
@@ -117,7 +127,7 @@ SharpCap入力では`*.CameraSettings.txt`を正規化して`PreprocessingPlan`�
 - Astrometry.netへ送る画素スケールはFITSの焦点距離・画素サイズから推定し、欠落時は`--pixel-scale-arcsec`を使う。Astrometry側の検索範囲だけに使い、画像の実データを変換しない。
 - WCSダウンロードは`SIMPLE`と`END`カードを確認してから保存する。HTMLログインページなどが返った場合も、JSON calibrationで処理を継続できる。
 
-最終更新: 2026-08-18
+最終更新: 2026-08-24
 
 この文書は、Seestar Metcalf Stackを改造する人、保守する人、または開発を
 引き継ぐ人のための技術記録です。一般利用者向けの操作方法は`README.md`、
@@ -426,6 +436,9 @@ Astrometry request、Siril失敗検出、飽和閾値・マスク伝播・警告
 9. `--saturation-warning enable`で専用PNGだけが生成され、通常PNGとFITSが変わらない
 10. `*_shifts.csv`とsummary JSONの飽和件数が、確認した元フレームと一致する
 11. 登録診断CSVのFWHM・weighted FWHM・roundness・検出星数がSiril `.seq`と一致し、対応星数がSirilログと一致する
+12. slice translationの正負・整数/小数・片軸0、mono/RGB、画像端、NaN/0 padding、valid/saturation maskを旧実装と比較する
+13. `--stack-workers 1|2|4`の出力FITSが全画素一致し、summaryのoperation timingとworker数が一致する
+14. 非Reference shape/originの`StackCanvas`で画素配置、valid mask、WCS `CRPIX`再基準化が一致する
 
 実観測FITS、APIキー、観測地点、ログはリポジトリへcommitしないでください。
 

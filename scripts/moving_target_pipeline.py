@@ -230,6 +230,13 @@ def parse_args() -> argparse.Namespace:
         help="Per-pixel combination method. median and rankfit exclude exact-zero samples. Defaults to mean.",
     )
     parser.add_argument(
+        "--stack-workers",
+        type=int,
+        choices=(1, 2, 4),
+        default=2,
+        help="Parallel workers for per-frame FITS/background/shift processing. Defaults to 2.",
+    )
+    parser.add_argument(
         "--rankfit-fraction",
         type=int,
         default=50,
@@ -1352,6 +1359,8 @@ def run_stack(
             str(args.registration_minpairs),
             "--stack-method",
             args.stack_method,
+            "--stack-workers",
+            str(args.stack_workers),
             "--padding-policy",
             args.padding_policy,
             "--background-normalization",
