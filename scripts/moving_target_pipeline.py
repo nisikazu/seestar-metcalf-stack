@@ -13,6 +13,7 @@ import argparse
 import calendar
 import contextlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -173,6 +174,73 @@ def parse_args() -> argparse.Namespace:
         help="Per-pixel combination method. median and rankfit exclude exact-zero samples. Defaults to mean.",
     )
     parser.add_argument(
+        "--dual-stack",
+        action="store_true",
+        help="Also create target-masked star, robust comet, and dual-alignment composite masters.",
+    )
+    parser.add_argument(
+        "--comet-mask-radius-px",
+        type=float,
+        help="Dual-stack circular comet mask radius in pixels. Defaults to an FWHM-based value.",
+    )
+    parser.add_argument(
+        "--composite-min-star-fraction",
+        type=float,
+        help="Minimum local star-master contribution fraction; defaults to an automatic conservative value.",
+    )
+    parser.add_argument(
+        "--comet-clean-method",
+        choices=("median", "rankfit", "sigma"),
+        help="Dual-stack comet-master cleaner. Defaults to median, or rankfit with --stack-method=rankfit.",
+    )
+    parser.add_argument(
+        "--comet-sigma-low",
+        type=float,
+        default=3.0,
+        help="Lower-side MAD rejection threshold for --comet-clean-method sigma. Defaults to 3.0.",
+    )
+    parser.add_argument(
+        "--comet-sigma-high",
+        type=float,
+        default=3.0,
+        help="Upper-side MAD rejection threshold for --comet-clean-method sigma. Defaults to 3.0.",
+    )
+    parser.add_argument(
+        "--comet-directional-filter",
+        action="store_true",
+        help="Enable the experimental numpy-only directional comet-master cleaner (default: off).",
+    )
+    parser.add_argument(
+        "--comet-directional-size",
+        type=int,
+        default=2,
+        help="Directional cleaner half-size in pixels; samples -size..+size. Defaults to 2.",
+    )
+    parser.add_argument(
+        "--composite-mask-method",
+        choices=("circle", "tail"),
+        default="circle",
+        help="Dual-stack composite mask method. circle is the stable default; tail is optional.",
+    )
+    parser.add_argument(
+        "--composite-tail-sigma",
+        type=float,
+        default=3.0,
+        help="Robust threshold for the optional tail composite mask. Defaults to 3.0.",
+    )
+    parser.add_argument(
+        "--composite-tail-smooth-px",
+        type=float,
+        default=5.0,
+        help="Low-frequency smoothing radius for the optional tail mask. Defaults to 5 pixels.",
+    )
+    parser.add_argument(
+        "--composite-tail-length-px",
+        type=float,
+        default=256.0,
+        help="Maximum radial extension for the optional tail mask. Defaults to 256 pixels.",
+    )
+    parser.add_argument(
         "--rankfit-fraction",
         type=int,
         default=50,
@@ -253,6 +321,25 @@ def parse_args() -> argparse.Namespace:
     delattr(args, "source_dir_option")
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
+    if args.comet_mask_radius_px is not None and (
+        not math.isfinite(args.comet_mask_radius_px) or args.comet_mask_radius_px <= 0.0
+    ):
+        parser.error("--comet-mask-radius-px must be finite and greater than zero")
+    if args.composite_min_star_fraction is not None and (
+        not math.isfinite(args.composite_min_star_fraction)
+        or not 0.0 <= args.composite_min_star_fraction <= 1.0
+    ):
+        parser.error("--composite-min-star-fraction must be between zero and one")
+    if not math.isfinite(args.comet_sigma_low) or args.comet_sigma_low <= 0.0:
+        parser.error("--comet-sigma-low must be finite and greater than zero")
+    if not math.isfinite(args.comet_sigma_high) or args.comet_sigma_high <= 0.0:
+        parser.error("--comet-sigma-high must be finite and greater than zero")
+    if not math.isfinite(args.composite_tail_sigma) or args.composite_tail_sigma <= 0.0:
+        parser.error("--composite-tail-sigma must be finite and greater than zero")
+    if not math.isfinite(args.composite_tail_smooth_px) or args.composite_tail_smooth_px < 0.0:
+        parser.error("--composite-tail-smooth-px must be finite and non-negative")
+    if not math.isfinite(args.composite_tail_length_px) or args.composite_tail_length_px <= 0.0:
+        parser.error("--composite-tail-length-px must be finite and greater than zero")
     if not 0.0 < args.saturation_threshold_percent <= 100.0:
         parser.error("--saturation-threshold-percent must be greater than 0 and at most 100")
     try:
@@ -823,6 +910,36 @@ def run_stack(
         cmd.extend(["--pattern", args.pattern])
     if args.output_prefix:
         cmd.extend(["--output-prefix", args.output_prefix])
+    if args.horizons_object:
+        cmd.extend(["--horizons-object", args.horizons_object])
+    if args.horizons_command:
+        cmd.extend(["--horizons-command", args.horizons_command])
+    if args.dual_stack:
+        cmd.append("--dual-stack")
+    if args.comet_mask_radius_px is not None:
+        cmd.extend(["--comet-mask-radius-px", str(args.comet_mask_radius_px)])
+    if args.composite_min_star_fraction is not None:
+        cmd.extend(["--composite-min-star-fraction", str(args.composite_min_star_fraction)])
+    if args.comet_clean_method is not None:
+        cmd.extend(["--comet-clean-method", args.comet_clean_method])
+    if args.comet_directional_filter:
+        cmd.extend(["--comet-directional-filter", "--comet-directional-size", str(args.comet_directional_size)])
+    cmd.extend(
+        [
+            "--comet-sigma-low",
+            str(args.comet_sigma_low),
+            "--comet-sigma-high",
+            str(args.comet_sigma_high),
+            "--composite-mask-method",
+            args.composite_mask_method,
+            "--composite-tail-sigma",
+            str(args.composite_tail_sigma),
+            "--composite-tail-smooth-px",
+            str(args.composite_tail_smooth_px),
+            "--composite-tail-length-px",
+            str(args.composite_tail_length_px),
+        ]
+    )
     if wcs_fits:
         cmd.extend(["--wcs-fits", str(wcs_fits)])
     if astrometry_json:
@@ -904,6 +1021,16 @@ def main(args: argparse.Namespace) -> Path | None:
         "reference_frame": str(reference_frame),
         "stack_method": args.stack_method,
         "stack_method_token": processing_method_token(args.stack_method, args.rankfit_fraction),
+        "dual_stack": args.dual_stack,
+        "composite_method": "subtractive" if args.dual_stack else None,
+        "comet_mask_radius_px": args.comet_mask_radius_px,
+        "comet_clean_method": args.comet_clean_method,
+        "comet_sigma_low": args.comet_sigma_low,
+        "comet_sigma_high": args.comet_sigma_high,
+        "composite_mask_method": args.composite_mask_method,
+        "composite_tail_sigma": args.composite_tail_sigma,
+        "composite_tail_smooth_px": args.composite_tail_smooth_px,
+        "composite_tail_length_px": args.composite_tail_length_px,
         "padding_policy": args.padding_policy,
         "zero_sample_policy": args.zero_sample_policy if args.stack_method != "mean" else None,
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,

@@ -75,6 +75,61 @@ Terminalで`YOUR_API_KEY`をコピーした文字列に置き換えて実行し�
 ./seestar-metcalf-stack.sh "/path/to/Target_sub" --list-sessions
 ```
 
+## Dual Alignment Composite (Comet + Stars)
+
+Finderの `Seestar Metcalf Stack.app` は、lightsフォルダをドロップすると
+`--dual-stack` を付けて実行します。従来のMetcalf stackに加えて、target maskで
+彗星を除外した恒星基準マスター、移動する恒星をrobustにrejectした彗星基準マスター、
+および両者を同じ観測データからDSS風に合成した `*_comet_stars_subtractive.fit` を生成します。
+Terminalから同じ機能を使う場合は次のように指定してください。
+
+```sh
+./seestar-metcalf-stack.sh "/path/to/Target_sub" --dual-stack
+```
+
+マスク半径は必要に応じてピクセル単位で指定できます。省略時は登録診断のFWHMを参考に
+自動決定します。合成は空間的なブレンド境界ではなく、彗星モデルを各star-registered frameから
+減算して恒星masterを作り、reference位置の彗星モデルを一度だけ加えるsubtractive方式です。
+
+```sh
+./seestar-metcalf-stack.sh "/path/to/Target_sub" --dual-stack \
+  --comet-mask-radius-px 12
+```
+
+この機能はexperimentalな実験版MVPです。Dual Alignment Compositeは、同一観測データから
+作成したstar-aligned画像とcomet-aligned画像の合成です。既知の制約は次のとおりです。
+
+- clean comet masterには淡い恒星trailが残る場合があります。
+- automatic tail mask extensionは保守的で、検出に失敗した場合はcore circular maskへfallbackします。
+- composite画像をphotometry、astrometryなどの科学測定に直接使用しないでください。元サブフレーム、
+  または目的に適した個別stackを使用してください。
+
+生成物には、star master、clean comet master、composite mask、個別preview、同一stretchの比較preview、
+恒星masterの`*_stars_contribution_count.png`、再現用metadata、diagnosticsが含まれます。
+
+既定のDual Alignment Compositeはexperimentalなsubtractive方式で、clean cometは`median`
+（`--stack-method rankfit`時は`rankfit`）、composite maskは安定した円形maskです。恒星trailの除去を追加検証する場合は、
+既存のnumpy処理だけでMADベースのsigma rejectionを選択できます。
+
+```sh
+./seestar-metcalf-stack.sh "/path/to/Target_sub" --dual-stack \
+  --comet-clean-method sigma --comet-sigma-low 3 --comet-sigma-high 3
+```
+
+長い尾を試す場合は、彗星masterと恒星masterの差分を低周波化し、coreに連結した構造だけを
+optionalにmaskへ追加できます。恒星trailがcoreに接続している場合などは誤検出し得るため、
+`circle`を既定値のまま残し、`tail`のmask previewとdiagnosticsを確認してください。
+
+```sh
+./seestar-metcalf-stack.sh "/path/to/Target_sub" --dual-stack \
+  --composite-mask-method tail --composite-tail-length-px 256
+```
+
+`*_comparison_stars.png`、`*_comparison_comet.png`、`*_comparison_composite.png`は、
+3画像に共通のdisplay stretchを適用した評価用PNGです。FITSの科学データにはstretchを
+適用しません。diagnostics JSONには、恒星masterの全体／target-regionのcontribution count、
+target周辺とのbackground median差、tail検出情報、比較previewのstretch値を記録します。
+
 詳細な進行表示は標準で有効です。抑制するときは`--no-verbose`、正常終了時に
 Finderを開かないときは`--no-open-output`を追加します。
 

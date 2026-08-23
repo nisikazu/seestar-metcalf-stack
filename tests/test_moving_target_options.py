@@ -227,10 +227,216 @@ class MedianAccumulatorTests(unittest.TestCase):
 
             self.assertAlmostEqual(float(result[0, 0]), 100.0, places=4)
 
+
+class SubtractiveCompositeTests(unittest.TestCase):
+    def test_inverse_moving_target_shift_restores_original_position(self):
+        source = np.zeros((9, 11), dtype=np.float64)
+        source[3, 4] = 100.0
+        shifted, forward_valid = stacker.shift_image(source, 2.0, -1.0, np.ones_like(source, dtype=bool))
+        restored, inverse_valid = stacker.inverse_moving_target_shift(shifted, 2.0, -1.0, forward_valid)
+
+        self.assertGreater(float(np.max(shifted)), 0.0)
+        self.assertGreater(float(np.max(restored)), 0.0)
+        self.assertEqual(restored.shape, source.shape)
+        self.assertTrue(np.any(inverse_valid))
+        np.testing.assert_allclose(restored[2:6, 2:7], source[2:6, 2:7], atol=1.0e-5)
+
+    def test_subtraction_removes_comet_and_preserves_star_signal(self):
+        frame = np.full((7, 7), 10.0, dtype=np.float64)
+        frame[3, 3] += 100.0
+        frame[1, 5] += 25.0
+        model = np.zeros_like(frame)
+        model[3, 3] = 100.0
+        valid = np.ones_like(frame, dtype=bool)
+        cometless, output_valid = stacker.subtract_shifted_comet_model(frame, model, valid, valid)
+
+        self.assertAlmostEqual(float(cometless[3, 3]), 10.0)
+        self.assertAlmostEqual(float(cometless[1, 5]), 35.0)
+        np.testing.assert_array_equal(output_valid, valid)
+
+    def test_invalid_model_pixels_keep_original_frame(self):
+        frame = np.arange(25, dtype=np.float64).reshape(5, 5) + 100.0
+        model = np.full_like(frame, 7.0)
+        frame_valid = np.ones_like(frame, dtype=bool)
+        model_valid = np.ones_like(frame, dtype=bool)
+        model_valid[0, 0] = False
+        cometless, output_valid = stacker.subtract_shifted_comet_model(frame, model, frame_valid, model_valid)
+
+        self.assertAlmostEqual(float(cometless[0, 0]), float(frame[0, 0]))
+        self.assertAlmostEqual(float(cometless[2, 2]), float(frame[2, 2] - 7.0))
+        np.testing.assert_array_equal(output_valid, frame_valid)
+
+    def test_subtractive_intermediate_preserves_negative_values(self):
+        frame = np.full((3, 3), 2.0, dtype=np.float64)
+        model = np.full((3, 3), 5.0, dtype=np.float64)
+        valid = np.ones((3, 3), dtype=bool)
+        cometless, _valid = stacker.subtract_shifted_comet_model(frame, model, valid, valid)
+
+        self.assertLess(float(np.min(cometless)), 0.0)
+        self.assertAlmostEqual(float(cometless[1, 1]), -3.0)
+
+    def test_cometless_plus_reference_model_reconstructs_scene(self):
+        stars = np.full((5, 5), 12.0, dtype=np.float64)
+        comet = np.zeros((5, 5), dtype=np.float64)
+        comet[2, 2] = 30.0
+        scene = stars + comet
+        valid = np.ones_like(stars, dtype=bool)
+        cometless, _valid = stacker.subtract_shifted_comet_model(scene, comet, valid, valid)
+        reconstructed = stacker.add_reference_comet_model(cometless, comet, valid)
+
+        np.testing.assert_allclose(reconstructed, scene)
+        self.assertAlmostEqual(float(np.median(cometless)), 12.0)
+
+    def test_subtractive_background_is_not_added_twice(self):
+        stars = np.full((5, 5), 100.0, dtype=np.float64)
+        comet = np.full((5, 5), 20.0, dtype=np.float64)
+        scene = stars + comet
+        valid = np.ones_like(stars, dtype=bool)
+        cometless, _valid = stacker.subtract_shifted_comet_model(scene, comet, valid, valid)
+        reconstructed = stacker.add_reference_comet_model(cometless, comet, valid)
+
+        self.assertAlmostEqual(float(np.median(cometless)), 100.0)
+        self.assertAlmostEqual(float(np.median(reconstructed)), 120.0)
+
+    def test_sigma_clipping_rejects_moving_star_outlier_and_keeps_comet_signal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "sigma.npy"
+            accumulator = stacker.MedianAccumulator(path, 5, (1, 2))
+            mask = np.ones((1, 2), dtype=bool)
+            samples = [
+                [100.0, 150.0],
+                [100.0, 150.0],
+                [100.0, 150.0],
+                [1000.0, 150.0],
+                [100.0, 150.0],
+            ]
+            for sample in samples:
+                accumulator.add(np.asarray([sample], dtype=np.float32), mask)
+
+            result = accumulator.finalize_sigma(sigma_low=3.0, sigma_high=3.0, row_chunk=1)
+            accumulator.close(remove=True)
+
+            np.testing.assert_allclose(result, np.array([[100.0, 150.0]], dtype=np.float64))
+
+    def test_sigma_clipped_median_uses_asymmetric_thresholds(self):
+        values = np.array([98.0, 100.0, 100.0, 100.0, 104.0], dtype=np.float64)
+
+        result = stacker.sigma_clipped_median(values, sigma_low=1.0, sigma_high=10.0)
+
+        self.assertAlmostEqual(float(result), 100.0)
+
     def test_processing_method_token_records_rankfit_percentage(self):
         self.assertEqual(stacker.processing_method_token("mean", 50), "mean")
         self.assertEqual(stacker.processing_method_token("median", 50), "median")
         self.assertEqual(stacker.processing_method_token("rankfit", 37), "rankfit5_p37")
+
+    def test_directional_geometry_uses_inverse_comet_motion_and_perpendicular_filter(self):
+        geometry = stacker.directional_filter_geometry([(0.0, 0.0), (4.0, 0.0)])
+
+        self.assertAlmostEqual(geometry["comet_motion_dx_px"], -4.0)
+        self.assertAlmostEqual(geometry["comet_motion_dy_px"], 0.0)
+        self.assertAlmostEqual(abs(geometry["comet_motion_angle_deg"]), 180.0)
+        self.assertAlmostEqual(geometry["star_trail_angle_deg"], 0.0)
+        self.assertAlmostEqual(geometry["directional_filter_angle_deg"], 90.0)
+
+    def test_directional_filter_suppresses_horizontal_bright_line(self):
+        image = np.ones((11, 13), dtype=np.float64)
+        image[5, 2:11] = 100.0
+
+        cleaned, diagnostics = stacker.apply_directional_comet_filter(image, 90.0, size_px=2)
+
+        self.assertLess(float(np.max(cleaned[5, 3:10])), 2.0)
+        self.assertGreater(diagnostics["suppressed_pixels"], 0)
+
+    def test_directional_filter_suppresses_vertical_bright_line(self):
+        image = np.ones((13, 11), dtype=np.float64)
+        image[2:11, 5] = 100.0
+
+        cleaned, _diagnostics = stacker.apply_directional_comet_filter(image, 0.0, size_px=2)
+
+        self.assertLess(float(np.max(cleaned[3:10, 5])), 2.0)
+
+    def test_directional_filter_does_not_raise_dark_pixels_or_constant_background(self):
+        constant = np.full((9, 9), 17.0, dtype=np.float64)
+        cleaned_constant, _diagnostics = stacker.apply_directional_comet_filter(constant, 37.0, size_px=2)
+        np.testing.assert_allclose(cleaned_constant, constant)
+
+        image = np.full((9, 9), 10.0, dtype=np.float64)
+        image[4, 4] = 1.0
+        cleaned, _diagnostics = stacker.apply_directional_comet_filter(image, 90.0, size_px=2)
+        self.assertAlmostEqual(float(cleaned[4, 4]), 1.0)
+        self.assertLessEqual(float(np.max(cleaned)), float(np.max(image)))
+
+    def test_directional_filter_ignores_invalid_samples(self):
+        image = np.full((9, 9), 10.0, dtype=np.float64)
+        image[4, 4] = 100.0
+        image[4, 2] = 1000.0
+        valid = np.ones_like(image, dtype=bool)
+        valid[4, 2] = False
+
+        cleaned, _diagnostics = stacker.apply_directional_comet_filter(
+            image,
+            0.0,
+            size_px=2,
+            valid_mask=valid,
+        )
+
+        self.assertLess(float(cleaned[4, 4]), 20.0)
+
+    def test_directional_filter_preserves_pixel_when_samples_are_insufficient(self):
+        image = np.full((9, 9), 10.0, dtype=np.float64)
+        image[4, 4] = 100.0
+        valid = np.zeros_like(image, dtype=bool)
+        valid[4, 4] = True
+
+        cleaned, _diagnostics = stacker.apply_directional_comet_filter(
+            image,
+            90.0,
+            size_px=2,
+            valid_mask=valid,
+            minimum_valid_samples=3,
+        )
+
+        self.assertAlmostEqual(float(cleaned[4, 4]), 100.0)
+
+    def test_directional_filter_processes_rgb_channels_independently(self):
+        image = np.ones((3, 11, 13), dtype=np.float64)
+        image[0, 5, 2:11] = 100.0
+        image[1, 5, 2:11] = 200.0
+        image[2, 5, 2:11] = 300.0
+
+        cleaned, _diagnostics = stacker.apply_directional_comet_filter(image, 90.0, size_px=2)
+
+        self.assertLess(float(np.max(cleaned[0, 5, 3:10])), 2.0)
+        self.assertLess(float(np.max(cleaned[1, 5, 3:10])), 2.0)
+        self.assertLess(float(np.max(cleaned[2, 5, 3:10])), 2.0)
+
+    def test_directional_filter_output_never_exceeds_finite_input(self):
+        image = np.full((3, 9, 9), 10.0, dtype=np.float64)
+        image[0, 4, 3:6] = 100.0
+        image[1, 2:7, 4] = 80.0
+        image[2, 4, 4] = 50.0
+
+        cleaned, _diagnostics = stacker.apply_directional_comet_filter(image, 45.0, size_px=2)
+
+        self.assertTrue(np.all(cleaned <= image + 1.0e-9))
+
+    def test_directional_core_protection_restores_sigma_core(self):
+        sigma = np.full((9, 9), 10.0, dtype=np.float64)
+        sigma[4, 4] = 100.0
+        directional = sigma.copy()
+        directional[4, 4] = 40.0
+
+        protected, diagnostics = stacker.protect_directional_core(
+            sigma,
+            directional,
+            5.0,
+            5.0,
+            2.0,
+        )
+
+        self.assertAlmostEqual(float(protected[4, 4]), 100.0)
+        self.assertGreater(diagnostics["protected_pixels"], 0)
 
 
 class ValidPixelMeanTests(unittest.TestCase):
@@ -273,6 +479,194 @@ class ValidPixelMeanTests(unittest.TestCase):
         np.testing.assert_allclose(result, np.array([[20, 15], [20, 15]], dtype=np.float64))
 
 
+class DualAlignmentImageTests(unittest.TestCase):
+    def test_circular_target_mask_excludes_moving_target_from_star_mean(self):
+        first = np.full((5, 7), 100.0, dtype=np.float32)
+        second = np.full((5, 7), 100.0, dtype=np.float32)
+        first[2, 2] = 900.0
+        second[2, 4] = 900.0
+
+        total = None
+        counts = None
+        for image, x in ((first, 3.0), (second, 5.0)):
+            target_mask = stacker.circular_target_mask(image.shape, x, 3.0, 0.75)
+            valid = stacker.registered_valid_mask(image) & ~target_mask
+            total, counts = stacker.add_to_average(total, counts, image, valid)
+
+        result = stacker.finalize_average(total, counts)
+
+        self.assertEqual(int(counts[2, 2]), 1)
+        self.assertEqual(int(counts[2, 4]), 1)
+        self.assertEqual(int(counts[2, 3]), 2)
+        self.assertEqual(float(result[2, 2]), 100.0)
+        self.assertEqual(float(result[2, 4]), 100.0)
+
+    def test_target_shift_places_comet_at_reference_pixel(self):
+        image = np.zeros((6, 8), dtype=np.float32)
+        image[1, 2] = 50.0
+
+        shifted, valid = stacker.shift_image(image, 2.0, 1.0, np.ones_like(image, dtype=bool))
+
+        self.assertTrue(bool(valid[2, 4]))
+        self.assertEqual(float(shifted[2, 4]), 50.0)
+        self.assertEqual(float(np.max(shifted)), 50.0)
+
+    def test_zero_contribution_pixel_is_comet_weight_one(self):
+        support, diagnostics = stacker.build_reliability_support(
+            np.array([[True, True, False]], dtype=bool),
+            np.array([[0, 2, 0]], dtype=np.uint32),
+            used_frames=4,
+            minimum_star_fraction=0.5,
+        )
+        self.assertTrue(bool(support[0, 0]))
+        self.assertFalse(bool(support[0, 1]))
+        self.assertEqual(diagnostics["low_contribution_area_pixels"], 1)
+
+    def test_low_contribution_region_is_added_only_inside_target_support(self):
+        target = np.zeros((7, 7), dtype=bool)
+        target[2:5, 2:5] = True
+        counts = np.full((7, 7), 10, dtype=np.uint32)
+        counts[3, 3] = 0
+        counts[0, 0] = 0
+        support, diagnostics = stacker.build_reliability_support(
+            target,
+            counts,
+            used_frames=10,
+            minimum_star_fraction=0.8,
+            dilation_px=1.0,
+        )
+        self.assertTrue(bool(support[3, 3]))
+        self.assertFalse(bool(support[0, 0]))
+        self.assertLess(int(np.count_nonzero(support)), 49)
+        self.assertGreater(diagnostics["dilated_low_contribution_area_pixels"], 1)
+
+    def test_reliability_support_does_not_spread_over_the_whole_image(self):
+        target = np.zeros((31, 31), dtype=bool)
+        target[15, 15] = True
+        counts = np.full((31, 31), 10, dtype=np.uint32)
+        counts[15, 15] = 0
+        support, _diagnostics = stacker.build_reliability_support(
+            target,
+            counts,
+            used_frames=10,
+            minimum_star_fraction=0.75,
+            dilation_px=2.0,
+        )
+        self.assertLess(int(np.count_nonzero(support)), 50)
+
+    def test_local_background_matching_recovers_known_offset(self):
+        star = np.full((1, 9, 9), 1000.0, dtype=np.float64)
+        comet = np.full((1, 9, 9), 950.0, dtype=np.float64)
+        annulus = np.ones((9, 9), dtype=bool)
+        annulus[3:6, 3:6] = False
+        valid = np.ones((9, 9), dtype=bool)
+        star[0, 0, 0] = 100000.0
+        comet[0, 0, 0] = 0.0
+
+        local_star, local_comet, counts = stacker.robust_local_background_match(
+            star,
+            comet,
+            annulus,
+            valid,
+            valid,
+        )
+
+        self.assertEqual(int(counts[0]), 71)
+        self.assertAlmostEqual(float(local_star[0]), 1000.0)
+        self.assertAlmostEqual(float(local_comet[0]), 950.0)
+        self.assertAlmostEqual(float(local_star[0] - local_comet[0]), 50.0)
+
+    def test_circular_fallback_remains_core_only(self):
+        shape = (21, 21)
+        star = np.zeros(shape, dtype=np.float64)
+        comet = np.zeros(shape, dtype=np.float64)
+        valid = np.ones(shape, dtype=bool)
+        mask, diagnostics = stacker.build_tail_composite_mask(
+            shape,
+            11.0,
+            11.0,
+            2.0,
+            2.0,
+            star,
+            comet,
+            valid,
+            valid,
+            np.array([0.0]),
+            np.array([0.0]),
+            tail_sigma=3.0,
+            tail_smoothing_px=1.0,
+            tail_length_px=10.0,
+        )
+        core = stacker.circular_target_mask(shape, 11.0, 11.0, 2.0)
+        np.testing.assert_array_equal(mask > 0.0, core)
+        self.assertEqual(diagnostics["fallback"], "no-threshold-crossing")
+
+    def test_automatic_radius_uses_registration_fwhm(self):
+        radius, source = stacker.resolve_comet_mask_radius(None, [2.0, 3.0, None])
+
+        self.assertEqual(source, "auto-fwhm")
+        self.assertAlmostEqual(radius, 7.5)
+
+    def test_tail_mask_keeps_core_connected_structure_and_rejects_isolated_structure(self):
+        shape = (31, 31)
+        star = np.zeros(shape, dtype=np.float64)
+        comet = np.zeros(shape, dtype=np.float64)
+        comet[14:17, 15:26] = 20.0
+        comet[5:8, 5:8] = 100.0
+        valid = np.ones(shape, dtype=bool)
+
+        mask, diagnostics = stacker.build_tail_composite_mask(
+            shape,
+            16.0,
+            16.0,
+            2.0,
+            2.0,
+            star,
+            comet,
+            valid,
+            valid,
+            np.array([0.0]),
+            np.array([0.0]),
+            tail_sigma=3.0,
+            tail_smoothing_px=1.0,
+            tail_length_px=20.0,
+        )
+        core = stacker.circular_target_mask(shape, 16.0, 16.0, 2.0)
+
+        self.assertEqual(diagnostics["method"], "tail")
+        self.assertGreater(int(np.count_nonzero(mask > 0.0)), int(np.count_nonzero(core)))
+        self.assertEqual(float(mask[15, 25]), 1.0)
+        self.assertEqual(float(mask[6, 6]), 0.0)
+
+    def test_dual_fits_header_records_process_and_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "comet_stars.fit"
+            stacker.write_fits_float32(
+                path,
+                np.ones((4, 4), dtype=np.float32),
+                {"OBJECT": "10P"},
+                {
+                    "MTPROC": "DUALCOMP",
+                    "MTCOMP": "STAR+COMET",
+                    "MTREFUTC": "2026-08-06T15:00:00Z",
+                    "MTMASKR": 8.0,
+                    "MTFEATH": 8.0,
+                },
+                history=[
+                    "Dual-alignment composite generated from the same source frames",
+                    "Star-aligned master + comet-aligned master",
+                    "This image is a composite and should not be used directly for photometry",
+                ],
+            )
+            header, cards, _offset = stacker.read_fits_header(path)
+
+        self.assertEqual(header["MTPROC"], "DUALCOMP")
+        self.assertEqual(header["MTCOMP"], "STAR+COMET")
+        self.assertEqual(header["MTMASKR"], 8.0)
+        self.assertTrue(any("Dual-alignment composite" in card for card in cards))
+        self.assertTrue(any("not be used directly for photometry" in card for card in cards))
+
+
 class PreviewTests(unittest.TestCase):
     def test_preview_percentiles_ignore_exact_zero_padding(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -288,6 +682,34 @@ class PreviewTests(unittest.TestCase):
             self.assertEqual(int(preview[-1, -1]), 255)
             self.assertGreater(int(preview[-1, 4]), 0)
             self.assertLess(int(preview[-1, 4]), 255)
+
+    def test_shared_preview_limits_apply_the_same_stretch_to_all_images(self):
+        stars = np.array([[10.0, 20.0]], dtype=np.float32)
+        comet = np.array([[10.0, 40.0]], dtype=np.float32)
+        composite = np.array([[10.0, 60.0]], dtype=np.float32)
+
+        limits = stacker.preview_stretch_limits([stars, comet, composite], 0.0, 100.0)
+
+        self.assertEqual(limits, (10.0, 60.0))
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = [Path(temporary) / name for name in ("stars.png", "comet.png", "composite.png")]
+            for path, data in zip(paths, (stars, comet, composite)):
+                stacker.export_preview_png(path, data, low_percentile=0.0, high_percentile=100.0, value_limits=limits)
+            images = [np.asarray(Image.open(path)) for path in paths]
+
+        self.assertEqual(int(images[0][0, 0]), int(images[1][0, 0]))
+        self.assertEqual(int(images[1][0, 0]), int(images[2][0, 0]))
+        self.assertEqual(int(images[0][0, 1]), 51)
+        self.assertEqual(int(images[1][0, 1]), 153)
+        self.assertEqual(int(images[2][0, 1]), 255)
+
+    def test_contribution_count_png_scales_zero_to_max(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "stars_contribution_count.png"
+            stacker.export_count_png(path, np.array([[0, 2], [4, 8]], dtype=np.uint32))
+            preview = np.asarray(Image.open(path))
+
+        np.testing.assert_array_equal(preview, np.array([[0, 64], [128, 255]], dtype=np.uint8))
 
 
 class SaturationWarningTests(unittest.TestCase):
@@ -792,6 +1214,104 @@ class CrossPlatformCliTests(unittest.TestCase):
         self.assertEqual(args.saturation_warning, "enable")
         self.assertEqual(args.saturation_threshold_percent, 87.5)
         self.assertEqual(args.saturation_color, "12AB34")
+
+    def test_pipeline_accepts_dual_stack_options(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "seestar-metcalf-stack",
+                "frames",
+                "--dual-stack",
+                "--comet-mask-radius-px",
+                "12.5",
+            ],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertTrue(args.dual_stack)
+        self.assertEqual(args.comet_mask_radius_px, 12.5)
+
+    def test_pipeline_dual_stack_uses_subtractive_composite(self):
+        with patch.object(sys, "argv", ["seestar-metcalf-stack", "frames"]):
+            default_args = pipeline.parse_args()
+        self.assertFalse(hasattr(default_args, "dual_composite_method"))
+        self.assertFalse(default_args.comet_directional_filter)
+        self.assertEqual(default_args.comet_directional_size, 2)
+
+        with patch.object(
+            sys,
+            "argv",
+            ["seestar-metcalf-stack", "frames", "--dual-stack"],
+        ):
+            subtractive_args = pipeline.parse_args()
+        self.assertTrue(subtractive_args.dual_stack)
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "seestar-metcalf-stack",
+                "frames",
+                "--dual-stack",
+                "--comet-directional-filter",
+                "--comet-directional-size",
+                "3",
+            ],
+        ):
+            directional_args = pipeline.parse_args()
+        self.assertTrue(directional_args.comet_directional_filter)
+        self.assertEqual(directional_args.comet_directional_size, 3)
+
+    def test_pipeline_accepts_composite_reliability_option(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "seestar-metcalf-stack",
+                "frames",
+                "--dual-stack",
+                "--composite-min-star-fraction",
+                "0.8",
+            ],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertAlmostEqual(args.composite_min_star_fraction, 0.8)
+
+    def test_pipeline_accepts_optional_dual_clean_and_tail_options(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "seestar-metcalf-stack",
+                "frames",
+                "--dual-stack",
+                "--comet-clean-method",
+                "sigma",
+                "--comet-sigma-low",
+                "2.5",
+                "--comet-sigma-high",
+                "4.0",
+                "--composite-mask-method",
+                "tail",
+                "--composite-tail-sigma",
+                "3.5",
+                "--composite-tail-smooth-px",
+                "6",
+                "--composite-tail-length-px",
+                "400",
+            ],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.comet_clean_method, "sigma")
+        self.assertEqual(args.comet_sigma_low, 2.5)
+        self.assertEqual(args.comet_sigma_high, 4.0)
+        self.assertEqual(args.composite_mask_method, "tail")
+        self.assertEqual(args.composite_tail_sigma, 3.5)
+        self.assertEqual(args.composite_tail_smooth_px, 6.0)
+        self.assertEqual(args.composite_tail_length_px, 400.0)
 
     def test_pipeline_accepts_explicit_reference_frame_file(self):
         with patch.object(
