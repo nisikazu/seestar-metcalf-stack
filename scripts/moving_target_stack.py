@@ -3,11 +3,11 @@
 
 Pipeline:
 1. Copy a clean subset of source FITS files into a work directory.
-2. Use Siril CLI to debayer and register frames on background stars.
-3. Use a first-frame WCS and a target ephemeris CSV to compute the target
-   pixel in the registered first-frame coordinate system for every frame.
-4. Shift each registered frame so the target lands on the selected reference
-   pixel, then mean- or median-stack the shifted frames.
+2. Use Siril CLI to debayer frames and solve background-star registration matrices.
+3. Use a reference-frame WCS and a target ephemeris CSV to compute the target
+   pixel in the selected reference coordinate system for every frame.
+4. Combine each star-registration matrix with the Metcalf translation, resample
+   the source once, then mean-, median-, or rank-fit-stack the shifted frames.
 
 SharpCap Live Stack offsets can replace Siril registration when complete.
 """
@@ -909,12 +909,13 @@ class BackgroundModel:
 
 @dataclass(frozen=True)
 class StackFrameTask:
-    """Metadata needed to process one registered frame without shared state."""
+    """Metadata needed to process one preprocessed frame without shared state."""
 
     index: int
     source_name: str
-    registered: Path
+    prepared: Path
     source_header: dict[str, object]
+    source_to_registration: tuple[float, float, float, float, float, float, float, float, float]
     frame_time: datetime
     target: TargetPoint
     target_x: float
@@ -932,7 +933,7 @@ class StackFrameResult:
     star_mask: np.ndarray
     metcalf_data: np.ndarray
     metcalf_mask: np.ndarray
-    registered_unit_scale: float
+    prepared_unit_scale: float
     background_model: BackgroundModel | None
     background_correction: np.ndarray | None
     star_saturation_mask: np.ndarray | None
@@ -1090,18 +1091,16 @@ def estimate_stack_worker_memory(
     if background_mode != "none":
         background_phase += source_samples * np.dtype(np.float64).itemsize
         background_phase += source_pixels * np.dtype(np.float64).itemsize
-    translation_phase = (
+    resampling_phase = (
         source_samples * np.dtype(np.float64).itemsize
-        + canvas_samples * np.dtype(np.float32).itemsize
+        + 2 * canvas_samples * np.dtype(np.float32).itemsize
         + canvas_pixels * np.dtype(np.float64).itemsize
         + source_pixels * np.dtype(bool).itemsize
         + 2 * canvas_pixels * np.dtype(bool).itemsize
     )
-    if not canvas.is_identity_for((int(source_height), int(source_width))):
-        translation_phase += canvas_samples * np.dtype(np.float32).itemsize
     if saturation_enabled:
-        translation_phase += source_pixels * np.dtype(bool).itemsize + 2 * canvas_pixels * np.dtype(bool).itemsize
-    per_worker_bytes = max(read_phase, background_phase, translation_phase) + 16 * MEBIBYTE
+        resampling_phase += source_pixels * np.dtype(bool).itemsize + 2 * canvas_pixels * np.dtype(bool).itemsize
+    per_worker_bytes = max(read_phase, background_phase, resampling_phase) + 16 * MEBIBYTE
     return StackWorkerMemoryEstimate(
         source_shape=tuple(int(value) for value in source_shape),
         canvas_shape=canvas.shape,
@@ -1684,6 +1683,288 @@ def transform_image(
     return (output[0] if data.ndim == 2 else output), valid
 
 
+def matrix3(values: tuple[float, ...] | np.ndarray) -> np.ndarray:
+    matrix = np.asarray(values, dtype=np.float64)
+    if matrix.size != 9:
+        raise ValueError(f"Registration matrix must contain 9 values, received {matrix.size}")
+    matrix = matrix.reshape(3, 3)
+    if not np.all(np.isfinite(matrix)):
+        raise ValueError("Registration matrix contains a non-finite value")
+    return matrix
+
+
+def translation_matrix(dx: float, dy: float) -> np.ndarray:
+    return np.asarray(((1.0, 0.0, dx), (0.0, 1.0, dy), (0.0, 0.0, 1.0)), dtype=np.float64)
+
+
+def siril_matrix_to_array_coordinates(
+    matrix: tuple[float, ...] | np.ndarray,
+    source_shape: tuple[int, int],
+    registration_shape: tuple[int, int],
+) -> np.ndarray:
+    """Convert Siril's bottom-origin registration matrix to FITS-array row coordinates."""
+    source_height, _source_width = source_shape
+    registration_height, _registration_width = registration_shape
+    source_flip = np.asarray(
+        ((1.0, 0.0, 0.0), (0.0, -1.0, source_height - 1.0), (0.0, 0.0, 1.0)),
+        dtype=np.float64,
+    )
+    registration_flip = np.asarray(
+        ((1.0, 0.0, 0.0), (0.0, -1.0, registration_height - 1.0), (0.0, 0.0, 1.0)),
+        dtype=np.float64,
+    )
+    # Both flip matrices are self-inverse. Siril's H maps source to reference.
+    return registration_flip @ matrix3(matrix) @ source_flip
+
+
+def compose_output_transform(
+    source_to_registration: tuple[float, ...] | np.ndarray,
+    dx: float,
+    dy: float,
+) -> np.ndarray:
+    """Map source pixels directly to the requested output alignment in registration coordinates."""
+    return translation_matrix(dx, dy) @ matrix3(source_to_registration)
+
+
+def _normalize_bilinear_axis(
+    coordinate: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    low = np.floor(coordinate).astype(np.int32)
+    weight = coordinate - low
+    near_low = np.abs(weight) < 1.0e-9
+    near_high = np.abs(1.0 - weight) < 1.0e-9
+    if np.any(near_high):
+        low[near_high] += 1
+        weight[near_high] = 0.0
+    weight[near_low] = 0.0
+    high = low + 1
+    integral = weight == 0.0
+    high[integral] = low[integral]
+    return low, high, weight
+
+
+def affine_valid_mask(
+    source_shape: tuple[int, int],
+    output_to_source: np.ndarray,
+    source_valid: np.ndarray | None,
+    output_shape: tuple[int, int],
+    *,
+    tile_rows: int = 96,
+) -> np.ndarray:
+    """Return the exact four-neighbour bilinear support mask for an affine transform."""
+    source_height, source_width = source_shape
+    output_height, output_width = output_shape
+    output_x = np.arange(output_width, dtype=np.float64)
+    valid_output = np.zeros(output_shape, dtype=bool)
+    rows_per_tile = max(1, int(tile_rows))
+    for output_y0 in range(0, output_height, rows_per_tile):
+        output_y1 = min(output_height, output_y0 + rows_per_tile)
+        output_y = np.arange(output_y0, output_y1, dtype=np.float64)[:, np.newaxis]
+        source_x = (
+            output_to_source[0, 0] * output_x[np.newaxis, :]
+            + output_to_source[0, 1] * output_y
+            + output_to_source[0, 2]
+        )
+        source_y = (
+            output_to_source[1, 0] * output_x[np.newaxis, :]
+            + output_to_source[1, 1] * output_y
+            + output_to_source[1, 2]
+        )
+        x0, x1, _wx = _normalize_bilinear_axis(source_x)
+        y0, y1, _wy = _normalize_bilinear_axis(source_y)
+        valid = (
+            np.isfinite(source_x)
+            & np.isfinite(source_y)
+            & (x0 >= 0)
+            & (y0 >= 0)
+            & (x1 < source_width)
+            & (y1 < source_height)
+        )
+        if source_valid is not None and np.any(valid):
+            positions = np.flatnonzero(valid)
+            py = positions // output_width
+            px = positions % output_width
+            valid[py, px] = (
+                source_valid[y0[py, px], x0[py, px]]
+                & source_valid[y0[py, px], x1[py, px]]
+                & source_valid[y1[py, px], x0[py, px]]
+                & source_valid[y1[py, px], x1[py, px]]
+            )
+        valid_output[output_y0:output_y1] = valid
+    return valid_output
+
+
+def pillow_affine_coefficients(output_to_source: np.ndarray) -> tuple[float, ...]:
+    """Convert array-index coordinates to Pillow's pixel-centre affine convention."""
+    adjusted = np.asarray(output_to_source, dtype=np.float64).copy()
+    adjusted[:2, 2] += 0.5 - 0.5 * np.sum(adjusted[:2, :2], axis=1)
+    return tuple(float(value) for value in adjusted[:2].ravel())
+
+
+def resample_affine_with_pillow(
+    planes: np.ndarray,
+    output_to_source: np.ndarray,
+    source_valid: np.ndarray | None,
+    output_shape: tuple[int, int],
+    *,
+    tile_rows: int = 96,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Use Pillow's C bilinear kernel while retaining our strict validity semantics."""
+    output_height, output_width = output_shape
+    coefficients = pillow_affine_coefficients(output_to_source)
+    transformed_planes = []
+    for plane in planes:
+        source = Image.fromarray(np.asarray(plane, dtype=np.float32))
+        transformed = source.transform(
+            (output_width, output_height),
+            Image.Transform.AFFINE,
+            coefficients,
+            resample=Image.Resampling.BILINEAR,
+            fillcolor=0.0,
+        )
+        transformed_planes.append(np.asarray(transformed, dtype=np.float32))
+    output = np.stack(transformed_planes, axis=0)
+    valid = affine_valid_mask(
+        planes.shape[-2:],
+        output_to_source,
+        source_valid,
+        output_shape,
+        tile_rows=tile_rows,
+    )
+    output[:, ~valid] = 0.0
+    return output, valid
+
+
+def resample_affine(
+    data: np.ndarray,
+    source_to_output: tuple[float, ...] | np.ndarray,
+    source_valid: np.ndarray | None,
+    canvas: StackCanvas,
+    *,
+    tile_rows: int = 96,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Inverse-sample an affine/projective source transform onto an independent canvas."""
+    planes = data[np.newaxis, :, :] if data.ndim == 2 else data
+    if planes.ndim != 3:
+        raise ValueError(f"Affine resampling expects a 2D or CHW image, received shape {data.shape}")
+    _channels, source_height, source_width = planes.shape
+    if source_valid is not None and source_valid.shape != (source_height, source_width):
+        raise ValueError(
+            f"Validity mask shape changed: {source_valid.shape} != {(source_height, source_width)}"
+        )
+    transform = matrix3(source_to_output)
+    if (
+        canvas.is_identity_for((source_height, source_width))
+        and np.allclose(transform, np.eye(3), rtol=0.0, atol=1.0e-10)
+    ):
+        valid = np.ones(canvas.shape, dtype=bool) if source_valid is None else source_valid.copy()
+        result = planes.astype(np.float64, copy=True)
+        return (result[0] if data.ndim == 2 else result), valid
+
+    # Preserve the optimized slice path for exact pure translations.
+    if np.allclose(transform[:2, :2], np.eye(2), rtol=0.0, atol=1.0e-12) and np.allclose(
+        transform[2], (0.0, 0.0, 1.0), rtol=0.0, atol=1.0e-12
+    ):
+        return shift_image(data, float(transform[0, 2]), float(transform[1, 2]), source_valid, canvas)
+
+    try:
+        inverse = np.linalg.inv(transform)
+    except np.linalg.LinAlgError as error:
+        raise ValueError("Registration transform is singular") from error
+
+    affine = np.allclose(inverse[2], (0.0, 0.0, 1.0), rtol=0.0, atol=1.0e-12)
+    if affine:
+        output_array_to_registration = translation_matrix(canvas.origin_x, canvas.origin_y)
+        output_to_source = inverse @ output_array_to_registration
+        output, valid_output = resample_affine_with_pillow(
+            planes,
+            output_to_source,
+            source_valid,
+            canvas.shape,
+            tile_rows=tile_rows,
+        )
+        return (output[0] if data.ndim == 2 else output), valid_output
+
+    output_height, output_width = canvas.shape
+    output = np.zeros((planes.shape[0], output_height, output_width), dtype=np.float32)
+    valid_output = np.zeros(canvas.shape, dtype=bool)
+    output_x = np.arange(output_width, dtype=np.float64) + canvas.origin_x
+    rows_per_tile = max(1, int(tile_rows))
+    for output_y0 in range(0, output_height, rows_per_tile):
+        output_y1 = min(output_height, output_y0 + rows_per_tile)
+        output_y = np.arange(output_y0, output_y1, dtype=np.float64)[:, np.newaxis] + canvas.origin_y
+        source_x = (
+            inverse[0, 0] * output_x[np.newaxis, :] + inverse[0, 1] * output_y + inverse[0, 2]
+        )
+        source_y = (
+            inverse[1, 0] * output_x[np.newaxis, :] + inverse[1, 1] * output_y + inverse[1, 2]
+        )
+        if affine:
+            finite_denominator: bool | np.ndarray = True
+        else:
+            denominator = inverse[2, 0] * output_x[np.newaxis, :] + inverse[2, 1] * output_y + inverse[2, 2]
+            finite_denominator = np.isfinite(denominator) & (np.abs(denominator) > 1.0e-15)
+            safe_denominator = np.where(finite_denominator, denominator, 1.0)
+            source_x /= safe_denominator
+            source_y /= safe_denominator
+        x0, x1, wx = _normalize_bilinear_axis(source_x)
+        y0, y1, wy = _normalize_bilinear_axis(source_y)
+        valid = (
+            finite_denominator
+            & np.isfinite(source_x)
+            & np.isfinite(source_y)
+            & (x0 >= 0)
+            & (y0 >= 0)
+            & (x1 < source_width)
+            & (y1 < source_height)
+        )
+        if source_valid is not None and np.any(valid):
+            positions = np.flatnonzero(valid)
+            tile_width = output_width
+            py = positions // tile_width
+            px = positions % tile_width
+            kernel_valid = (
+                source_valid[y0[py, px], x0[py, px]]
+                & source_valid[y0[py, px], x1[py, px]]
+                & source_valid[y1[py, px], x0[py, px]]
+                & source_valid[y1[py, px], x1[py, px]]
+            )
+            valid[py, px] = kernel_valid
+        target_valid = valid_output[output_y0:output_y1]
+        target_valid[:] = valid
+        if not np.any(valid):
+            continue
+        valid_x0 = x0[valid]
+        valid_x1 = x1[valid]
+        valid_y0 = y0[valid]
+        valid_y1 = y1[valid]
+        valid_wx = wx[valid]
+        valid_wy = wy[valid]
+        weight00 = (1.0 - valid_wx) * (1.0 - valid_wy)
+        weight10 = valid_wx * (1.0 - valid_wy)
+        weight01 = (1.0 - valid_wx) * valid_wy
+        weight11 = valid_wx * valid_wy
+        for channel, plane in enumerate(planes):
+            blended = (
+                weight00 * plane[valid_y0, valid_x0]
+                + weight10 * plane[valid_y0, valid_x1]
+                + weight01 * plane[valid_y1, valid_x0]
+                + weight11 * plane[valid_y1, valid_x1]
+            )
+            output[channel, output_y0:output_y1][valid] = blended
+    return (output[0] if data.ndim == 2 else output), valid_output
+
+
+def resample_boolean_affine(
+    mask: np.ndarray,
+    source_to_output: tuple[float, ...] | np.ndarray,
+    canvas: StackCanvas,
+) -> np.ndarray:
+    """Conservatively mark output pixels touched by a transformed true source pixel."""
+    transformed, valid = resample_affine(mask.astype(np.float32, copy=False), source_to_output, None, canvas)
+    return valid & (transformed > 0.0)
+
+
 def relative_sharpcap_transform(frame: dict[str, object], reference: dict[str, object]) -> tuple[float, float, float]:
     """Convert StackLog transforms-to-stack-reference into a transform-to-selected-reference."""
     frame_angle = float(frame["rotation_deg"])
@@ -1867,11 +2148,14 @@ def process_stack_frame(
         "saturation": 0.0,
     }
     started = time.perf_counter()
-    image, registered_unit_scale = restore_registered_units(
-        read_fits(task.registered),
+    image, prepared_unit_scale = restore_registered_units(
+        read_fits(task.prepared),
         task.source_header,
     )
     source_valid = registered_valid_mask(image.data) if padding_policy == "valid" else None
+    resample_source_valid = (
+        None if source_valid is None or bool(np.all(source_valid)) else source_valid
+    )
     timings["fits_read"] = time.perf_counter() - started
 
     saturation_level: float | None = None
@@ -1916,33 +2200,46 @@ def process_stack_frame(
         )
         timings["background_apply"] = time.perf_counter() - started
 
-    started = time.perf_counter()
-    metcalf_data, metcalf_mask = shift_image(
-        stack_data,
-        task.dx,
-        task.dy,
-        source_valid,
-        canvas,
-    )
-    timings["metcalf_shift"] = time.perf_counter() - started
-
-    if canvas.is_identity_for(stack_data.shape[-2:]):
+    source_to_registration = matrix3(task.source_to_registration)
+    if canvas.is_identity_for(stack_data.shape[-2:]) and np.allclose(
+        source_to_registration, np.eye(3), rtol=0.0, atol=1.0e-10
+    ):
         star_data = stack_data
         star_mask = np.ones(canvas.shape, dtype=bool) if source_valid is None else source_valid
     else:
         started = time.perf_counter()
-        star_data, star_mask = shift_image(stack_data, 0.0, 0.0, source_valid, canvas)
+        star_data, star_mask = resample_affine(
+            stack_data,
+            source_to_registration,
+            resample_source_valid,
+            canvas,
+        )
         timings["star_resample"] = time.perf_counter() - started
+
+    started = time.perf_counter()
+    metcalf_transform = compose_output_transform(source_to_registration, task.dx, task.dy)
+    metcalf_data, metcalf_mask = resample_affine(
+        stack_data,
+        metcalf_transform,
+        resample_source_valid,
+        canvas,
+    )
+    timings["metcalf_shift"] = time.perf_counter() - started
 
     star_saturation_mask: np.ndarray | None = None
     metcalf_saturation_mask: np.ndarray | None = None
     if frame_saturation_mask is not None and saturated_pixel_count > 0:
         started = time.perf_counter()
-        if canvas.is_identity_for(frame_saturation_mask.shape):
-            star_saturation_mask = frame_saturation_mask & star_mask
-        else:
-            star_saturation_mask = shift_boolean_mask(frame_saturation_mask, 0.0, 0.0, canvas) & star_mask
-        metcalf_saturation_mask = shift_boolean_mask(frame_saturation_mask, task.dx, task.dy, canvas)
+        star_saturation_mask = resample_boolean_affine(
+            frame_saturation_mask,
+            source_to_registration,
+            canvas,
+        ) & star_mask
+        metcalf_saturation_mask = resample_boolean_affine(
+            frame_saturation_mask,
+            metcalf_transform,
+            canvas,
+        ) & metcalf_mask
         timings["saturation"] += time.perf_counter() - started
 
     return StackFrameResult(
@@ -1951,7 +2248,7 @@ def process_stack_frame(
         star_mask=star_mask,
         metcalf_data=metcalf_data,
         metcalf_mask=metcalf_mask,
-        registered_unit_scale=registered_unit_scale,
+        prepared_unit_scale=prepared_unit_scale,
         background_model=background_model,
         background_correction=background_correction,
         star_saturation_mask=star_saturation_mask,
@@ -2178,7 +2475,7 @@ def write_siril_registration_script(
     minpairs: int | None,
     reference_index: int,
 ) -> None:
-    register = f"register {sequence_basename}_ -prefix=r_ -transf={transform}"
+    register = f"register {sequence_basename}_ -2pass -transf={transform}"
     if minpairs:
         register += f" -minpairs={minpairs}"
     path.write_text(
@@ -2337,6 +2634,68 @@ def remove_intermediate_paths(candidates) -> list[str]:
     return removed
 
 
+def directory_file_stats(path: Path) -> dict[str, int]:
+    file_count = 0
+    total_bytes = 0
+    if not path.is_dir():
+        return {"file_count": 0, "bytes": 0}
+    for candidate in path.rglob("*"):
+        try:
+            if candidate.is_file():
+                file_count += 1
+                total_bytes += candidate.stat().st_size
+        except OSError:
+            continue
+    return {"file_count": file_count, "bytes": total_bytes}
+
+
+def process_peak_rss_bytes() -> int | None:
+    """Return this Python process' peak resident set without adding a dependency."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class ProcessMemoryCounters(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = ProcessMemoryCounters()
+            counters.cb = ctypes.sizeof(counters)
+            get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+            get_process_memory_info = ctypes.windll.psapi.GetProcessMemoryInfo
+            get_current_process.argtypes = []
+            get_current_process.restype = wintypes.HANDLE
+            get_process_memory_info.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(ProcessMemoryCounters),
+                wintypes.DWORD,
+            ]
+            get_process_memory_info.restype = wintypes.BOOL
+            if get_process_memory_info(get_current_process(), ctypes.byref(counters), counters.cb):
+                return int(counters.PeakWorkingSetSize)
+        except (AttributeError, OSError, ValueError):
+            return None
+        return None
+    try:
+        import resource
+
+        peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        return peak if sys.platform == "darwin" else peak * 1024
+    except (ImportError, OSError, ValueError):
+        return None
+
+
 def cleanup_after_preprocessing(registration_dir: Path, processed_files: list[Path]) -> list[str]:
     """Keep only the final sequence needed by registration plus small Siril metadata."""
     preserved = {path.resolve() for path in processed_files}
@@ -2410,6 +2769,29 @@ def parse_siril_registration(seq_path: Path) -> dict[int, SirilRegistration]:
             reg.roundness = roundness or None
             reg.detected_stars = detected_stars
             reg.matrix = matrix  # type: ignore[assignment]
+    return registrations
+
+
+def rebase_siril_registrations(
+    registrations: dict[int, SirilRegistration],
+    requested_reference_index: int,
+) -> dict[int, SirilRegistration]:
+    """Express Siril two-pass matrices in the user-selected reference coordinates."""
+    reference = registrations.get(requested_reference_index)
+    if reference is None or reference.matrix is None:
+        return registrations
+    try:
+        auto_reference_to_requested = np.linalg.inv(matrix3(reference.matrix))
+    except (ValueError, np.linalg.LinAlgError):
+        return registrations
+    for registration in registrations.values():
+        registration.reference_index = requested_reference_index
+        if registration.matrix is None:
+            continue
+        rebased = auto_reference_to_requested @ matrix3(registration.matrix)
+        if abs(rebased[2, 2]) > 1.0e-15:
+            rebased /= rebased[2, 2]
+        registration.matrix = tuple(float(value) for value in rebased.ravel())  # type: ignore[assignment]
     return registrations
 
 
@@ -2545,6 +2927,8 @@ def registration_validation_issues(
     basename: str,
     registrations: dict[int, SirilRegistration],
     minpairs: int,
+    *,
+    require_registered_fits: bool = True,
 ) -> dict[int, list[str]]:
     """Return per-frame reasons that a background-star registration is unusable."""
     issues: dict[int, list[str]] = {}
@@ -2552,7 +2936,7 @@ def registration_validation_issues(
         registration = registrations.get(index)
         registered = registration_dir / f"r_{basename}_{index:05d}.fit"
         reasons: list[str] = []
-        if not registered.exists():
+        if require_registered_fits and not registered.exists():
             reasons.append("registered FITS was not produced")
         if registration is None:
             reasons.append("Siril registration metadata is missing")
@@ -3163,12 +3547,13 @@ def main() -> int:
     parser.add_argument(
         "--no-cleanup",
         action="store_true",
-        help="Keep intermediate image FITS files generated for Siril registration.",
+        help="Keep intermediate image FITS files generated during preprocessing and stacking.",
     )
     parser.set_defaults(verbose=True)
     parser.add_argument("-v", "--verbose", dest="verbose", action="store_true", help="Show registration and per-frame stack progress (default).")
     parser.add_argument("--no-verbose", dest="verbose", action="store_false", help="Hide detailed registration and per-frame progress.")
     args = parser.parse_args()
+    pipeline_wall_started = time.perf_counter()
 
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
@@ -3230,6 +3615,29 @@ def main() -> int:
     work_dir = prepare_work_dir(args.work_dir, args.work_root, args.work_name)
     registration_dir = work_dir / "registration_images"
     registration_dir.mkdir(parents=True, exist_ok=True)
+    pipeline_timing_seconds = {
+        "source_staging": 0.0,
+        "siril_preprocessing": 0.0,
+        "registration": 0.0,
+        "stacking": 0.0,
+        "output": 0.0,
+        "total_pipeline_wall": 0.0,
+    }
+    temporary_storage_samples: list[dict[str, object]] = []
+    temporary_peak_bytes = 0
+
+    def record_temporary_storage(stage: str) -> None:
+        nonlocal temporary_peak_bytes
+        stats = directory_file_stats(registration_dir)
+        sample = {"stage": stage, **stats}
+        temporary_storage_samples.append(sample)
+        temporary_peak_bytes = max(temporary_peak_bytes, stats["bytes"])
+        if args.verbose:
+            print(
+                f"[storage] {stage}: {stats['file_count']} file(s), "
+                f"{format_memory_size(stats['bytes'])}",
+                flush=True,
+            )
     use_sharpcap_registration = bool(manifest and manifest.get("alignment_complete"))
     manifest_reference = manifest_rows[reference_index - 1] if use_sharpcap_registration else None
     preprocessing_payload = None
@@ -3243,6 +3651,7 @@ def main() -> int:
     copied: list[Path] = []
     source_headers: list[dict[str, object]] = []
     cfa = False
+    source_staging_started = time.perf_counter()
     try:
         if args.verbose:
             print(f"[prepare] Copying source frames for Siril preprocessing: {len(files)} frames", flush=True)
@@ -3282,6 +3691,8 @@ def main() -> int:
         if not args.no_cleanup:
             cleanup_intermediate_images(registration_dir, args.basename, copied, len(copied))
         raise
+    pipeline_timing_seconds["source_staging"] = time.perf_counter() - source_staging_started
+    record_temporary_storage("after-source-staging")
 
     preprocess_script = registration_dir / "preprocess_and_debayer.ssf"
     staged_preprocessing_plan = stage_preprocessing_files(preprocessing_plan, registration_dir)
@@ -3301,7 +3712,9 @@ def main() -> int:
             f"cfa={'yes' if cfa else 'no'}",
             flush=True,
         )
+    preprocessing_started = time.perf_counter()
     run_siril(args.siril, registration_dir, preprocess_script, args.verbose)
+    pipeline_timing_seconds["siril_preprocessing"] = time.perf_counter() - preprocessing_started
     processed_basename = processed_sequence.rstrip("_")
     processed_files = [registration_dir / f"{processed_basename}_{i:05d}.fit" for i in range(1, len(files) + 1)]
     missing_processed = [path for path in processed_files if not path.is_file()]
@@ -3309,6 +3722,7 @@ def main() -> int:
         raise RuntimeError(
             f"Siril preprocessing produced only {len(processed_files) - len(missing_processed)}/{len(processed_files)} frame(s)"
         )
+    record_temporary_storage("after-siril-preprocessing")
     if not args.no_cleanup:
         preprocessing_removed = cleanup_after_preprocessing(registration_dir, processed_files)
         removed_intermediate_images.extend(preprocessing_removed)
@@ -3316,7 +3730,9 @@ def main() -> int:
             f"[cleanup] Removed {len(preprocessing_removed)} source/conversion/calibration files after preprocessing",
             flush=True,
         )
+        record_temporary_storage("after-preprocessing-cleanup")
 
+    registration_started = time.perf_counter()
     if use_sharpcap_registration:
         if args.verbose:
             print(f"[registration] Applying SharpCap StackLog alignment: {len(files)} frames", flush=True)
@@ -3378,6 +3794,7 @@ def main() -> int:
         if not use_sharpcap_registration:
             siril_output = run_siril(args.siril, registration_dir, siril_script, args.verbose)
             star_registrations = parse_siril_registration(registration_seq)
+            star_registrations = rebase_siril_registrations(star_registrations, reference_index)
             match_diagnostics = parse_siril_match_diagnostics(siril_output)
             registration_issues = registration_validation_issues(
                 files,
@@ -3385,6 +3802,7 @@ def main() -> int:
                 processed_basename,
                 star_registrations,
                 args.registration_minpairs,
+                require_registered_fits=False,
             )
             registration_diagnostic_rows = build_registration_diagnostic_rows(
                 files,
@@ -3407,19 +3825,16 @@ def main() -> int:
                     flush=True,
                 )
                 raise RuntimeError("Selected reference frame cannot support background-star registration; see warning above")
-            registered_count = sum(
-                (registration_dir / f"r_{processed_basename}_{i:05d}.fit").exists()
-                for i in range(1, len(copied) + 1)
-            )
             if args.verbose:
                 usable_count = len(copied) - len(registration_issues)
                 print(
-                    f"[registration] Siril produced {registered_count}/{len(copied)} registered frames; "
-                    f"{usable_count}/{len(copied)} will be stacked",
+                    f"[registration] Siril -2pass produced matrix-only alignment; "
+                    f"{usable_count}/{len(copied)} frame(s) will be stacked without registered FITS",
                     flush=True,
                 )
     except SirilRegistrationError as error:
         star_registrations = parse_siril_registration(registration_seq)
+        star_registrations = rebase_siril_registrations(star_registrations, reference_index)
         star_registrations = merge_registration_diagnostics(
             star_registrations,
             collect_failed_registration_diagnostics(
@@ -3437,6 +3852,7 @@ def main() -> int:
             processed_basename,
             star_registrations,
             args.registration_minpairs,
+            require_registered_fits=use_sharpcap_registration,
         )
         registration_snapshot_csv = work_dir / "registration_diagnostics.csv"
         write_registration_diagnostics(
@@ -3485,6 +3901,11 @@ def main() -> int:
             )
             print(f"[cleanup] Removed {len(removed)} intermediate FITS files after registration failure", flush=True)
         raise
+    pipeline_timing_seconds["registration"] = time.perf_counter() - registration_started
+    record_temporary_storage("after-registration")
+    registered_fits_after_registration = sum(
+        1 for path in registration_dir.glob(f"r_{processed_basename}_*.fit*") if path.is_file()
+    )
     reference = read_fits(processed_files[reference_index - 1])
     height = int(reference.header["NAXIS2"])
     width = int(reference.header["NAXIS1"])
@@ -3610,12 +4031,26 @@ def main() -> int:
         frame_time = parse_time(source_header["DATE-OBS"])
         target = interpolate_ephemeris(ephemeris, frame_time)
         x, y = wcs.world_to_pixel(target.ra_deg, target.dec_deg)
+        if use_sharpcap_registration:
+            prepared = registration_dir / f"r_{processed_basename}_{i:05d}.fit"
+            source_to_registration = np.eye(3, dtype=np.float64)
+        else:
+            if star_reg.matrix is None:
+                raise RuntimeError(f"Registration matrix is missing for usable frame {i}")
+            prepared = processed_files[i - 1]
+            source_shape = (int(source_header["NAXIS2"]), int(source_header["NAXIS1"]))
+            source_to_registration = siril_matrix_to_array_coordinates(
+                star_reg.matrix,
+                source_shape,
+                stack_canvas.shape,
+            )
         stack_tasks.append(
             StackFrameTask(
                 index=i,
                 source_name=files[i - 1].name,
-                registered=registration_dir / f"r_{processed_basename}_{i:05d}.fit",
+                prepared=prepared,
                 source_header=source_header,
+                source_to_registration=tuple(float(value) for value in source_to_registration.ravel()),
                 frame_time=frame_time,
                 target=target,
                 target_x=x,
@@ -3626,18 +4061,25 @@ def main() -> int:
         )
 
     if not stack_tasks:
-        raise RuntimeError("No registered frames were available for moving-target stacking")
+        raise RuntimeError("No registered frame transforms were available for moving-target stacking")
     if not args.no_cleanup:
-        skipped_registered = [
-            registration_dir / f"r_{processed_basename}_{index:05d}.fit"
-            for index in registration_issues
-        ]
-        pre_stack_removed = remove_intermediate_paths([*copied, *processed_files, *skipped_registered])
+        if use_sharpcap_registration:
+            skipped_inputs = [
+                registration_dir / f"r_{processed_basename}_{index:05d}.fit"
+                for index in registration_issues
+            ]
+            pre_stack_candidates = [*copied, *processed_files, *skipped_inputs]
+        else:
+            skipped_inputs = [processed_files[index - 1] for index in registration_issues]
+            pre_stack_candidates = [*copied, *skipped_inputs]
+        pre_stack_removed = remove_intermediate_paths(pre_stack_candidates)
         removed_intermediate_images.extend(pre_stack_removed)
         print(
-            f"[cleanup] Removed {len(pre_stack_removed)} completed preprocessing/unused FITS files before stacking",
+            f"[cleanup] Removed {len(pre_stack_removed)} completed/unused FITS files before stacking; "
+            "usable preprocessed frames remain until their contributions are accepted",
             flush=True,
         )
+        record_temporary_storage("after-pre-stack-cleanup")
 
     worker_memory_estimate = estimate_stack_worker_memory(
         tuple(reference.data.shape),
@@ -3783,7 +4225,7 @@ def main() -> int:
             {
                 "index": i,
                 "source": task.source_name,
-                "registered": task.registered.name,
+                "stack_input": task.prepared.name,
                 "used": True,
                 "date_obs": task.frame_time.isoformat(),
                 "ra_deg": task.target.ra_deg,
@@ -3793,7 +4235,7 @@ def main() -> int:
                 "extra_dx_px": task.dx,
                 "extra_dy_px": task.dy,
                 **registration_metrics,
-                "registered_unit_scale": result.registered_unit_scale,
+                "prepared_unit_scale": result.prepared_unit_scale,
                 "background_ch1_adu": float(background_model.levels[0]) if background_model is not None else None,
                 "background_ch2_adu": float(background_model.levels[1]) if background_model is not None and background_model.levels.size > 1 else None,
                 "background_ch3_adu": float(background_model.levels[2]) if background_model is not None and background_model.levels.size > 2 else None,
@@ -3818,12 +4260,12 @@ def main() -> int:
             }
         )
         if not args.no_cleanup:
-            removed_intermediate_images.extend(remove_intermediate_paths([task.registered]))
+            removed_intermediate_images.extend(remove_intermediate_paths([task.prepared]))
 
     frame_rows.sort(key=lambda row: int(row["index"]))
 
     if used == 0:
-        raise RuntimeError("No registered frames were available for moving-target stacking")
+        raise RuntimeError("No registered frame transforms were available for moving-target stacking")
 
     if args.background_normalization != "none":
         background_output_levels = mean_background_dc_levels(background_models_by_index)
@@ -3874,6 +4316,8 @@ def main() -> int:
         stack = add_background_output_offset(stack, metcalf_coverage > 0, background_output_levels)
         star_stack = add_background_output_offset(star_stack, star_coverage > 0, background_output_levels)
     stack_timing_seconds["total_stacking_wall"] = time.perf_counter() - stack_wall_started
+    pipeline_timing_seconds["stacking"] = stack_timing_seconds["total_stacking_wall"]
+    record_temporary_storage("after-stack-input-cleanup")
     timing_parts = "; ".join(
         f"{name}={elapsed:.3f}s"
         for name, elapsed in stack_timing_seconds.items()
@@ -3885,6 +4329,7 @@ def main() -> int:
         f"total_stacking_wall={stack_timing_seconds['total_stacking_wall']:.3f}s",
         flush=True,
     )
+    output_started = time.perf_counter()
     comparison_stack = concatenate_side_by_side(star_stack, stack)
     if args.verbose:
         print("[output] Writing Metcalf, star-aligned, comparison FITS, and previews", flush=True)
@@ -4209,7 +4654,7 @@ def main() -> int:
         fieldnames = [
             "index",
             "source",
-            "registered",
+            "stack_input",
             "used",
             "reason",
             "date_obs",
@@ -4234,7 +4679,7 @@ def main() -> int:
             "star_ty_px",
             "star_rotation_deg",
             "star_scale",
-            "registered_unit_scale",
+            "prepared_unit_scale",
             "saturation_warning",
             "saturation_level",
             "saturation_threshold_count",
@@ -4274,6 +4719,10 @@ def main() -> int:
                 processed_basename,
             )
         )
+    record_temporary_storage("final")
+    pipeline_timing_seconds["output"] = time.perf_counter() - output_started
+    pipeline_timing_seconds["total_pipeline_wall"] = time.perf_counter() - pipeline_wall_started
+    peak_rss_bytes = process_peak_rss_bytes()
 
     summary = {
         "source_dir": str(args.source_dir),
@@ -4284,6 +4733,17 @@ def main() -> int:
         "astrometry_json": str(args.astrometry_json) if args.astrometry_json else None,
         "registration_transform": args.registration_transform,
         "registration_source": "sharpcap-stacklog" if use_sharpcap_registration else "siril",
+        "registration_mode": (
+            "sharpcap-materialized-registration"
+            if use_sharpcap_registration
+            else "siril-2pass-matrix-only"
+        ),
+        "registered_fits_after_registration": registered_fits_after_registration,
+        "resampling": (
+            "prealigned-sharpcap-plus-metcalf-translation"
+            if use_sharpcap_registration
+            else "single-pass-star-matrix-plus-metcalf-translation"
+        ),
         "frame_manifest": str(args.frame_manifest) if args.frame_manifest else None,
         "preprocessing": preprocessing_plan.to_dict(),
         "registration_minpairs": args.registration_minpairs,
@@ -4357,6 +4817,15 @@ def main() -> int:
         },
         "stack_timing_seconds": stack_timing_seconds,
         "stack_timing_note": "per-operation worker CPU sums; total_stacking_wall is elapsed wall time",
+        "pipeline_timing_seconds": pipeline_timing_seconds,
+        "temporary_storage": {
+            "scope": str(registration_dir),
+            "samples": temporary_storage_samples,
+            "measured_peak_bytes": temporary_peak_bytes,
+            "measurement_note": "Checkpoint samples; transient peaks between checkpoints are not captured.",
+        },
+        "process_peak_rss_bytes": peak_rss_bytes,
+        "process_peak_rss_note": "Peak RSS of the Python stacking process only; Siril child-process memory is excluded.",
         "padding_policy": args.padding_policy,
         "zero_sample_policy": effective_zero_sample_policy if args.stack_method != "mean" else None,
         "background_normalization": {

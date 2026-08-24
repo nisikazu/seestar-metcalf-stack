@@ -192,6 +192,90 @@ class SliceTranslationRegressionTests(unittest.TestCase):
         self.assertFalse(np.any(actual))
 
 
+class MatrixOnlyResamplingTests(unittest.TestCase):
+    def test_siril_matrix_conversion_accounts_for_row_direction_and_different_canvas_height(self):
+        converted = stacker.siril_matrix_to_array_coordinates(
+            np.eye(3),
+            source_shape=(5, 8),
+            registration_shape=(7, 8),
+        )
+        expected = np.asarray(((1.0, 0.0, 0.0), (0.0, 1.0, 2.0), (0.0, 0.0, 1.0)))
+        np.testing.assert_allclose(converted, expected, rtol=0.0, atol=1.0e-12)
+
+    def test_affine_resampling_matches_linear_field_for_mono_rgb_and_expanded_canvas(self):
+        height, width = 17, 19
+        yy, xx = np.indices((height, width), dtype=np.float64)
+        mono = 17.0 + 2.5 * xx + 4.25 * yy
+        rgb = np.stack((mono, mono * 0.7 + 3.0, mono * 1.4 - 8.0))
+        angle = math.radians(7.0)
+        scale = 1.015
+        forward = np.asarray(
+            (
+                (scale * math.cos(angle), -scale * math.sin(angle), 2.25),
+                (scale * math.sin(angle), scale * math.cos(angle), -1.75),
+                (0.0, 0.0, 1.0),
+            )
+        )
+        canvas = stacker.StackCanvas(shape=(20, 23), origin_x=-2.0, origin_y=-1.0)
+        inverse = np.linalg.inv(forward)
+        out_y, out_x = np.indices(canvas.shape, dtype=np.float64)
+        reg_x = out_x + canvas.origin_x
+        reg_y = out_y + canvas.origin_y
+        source_x = inverse[0, 0] * reg_x + inverse[0, 1] * reg_y + inverse[0, 2]
+        source_y = inverse[1, 0] * reg_x + inverse[1, 1] * reg_y + inverse[1, 2]
+        interior = (source_x >= 0.0) & (source_y >= 0.0) & (source_x < width - 1) & (source_y < height - 1)
+
+        for data in (mono, rgb):
+            with self.subTest(shape=data.shape):
+                actual, valid = stacker.resample_affine(data, forward, None, canvas, tile_rows=3)
+                np.testing.assert_array_equal(valid, interior)
+                expected_mono = 17.0 + 2.5 * source_x + 4.25 * source_y
+                expected = (
+                    expected_mono
+                    if data.ndim == 2
+                    else np.stack((expected_mono, expected_mono * 0.7 + 3.0, expected_mono * 1.4 - 8.0))
+                )
+                np.testing.assert_allclose(actual[..., valid], expected[..., valid], rtol=0.0, atol=2.0e-5)
+                self.assertFalse(np.any(actual[..., ~valid]))
+
+    def test_valid_mask_and_saturation_follow_the_same_combined_transform(self):
+        data = np.arange(12 * 14, dtype=np.float32).reshape(12, 14) + 1.0
+        source_valid = np.ones(data.shape, dtype=bool)
+        source_valid[3:5, 6:8] = False
+        saturation = np.zeros(data.shape, dtype=bool)
+        saturation[7, 9] = True
+        angle = math.radians(-4.0)
+        star = np.asarray(
+            (
+                (math.cos(angle), -math.sin(angle), -0.75),
+                (math.sin(angle), math.cos(angle), 1.25),
+                (0.0, 0.0, 1.0),
+            )
+        )
+        combined = stacker.compose_output_transform(star, 1.4, -0.6)
+        canvas = stacker.StackCanvas.reference_footprint(data.shape)
+        transformed, valid = stacker.resample_affine(data, combined, source_valid, canvas, tile_rows=4)
+        warning = stacker.resample_boolean_affine(saturation, combined, canvas)
+        raw_saturation, raw_valid = stacker.resample_affine(
+            saturation.astype(np.float32), combined, None, canvas, tile_rows=4
+        )
+
+        self.assertFalse(np.any(valid & (transformed == 0.0)))
+        np.testing.assert_array_equal(warning, raw_valid & (raw_saturation > 0.0))
+        self.assertGreater(int(np.count_nonzero(warning)), 0)
+
+    def test_identity_keeps_every_edge_pixel(self):
+        data = np.arange(30, dtype=np.float32).reshape(5, 6)
+        actual, valid = stacker.resample_affine(
+            data,
+            np.eye(3),
+            None,
+            stacker.StackCanvas.reference_footprint(data.shape),
+        )
+        np.testing.assert_array_equal(actual, data)
+        self.assertTrue(np.all(valid))
+
+
 class SeparableBackgroundRegressionTests(unittest.TestCase):
     def test_plane_and_quadratic_match_full_grid_for_mono_and_rgb(self):
         rng = np.random.default_rng(20260824)
@@ -397,8 +481,9 @@ class BoundedFrameProcessingTests(unittest.TestCase):
                     stacker.StackFrameTask(
                         index=index,
                         source_name=path.name,
-                        registered=path,
+                        prepared=path,
                         source_header=source_header,
+                        source_to_registration=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
                         frame_time=datetime(2026, 8, 24, 0, index, tzinfo=timezone.utc),
                         target=stacker.TargetPoint(
                             datetime(2026, 8, 24, 0, index, tzinfo=timezone.utc),

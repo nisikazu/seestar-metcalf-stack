@@ -1,0 +1,11 @@
+scope,method_or_aperture,red_percent,green_percent,blue_percent,overall_min_percent,overall_max_percent,notes
+single_transform_vs_input,pillow_bilinear,-0.216740,0.047771,-0.086413,-1.426700,0.896100,new production resampler; five reference stars
+single_transform_vs_input,siril_linear,-0.187274,0.074783,-0.025379,,,Siril linear interpolation; five reference stars
+single_transform_vs_input,siril_cubic,1.362100,2.100700,1.695800,,,Siril cubic interpolation; five reference stars
+single_transform_vs_input,siril_lanczos4,0.445000,0.912700,1.068300,,,old production registration interpolation; five reference stars
+old_to_new_full_metcalf_stack,radius_6_px,-0.280899,0.181392,0.368664,-0.280899,0.368664,242 accepted frames
+old_to_new_full_metcalf_stack,radius_10_px,0.179511,-0.026109,0.318800,-0.026109,0.318800,242 accepted frames
+old_to_new_full_metcalf_stack,radius_14_px,-1.209622,-0.130878,-1.660695,-1.660695,-0.130878,larger aperture is more sensitive to background-annulus placement
+old_to_new_reference_stars,radius_6_px,-0.870000,-1.230000,-1.130000,-1.526294,-0.689222,eight stars; channel values are means
+old_to_new_reference_stars,radius_10_px,-0.800000,-1.160000,-1.100000,-1.497324,-0.600787,eight stars; channel values are means
+old_to_new_reference_stars,radius_14_px,-0.710000,-1.120000,-1.050000,-1.827293,0.035535,eight stars; channel values are means

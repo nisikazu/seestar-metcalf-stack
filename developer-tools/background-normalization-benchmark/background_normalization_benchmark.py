@@ -36,6 +36,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--count", type=int, help="Limit frames from the selected latest session for a quick trial")
     parser.add_argument("--session-gap-min", type=float, default=60.0)
     parser.add_argument(
+        "--stack-workers",
+        choices=("auto", "1", "2", "4"),
+        default="auto",
+        help="Forwarded stacking worker setting. Defaults to auto.",
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
         # Pipeline stages the long Horizons filename into each work directory.
@@ -71,7 +77,26 @@ def resolve_wcs(source_dir: Path, explicit: Path | None) -> Path:
 
 
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
-    fields = ["mode", "repeat", "elapsed_seconds", "success", "work_dir", "error", "log"]
+    fields = [
+        "mode",
+        "repeat",
+        "elapsed_seconds",
+        "pipeline_wall_seconds",
+        "registration_seconds",
+        "stacking_seconds",
+        "output_seconds",
+        "stack_workers",
+        "input_frames",
+        "used_frames",
+        "process_peak_rss_bytes",
+        "temporary_peak_bytes",
+        "registered_fits_after_registration",
+        "success",
+        "work_dir",
+        "summary_json",
+        "error",
+        "log",
+    ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -90,12 +115,33 @@ def write_summary(path: Path, config: dict[str, object], rows: list[dict[str, ob
         json.dumps(config, indent=2),
         "```",
         "",
-        "| Mode | Run | Seconds | Result |",
-        "| --- | ---: | ---: | --- |",
+        "| Mode | Run | Total s | Registration s | Stacking s | Workers | Frames | Peak RSS MiB | Temp peak GiB | Registered FITS | Result |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in rows:
         result = "success" if row["success"] else f"failed: {row['error']}"
-        lines.append(f"| {row['mode']} | {row['repeat']} | {row['elapsed_seconds']:.2f} | {result} |")
+        rss_mib = (
+            f"{int(row['process_peak_rss_bytes']) / (1024 ** 2):.1f}"
+            if row.get("process_peak_rss_bytes") is not None
+            else "n/a"
+        )
+        temp_gib = (
+            f"{int(row['temporary_peak_bytes']) / (1024 ** 3):.2f}"
+            if row.get("temporary_peak_bytes") is not None
+            else "n/a"
+        )
+        frames = (
+            f"{row['used_frames']}/{row['input_frames']}"
+            if row.get("used_frames") is not None
+            else "n/a"
+        )
+        lines.append(
+            f"| {row['mode']} | {row['repeat']} | {row['elapsed_seconds']:.2f} | "
+            f"{float(row.get('registration_seconds') or 0.0):.2f} | "
+            f"{float(row.get('stacking_seconds') or 0.0):.2f} | "
+            f"{row.get('stack_workers') or 'n/a'} | {frames} | {rss_mib} | {temp_gib} | "
+            f"{row.get('registered_fits_after_registration', 'n/a')} | {result} |"
+        )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -120,6 +166,7 @@ def main() -> int:
         "session": "latest after --session-gap-min splitting",
         "session_gap_min": args.session_gap_min,
         "frame_count_limit": args.count,
+        "stack_workers": args.stack_workers,
         "timing_scope": "registration, background processing, stacking, and output writing",
     }
     (result_dir / "benchmark_config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -150,6 +197,12 @@ def main() -> int:
                 work_name,
                 "--no-open-output",
                 "--no-verbose",
+                "--sun-pa",
+                "off",
+                "--preview-at",
+                "none",
+                "--stack-workers",
+                args.stack_workers,
             ]
             if args.count is not None:
                 command.extend(["--count", str(args.count)])
@@ -161,12 +214,30 @@ def main() -> int:
             log_path.write_text(completed.stdout, encoding="utf-8", errors="replace")
             match = re.search(r"Wrote pipeline summary: (.+)$", completed.stdout, re.MULTILINE)
             work_dir = str(Path(match.group(1)).parent) if match else ""
+            summary_path = Path(match.group(1).strip()) if match else None
+            summary = {}
+            if summary_path is not None and summary_path.is_file():
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            stack_summary = summary.get("stack", summary)
+            timing = stack_summary.get("pipeline_timing_seconds", {})
+            temporary_storage = stack_summary.get("temporary_storage", {})
             row = {
                 "mode": mode,
                 "repeat": repeat,
                 "elapsed_seconds": round(elapsed, 3),
+                "pipeline_wall_seconds": timing.get("total_pipeline_wall"),
+                "registration_seconds": timing.get("registration"),
+                "stacking_seconds": timing.get("stacking"),
+                "output_seconds": timing.get("output"),
+                "stack_workers": stack_summary.get("stack_workers"),
+                "input_frames": stack_summary.get("input_frames"),
+                "used_frames": stack_summary.get("used_frames"),
+                "process_peak_rss_bytes": stack_summary.get("process_peak_rss_bytes"),
+                "temporary_peak_bytes": temporary_storage.get("measured_peak_bytes"),
+                "registered_fits_after_registration": stack_summary.get("registered_fits_after_registration"),
                 "success": completed.returncode == 0,
                 "work_dir": work_dir,
+                "summary_json": str(summary_path) if summary_path is not None else "",
                 "error": "" if completed.returncode == 0 else f"pipeline exit {completed.returncode}",
                 "log": str(log_path),
             }

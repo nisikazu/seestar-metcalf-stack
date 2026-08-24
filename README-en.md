@@ -174,8 +174,8 @@ questions: where the image points, where the moving object was at each exposure,
 and how the background stars shifted. These tools provide those separate answers:
 
 - **Siril** applies dark/flat and hot/cold-pixel corrections, debayers frames,
-  plate-solves the reference locally, and performs background-star registration
-  when StackLog transforms are unavailable. Seestar FITS normally supplies a
+  plate-solves the reference locally, and estimates background-star registration
+  matrices when StackLog transforms are unavailable. Seestar FITS normally supplies a
   reliable center and image scale, making the local solve fast.
 - **Astrometry.net** is an optional fallback when Siril cannot solve the
   reference. Its account and API key are needed only for that fallback.
@@ -189,8 +189,11 @@ and how the background stars shifted. These tools provide those separate answers
 
 Siril determines where the image points and prepares the raw pixels; Horizons
 determines where the target moved. Complete SharpCap StackLog transforms can
-replace only Siril's background-star registration. Python performs the final
-Metcalf stack, star-fixed stack, linear FITS writing, and previews.
+replace only Siril's background-star registration. Otherwise Siril
+`register -2pass` estimates matrices without writing registered FITS. Python
+composes each matrix with its Metcalf translation, resamples the preprocessed
+frame once, and produces the Metcalf stack, star-fixed stack, linear FITS, and
+previews.
 
 ## Requirements and package choices
 
@@ -355,17 +358,18 @@ drop on macOS, see [the macOS setup guide](README-macOS.md).
 
 ### Free space for large sessions
 
-Siril temporarily stores both debayered and registered images during
-background-star registration. Sessions containing hundreds of frames can
-therefore require substantially more free space than the source FITS files.
+During Siril conversion, correction, and debayering, source, converted, and
+preprocessed images temporarily coexist. Sessions containing hundreds of frames
+can therefore require substantially more free space than the source FITS files.
+Normal Siril registration uses `register -2pass` to obtain matrices and does not
+write registered FITS files.
 If Siril reports `Not enough free disk space`, free more space, select another
 drive with `--work-root D:\metcalf_output`, or reduce the run with an option
 such as `--count 400`. Source copies, conversion images, and staged calibration
-files are removed after preprocessing succeeds. The final preprocessed sequence
-is removed after registration, and registered FITS files are removed after each
-accepted stack contribution. Preprocessed and partially generated registered
-images still coexist during registration. Use `--no-cleanup` to retain
-intermediates for diagnosis.
+files are removed after preprocessing succeeds. Unneeded preprocessed inputs are
+removed after their stack contribution is accepted. The complete SharpCap
+StackLog path still materializes transformed images from the recorded transforms.
+Use `--no-cleanup` to retain intermediates for diagnosis.
 
 ### Plate-solve cache
 
@@ -389,8 +393,9 @@ the source folder.
 ### Mean, median, or rank-fit
 
 Mean is the default and generally provides the best signal-to-noise ratio when
-the input frames are clean. Pixels outside a Siril-registered or
-Metcalf-shifted frame do not contribute to the sum. Each output pixel is
+the input frames are clean. Python composes the background-star matrix and
+Metcalf translation and applies one bilinear resampling. Pixels outside that
+transformed frame do not contribute to the sum. Each output pixel is
 divided by its integer number of contributing frames, and interpolation is
 accepted only when all four bilinear source pixels are valid. This avoids
 extrapolation and prevents low-coverage borders from becoming artificially
@@ -604,10 +609,11 @@ point. The default unsigned 16-bit output uses no rescaling; use
 `--output-bitpix float32` when you want to preserve fractional interpolation
 values directly.
 
-Source/conversion/calibration staging is removed after preprocessing, final
-preprocessed images after registration, registered Siril images after each
-accepted stack contribution, and median temporary arrays after finalization.
-Use `--no-cleanup` to keep them for diagnosis.
+Source/conversion/calibration staging is removed after preprocessing. On the
+normal Siril path, preprocessed inputs are removed after their accepted stack
+contribution and no registered FITS are created. SharpCap StackLog transformed
+images are removed after each accepted contribution, and median temporary arrays
+after finalization. Use `--no-cleanup` to keep them for diagnosis.
 
 ## When Horizons cannot identify the target
 

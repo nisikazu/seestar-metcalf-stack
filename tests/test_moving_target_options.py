@@ -871,6 +871,41 @@ class ReferenceSelectionTests(unittest.TestCase):
 
 
 class RegistrationValidationTests(unittest.TestCase):
+    def test_registration_script_uses_two_pass_without_materializing_registered_fits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            script = Path(temporary) / "register.ssf"
+            stacker.write_siril_registration_script(script, "pp_frame", "similarity", 6, 3)
+            content = script.read_text(encoding="ascii")
+
+        self.assertIn("setref pp_frame_ 3", content)
+        self.assertIn("register pp_frame_ -2pass -transf=similarity -minpairs=6", content)
+        self.assertNotIn("-prefix=", content)
+
+    def test_two_pass_matrices_are_rebased_to_the_requested_reference(self):
+        reference_to_auto = np.asarray(
+            ((0.98, -0.2, 12.0), (0.2, 0.98, -7.0), (0.0, 0.0, 1.0))
+        )
+        other_to_requested = np.asarray(
+            ((1.01, 0.03, -4.0), (-0.03, 1.01, 8.0), (0.0, 0.0, 1.0))
+        )
+        registrations = {
+            2: stacker.SirilRegistration(index=2, matrix=tuple(reference_to_auto.ravel())),
+            5: stacker.SirilRegistration(
+                index=5,
+                matrix=tuple((reference_to_auto @ other_to_requested).ravel()),
+            ),
+        }
+
+        rebased = stacker.rebase_siril_registrations(registrations, 2)
+
+        np.testing.assert_allclose(np.asarray(rebased[2].matrix).reshape(3, 3), np.eye(3), atol=1.0e-12)
+        np.testing.assert_allclose(
+            np.asarray(rebased[5].matrix).reshape(3, 3),
+            other_to_requested,
+            atol=1.0e-12,
+        )
+        self.assertEqual(rebased[5].reference_index, 2)
+
     def test_seq_parser_reads_quality_and_registration_metrics(self):
         content = "\n".join(
             [
@@ -998,6 +1033,25 @@ class RegistrationValidationTests(unittest.TestCase):
 
             issues = stacker.registration_validation_issues(
                 files, registration_dir, "frame", registrations, 6
+            )
+
+        self.assertEqual(issues, {})
+
+    def test_matrix_only_validation_does_not_require_registered_fits(self):
+        files = [Path("first.fit"), Path("second.fit")]
+        matrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        registrations = {
+            1: stacker.SirilRegistration(index=1, selected=True, detected_stars=6, matrix=matrix),
+            2: stacker.SirilRegistration(index=2, selected=True, detected_stars=8, matrix=matrix),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            issues = stacker.registration_validation_issues(
+                files,
+                Path(temporary),
+                "frame",
+                registrations,
+                6,
+                require_registered_fits=False,
             )
 
         self.assertEqual(issues, {})

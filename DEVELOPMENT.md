@@ -2,7 +2,20 @@
 
 利用者に影響する変更は[変更履歴](CHANGELOG.md)と[改訂内容とトラブルシュート](TROUBLESHOOTING.md)にまとめています。この文書は実装判断、検証、引き継ぎを目的とした開発者向け資料です。
 
-## 2026-08-24: production stack path高速化
+## 2026-08-24: v0.9.3 registration matrix統合と1回resampling
+
+- 通常のproduction経路は`moving_target_pipeline.main()`から`moving_target_stack.main()`へ入り、Siril前処理、`register <sequence>_ -2pass`、Python stackの順に進む。`-2pass`は星対応と変換行列を`.seq`へ記録するだけで、`r_*.fit`を生成しない。完全なSharpCap StackLog経路は今回の変更対象外であり、記録されたX/Y/rotationを適用した登録画像を従来どおり一時生成する。
+- Sirilの`H`行列はsourceからreferenceへ写す下原点座標系である。配列座標へはsource/referenceそれぞれのY反転行列を使い、`H_array = F_reference @ H_siril @ F_source`として変換する。`-2pass`が自動選択した基準と利用者指定基準が異なる場合は、指定基準の行列の逆行列を左から掛け、全行列を指定基準へ再基準化する。
+- 移動天体固定像では、背景星登録行列`H_star`とHorizonsから求めたMetcalf平行移動`T_motion`を`H_output = T_motion @ H_star`として合成する。星固定像は`H_star`、移動天体固定像は`H_output`を、それぞれ同じ前処理済みsourceへ1回だけ適用する。旧版のSiril既定Lanczos-4登録とPython bilinear shiftによる2回補間は行わない。
+- 一般affine resamplingはPillowのfloat32 bilinearを使う。Pillowのpixel-center規約に合わせ、逆変換へ`0.5 - 0.5 * row_sum(linear_part)`のtranslation補正を加える。valid maskは逆写像した各出力中心について4近傍すべてがsource範囲内かを独立に計算し、NaN、zero padding、saturation maskへ同じ幾何変換を適用する。pure translationは既存の高速slice経路を維持する。
+- `StackCanvas(shape, origin_x, origin_y)`をregistration座標系から独立させ、resamplerはsource shapeとoutput shape/originが異なる場合も処理する。v0.9.3のpolicyは従来どおりreference footprintだが、将来のN枚以上/M%以上のexpanded canvasはcanvas policyだけを差し替えられる。
+- cleanup有効時はsource staging後に約0.94 GiB、Siril前処理ピークで約7.48 GiB、前処理cleanup後に約5.61 GiBとなり、登録後も登録FITSを作らないため約5.61 GiBを維持する。採用済み入力を順次削除し、最終的に画像中間ファイルを0へ戻す。220P 242枚では旧推定peak約13.23 GiBから7.48 GiBへ43.5%削減し、登録FITSは242枚から0枚になった。
+- 242枚のexact-common-inputでvalid footprint 2,073,600画素は旧版と完全一致した。旧版とのMetcalf対象開口差は半径6画素のRGBで`-0.28%～+0.37%`、半径10画素で`-0.03%～+0.32%`だった。半径14画素では背景環の影響を受け`-1.66%～-0.13%`となるため、測光比較では開口と背景環を固定する。星像中心差は概ね0.03～0.05画素である。旧版との画素完全一致は、補間kernelと回数を意図的に変更したため要件にしない。
+- 同じ入力星5個に対する単一変換の開口測光では、新bilinearのRGB平均偏差は`-0.2167%、+0.0478%、-0.0864%`、旧Siril Lanczos-4は`+0.4450%、+0.9127%、+1.0683%`だった。Siril linearとも平均0.09%以内であり、1回bilinearは旧2回補間より入力光量をよく保存する。
+- exact 242枚のv0.9.3実測はend-to-end `174.15/197.60/176.11秒`、registration `9.85/10.38/10.08秒`、stack `100.41/111.40/99.38秒`、auto=4、fallback 0、Python peak RSS約1.20～1.23 GiBだった。温キャッシュ比較ではv0.9.0の182.81秒から176.11秒へ3.7%短縮したが、cold/warm filesystem cacheにより全体時間は変動するため速度改善を保証値として扱わない。
+- 行列座標、再基準化、正負・整数・小数shift、dx/dy=0、mono/RGB、画像端、valid/saturation mask、NaN/zero padding、独立canvas shape/originを含む全170テストが成功した。詳細と再現用CSVは[RESULTS-20260824-v0.9.3.md](developer-tools/stack-performance-analysis/RESULTS-20260824-v0.9.3.md)を参照する。
+
+## 2026-08-24: v0.9.0 production stack path高速化（履歴）
 
 - production経路は`moving_target_pipeline.main()`から`moving_target_stack.main()`へ入り、Sirilの前処理・Reference registration後、登録済みFITSを背景補正、星固定加算、Metcalf pure translation、移動天体固定加算の順に処理する。従来は背景統計の全フレームpassとスタックpassで登録FITSを2回読んでいたが、fit・適用・スタックを1回の読込へ統合した。
 - pure translationはfull-frame座標gridを毎RGB面で作らず、共通のsource/output sliceと一定のbilinear weightを使う。一次・二次背景面の適用も1次元X/Y項と必要な交差項だけで評価し、星固定画像は現行Reference footprintならzero-shift resamplingせず直接加算する。平均加算は`np.add(..., out=..., where=mask)`を使う。

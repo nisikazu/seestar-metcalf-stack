@@ -4,6 +4,21 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.9.3 - 2026-08-24
+
+### Improved
+
+- Use Siril `register -2pass` to obtain background-star registration matrices without writing registered FITS files on the normal Siril registration path.
+- Compose each star-registration matrix with its Metcalf translation, then create the moving-target image with one bilinear resampling of the preprocessed source. The star-fixed image is likewise resampled only once from that source.
+- On the 242-frame 220P/McNaught benchmark, registered FITS output fell from 242 files to zero and measured temporary storage fell 43.5%, from about 13.23 GiB to 7.48 GiB. Warm-cache end-to-end time improved 3.7%, from 182.81 to 176.11 seconds.
+- Record source staging, Siril preprocessing, registration, stacking, output, total pipeline wall time, Python-process peak RSS, and registration-directory storage checkpoints in the summary JSON.
+
+### Internal design
+
+- Convert Siril's bottom-origin matrices into NumPy/FITS array coordinates and rebase the automatic `-2pass` reference onto the user-selected reference. Output-canvas shape and origin remain independent from registration coordinates for future expanded-canvas policies.
+- Replacing the old Siril-default Lanczos-4 registration plus Python bilinear shift with one bilinear interpolation intentionally changes exact pixels. Aperture tests against the same input stars measured per-channel mean errors of `-0.22% to +0.05%` for the new path versus `+0.45% to +1.07%` for old Lanczos-4. The 242-frame valid footprint matched, and a six-pixel-radius moving-target aperture changed by `-0.28% to +0.37%` between complete old and new stacks.
+- All 170 tests passed, including matrix coordinates, positive/negative integer/fractional shifts, mono/RGB, edges, valid/saturation masks, and independent canvas shape/origin.
+
 ## v0.9.1 - 2026-08-24
 
 ### Fixed

@@ -4,6 +4,21 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## v0.9.3 - 2026-08-24
+
+### 改善
+
+- Sirilの背景星登録を`register -2pass`へ変更し、位置合わせ行列だけを取得するようにしました。通常のSiril登録経路では登録済みFITSを生成しません。
+- 背景星登録行列とフレームごとのMetcalf移動量を合成し、元の前処理済み画像から移動天体固定像を1回のbilinear resamplingで作るようにしました。星固定像も同じ登録行列から1回だけresamplingします。
+- 220P/McNaughtの242枚実測で、登録FITSは242枚から0枚、一時領域の計測ピークは約13.23 GiBから7.48 GiBへ43.5%減少しました。温キャッシュのend-to-endはv0.9.0の182.81秒から176.11秒へ3.7%短縮しました。
+- summary JSONへsource staging、Siril前処理、登録、スタック、出力、全pipelineのwall time、Python process peak RSS、登録ディレクトリの一時容量checkpointを追加しました。
+
+### 内部設計
+
+- Sirilの下原点座標行列をNumPy/FITS配列座標へ変換し、`-2pass`が自動選択した基準から利用者指定基準へ行列を再基準化します。出力canvasのshape/originは登録座標系から独立しており、将来のexpanded canvasを妨げません。
+- 旧版のSiril既定Lanczos-4登録とPython bilinear shiftの2回補間から、1回のbilinear補間へ変わるため、旧版とは画素単位で完全一致しません。同一入力星の開口測光では新経路のRGB平均偏差が`-0.22%～+0.05%`、旧Lanczos-4は`+0.45%～+1.07%`で、新経路のほうが入力光量をよく保存しました。242枚の有効footprintは旧版と一致し、6画素半径の移動天体開口のRGB差は`-0.28%～+0.37%`でした。
+- 行列座標、正負・整数・小数shift、mono/RGB、画像端、valid/saturation mask、任意canvas shape/originを含む全170テストが成功しました。
+
 ## v0.9.1 - 2026-08-24
 
 ### 修正

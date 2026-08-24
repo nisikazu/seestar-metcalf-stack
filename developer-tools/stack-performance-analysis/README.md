@@ -20,3 +20,20 @@ See [RESULTS-20260823.md](RESULTS-20260823.md) for the original prototype result
 and the production-integration measurements. The two full 242-frame v0.9.0
 runs are also available as machine-readable
 [`LONG-RUN-20260824.csv`](LONG-RUN-20260824.csv).
+
+The v0.9.3 matrix-only registration, fused-resampling validation, 242-frame
+runtime/RAM/storage measurements, and photometry comparison are recorded in
+[`RESULTS-20260824-v0.9.3.md`](RESULTS-20260824-v0.9.3.md). Raw tables are
+[`LONG-RUN-V093-20260824.csv`](LONG-RUN-V093-20260824.csv) and
+[`PHOTOMETRY-V093-20260824.csv`](PHOTOMETRY-V093-20260824.csv).
+
+Use `compare_stack_products.py` to compare complete valid masks, common-pixel
+differences, a moving-target aperture, and independently recentered reference
+stars:
+
+```powershell
+python .\developer-tools\stack-performance-analysis\compare_stack_products.py `
+  old.fit new.fit --output comparison.json `
+  --aperture-radius 10 --annulus-inner 14 --annulus-outer 22 `
+  --recenter-radius 12
+```

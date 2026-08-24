@@ -1,0 +1,4 @@
+run,total_seconds,pipeline_wall_seconds,registration_seconds,stacking_seconds,output_seconds,selected_workers,input_frames,used_frames,process_peak_rss_bytes,temporary_peak_bytes,registered_fits_after_registration,cache_note
+1,174.148,171.634913,9.851034,100.406864,4.241391,4,242,242,1285943296,8033213112,0,warm_or_favorable_cache
+2,197.603,195.029581,10.375012,111.403263,4.373854,4,242,242,1255333888,8033213112,0,cold_or_unfavorable_cache
+3,176.114,172.863564,10.080004,99.375625,4.214121,4,242,242,1291091968,8033213112,0,warm_cache
