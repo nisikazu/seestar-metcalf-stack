@@ -26,3 +26,7 @@ long Horizons CSV filename and writing long comparison FITS names.
 The default measures every frame in the latest session. Use `--count 20` only
 for a quick functional trial; it is not representative of the full-session
 runtime.
+
+See [RESULTS-20260821.md](RESULTS-20260821.md) for the pre-v0.9 baseline and
+[RESULTS-20260824-v0.9.0.md](RESULTS-20260824-v0.9.0.md) for the same-scope
+v0.9.0 end-to-end comparison.

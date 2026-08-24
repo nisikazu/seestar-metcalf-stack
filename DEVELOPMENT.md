@@ -11,7 +11,7 @@
 - workerで`MemoryError`が起きた場合はpending futureをcancelし、executorを`shutdown(wait=True)`して全worker停止を待つ。成功した兄弟resultを含む未確定バッチ全体とtraceback参照を破棄してから、同じバッチ構成を`4→2→1`で最初から再実行する。バッチ成功前にはglobal accumulatorへ一切反映しないためrollbackは不要で、既に確定した過去バッチも再処理しない。
 - summary JSONの`stack_timing_seconds`へ`fits_read`、`background_fit`、`background_apply`、`star_resample`、`star_accumulation`、`metcalf_shift`、`metcalf_accumulation`、`saturation`、`total_stacking_wall`を記録する。worker側項目はCPU時間の合計であり、wall timeとは一致しない。
 - cleanup有効時は、前処理成功後にsource copy・変換像・staged calibrationを、登録成功後に最終前処理画像を削除し、各登録FITSは加算と診断行の確定後に削除する。242枚実測ディレクトリ換算では、登録中peakを約13.23 GiBから約11.33 GiBへ、スタック開始時を約5.61 GiBへ下げる。登録世代自体をなくすには、将来Siril `register -2pass`のmatrix統合が必要である。
-- 実画像で旧slice前実装とのfull valid mask一致、最大画素差`8.10623e-6 ADU`、中心天体・基準星開口の最大差`1.3e-6 ADU`以下を確認した。最終コードの20枚productionは`1/2/4 worker = 12.35/8.29/6.15秒`で、Metcalf・星固定・左右比較の3出力は全worker条件で全画素一致した。早期cleanup前後も最大差`0 ADU`である。242枚をauto=4で2回処理したstack wall timeは`84.510/73.418秒`、3種類のfloat32 FITSは2回ともSHA-256まで一致した。MemoryErrorとcleanupのfailure injectionを含む全162テストが成功した。詳細は[stack performance results](developer-tools/stack-performance-analysis/RESULTS-20260823.md)を参照する。
+- 実画像で旧slice前実装とのfull valid mask一致、最大画素差`8.10623e-6 ADU`、中心天体・基準星開口の最大差`1.3e-6 ADU`以下を確認した。最終コードの20枚productionは`1/2/4 worker = 12.35/8.29/6.15秒`で、Metcalf・星固定・左右比較の3出力は全worker条件で全画素一致した。早期cleanup前後も最大差`0 ADU`である。242枚をauto=4で2回処理したstack wall timeは`84.510/73.418秒`、3種類のfloat32 FITSは2回ともSHA-256まで一致した。同じ計測範囲のend-to-end `quadratic`ベンチマークは旧`736.298秒`から新平均`181.470秒`へ約4.06倍高速化した。MemoryErrorとcleanupのfailure injectionを含む全162テストが成功した。詳細は[stack performance results](developer-tools/stack-performance-analysis/RESULTS-20260823.md)を参照する。
 
 ## 2026-08-22: FITSプレビュー実験ツール
 

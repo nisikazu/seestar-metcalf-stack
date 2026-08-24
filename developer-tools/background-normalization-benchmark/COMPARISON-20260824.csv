@@ -1,0 +1,8 @@
+version,mode,run,elapsed_seconds,stack_wall_seconds,workers,input_frames,used_frames,cache_note
+pre-v0.9,none,1,828.093,,,,,initial/cold reference
+pre-v0.9,none,2,579.404,,,,,later warm reference
+pre-v0.9,quadratic,1,736.298,,,,,run after earlier modes
+v0.9.0,none,1,219.510,48.743295,4,247,242,first run in current benchmark
+v0.9.0,none,2,136.979,46.614258,4,247,242,warm run
+v0.9.0,quadratic,1,180.131,75.986532,4,247,242,warm run
+v0.9.0,quadratic,2,182.808,72.668426,4,247,242,warm run

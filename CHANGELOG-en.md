@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - If a worker allocation fails, stop all workers, discard the complete uncommitted batch, and retry that same batch at 4 -> 2 -> 1 workers. Only fully successful batches reach the deterministic main-thread accumulator.
 - Read each registered FITS only once for background fit, application, and stacking. Remove source copies, converted images, staged calibration files, preprocessed images, and accepted registered images at the earliest safe stage.
 - Print and record FITS read, background fit/application, star accumulation, Metcalf shift/accumulation, total stack timing, RAM estimate, selected worker count, and any fallback events.
-- Two 242-frame production runs selected four workers and completed stacking in 84.510 and 73.418 seconds. Their Metcalf, star-aligned, and comparison float32 FITS outputs were byte-identical by SHA-256.
+- Two 242-frame production runs selected four workers and completed stacking in 84.510 and 73.418 seconds. The same-scope quadratic end-to-end benchmark averaged 181.470 seconds versus 736.298 seconds before v0.9, a 4.06x speedup. The Metcalf, star-aligned, and comparison float32 FITS outputs from both long runs were byte-identical by SHA-256.
 
 ### Internal design
 
