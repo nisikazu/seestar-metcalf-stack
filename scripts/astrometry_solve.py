@@ -22,9 +22,14 @@ SCRIPT_DIR = (
 )
 DEFAULT_FILE = SCRIPT_DIR / "downloads" / "98943 Torifune_sub" / "Light_98943 Torifune_20.0s_IRCUT_failed_20260708-210152.fit"
 API_BASE = os.environ.get("ASTROMETRY_NET_API_BASE", "https://nova.astrometry.net/api").rstrip("/")
+SITE_BASE = os.environ.get("ASTROMETRY_NET_SITE_BASE", API_BASE.removesuffix("/api")).rstrip("/")
 FETCH_RETRIES = int(os.environ.get("ASTROMETRY_NET_FETCH_RETRIES", "8"))
 SCALE_MARGIN = float(os.environ.get("ASTROMETRY_NET_SCALE_MARGIN", "0.2"))
 SEARCH_RADIUS_DEG = float(os.environ.get("ASTROMETRY_NET_SEARCH_RADIUS_DEG", "2.0"))
+
+
+def wcs_file_url(job_id: str | int) -> str:
+    return f"{SITE_BASE}/wcs_file/{urllib.parse.quote(str(job_id), safe='')}"
 
 
 def retry_delay(attempt: int) -> float:
@@ -471,7 +476,7 @@ def main(argv: list[str] | None = None) -> int:
     wcs_download = None
     if status.get("status") == "success":
         try:
-            wcs_data = request_bytes(f"{API_BASE}/jobs/{job_id}/wcs_file/")
+            wcs_data = request_bytes(wcs_file_url(job_id))
             if not is_valid_wcs_bytes(wcs_data):
                 preview = wcs_data[:120].decode("utf-8", errors="replace").replace("\n", " ")
                 wcs_download = {
@@ -514,10 +519,10 @@ def main(argv: list[str] | None = None) -> int:
         "offsetFromHeader": offset,
         "results": results,
         "urls": {
-            "status": f"https://nova.astrometry.net/status/{submission_id}",
-            "job": f"https://nova.astrometry.net/user_images/{results.get('info', {}).get('user_image', '') if isinstance(results.get('info'), dict) else ''}",
-            "wcs": f"https://nova.astrometry.net/wcs_file/{job_id}",
-            "annotated": f"https://nova.astrometry.net/annotated_display/{job_id}",
+            "status": f"{SITE_BASE}/status/{submission_id}",
+            "job": f"{SITE_BASE}/user_images/{results.get('info', {}).get('user_image', '') if isinstance(results.get('info'), dict) else ''}",
+            "wcs": wcs_file_url(job_id),
+            "annotated": f"{SITE_BASE}/annotated_display/{job_id}",
         },
         "files": {"wcs": wcs_download},
     }

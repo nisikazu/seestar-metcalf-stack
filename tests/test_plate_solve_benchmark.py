@@ -42,6 +42,12 @@ class PlateSolveBenchmarkTests(unittest.TestCase):
         self.assertEqual(result, b"ok")
         sleep.assert_called_once_with(2.0)
 
+    def test_astrometry_wcs_url_uses_site_endpoint(self):
+        with patch.object(astrometry_solve, "SITE_BASE", "https://nova.example"):
+            result = astrometry_solve.wcs_file_url("123/unsafe")
+
+        self.assertEqual(result, "https://nova.example/wcs_file/123%2Funsafe")
+
     def test_trial_order_contains_every_condition_per_repeat(self):
         trials = benchmark.make_trials(("astrometry", "siril"), repeats=10, seed=1234)
 
