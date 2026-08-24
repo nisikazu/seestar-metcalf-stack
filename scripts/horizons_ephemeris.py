@@ -61,6 +61,10 @@ class HorizonsResponseError(RuntimeError):
     """Horizons returned a response that could not be parsed as ephemeris."""
 
 
+class HorizonsCommandError(HorizonsIdentificationError):
+    """Horizons rejected a target COMMAND, so another candidate may work."""
+
+
 @dataclass
 class EphemerisRow:
     time: datetime
@@ -310,6 +314,7 @@ def generate_object_candidates(object_name: str) -> list[ObjectCandidate]:
         prefix = comet.group("prefix").upper()
         designation = f"{prefix}/{comet.group('year')} {comet.group('half').upper()}"
         _add_candidate(candidates, f"DES={designation};CAP;NOFRAG", designation, "comet-designation", "high")
+        _add_candidate(candidates, f"DES={designation};", designation, "comet-designation-unqualified", "medium")
         if comet.group("name"):
             _add_candidate(candidates, f"NAME={comet.group('name').strip()};", comet.group("name").strip(), "comet-name", "medium")
 
@@ -317,6 +322,7 @@ def generate_object_candidates(object_name: str) -> list[ObjectCandidate]:
     if compact_periodic:
         designation = f"{compact_periodic.group('number')}{compact_periodic.group('prefix').upper()}"
         _add_candidate(candidates, f"DES={designation};CAP;NOFRAG", designation, "compact-periodic-comet", "high")
+        _add_candidate(candidates, f"DES={designation};", designation, "compact-periodic-comet-unqualified", "medium")
         name = compact_periodic.group("name").strip(" _-")
         if name:
             _add_candidate(candidates, f"NAME={name};", name, "compact-comet-name", "medium")
@@ -325,6 +331,7 @@ def generate_object_candidates(object_name: str) -> list[ObjectCandidate]:
     if spaced_periodic:
         designation = f"{spaced_periodic.group('number')}{spaced_periodic.group('prefix').upper()}"
         _add_candidate(candidates, f"DES={designation};CAP;NOFRAG", designation, "spaced-periodic-comet", "high")
+        _add_candidate(candidates, f"DES={designation};", designation, "spaced-periodic-comet-unqualified", "medium")
         _add_candidate(candidates, f"NAME={spaced_periodic.group('name').strip()};", spaced_periodic.group("name").strip(), "spaced-comet-name", "medium")
 
     numbered = re.match(r"^\(?(?P<number>\d{1,7})\)?(?:\s+(?P<name>.+))?$", text)
@@ -432,7 +439,12 @@ def fetch_result(url: str, retries: int, retry_delay_sec: float, verbose: bool =
         raise RuntimeError(f"Horizons request failed: {last_error}")
 
     if payload.get("error"):
-        raise RuntimeError(str(payload["error"]))
+        error = str(payload["error"])
+        # Horizons currently rejects CAP/NOFRAG in some API responses despite
+        # documenting them. Let the resolver continue with the bare DES form.
+        if "missing operator" in error.lower():
+            raise HorizonsCommandError(f"Horizons rejected target COMMAND: {error}")
+        raise HorizonsResponseError(error)
     result = payload.get("result")
     if not result:
         raise RuntimeError(f"Unexpected Horizons response keys: {sorted(payload.keys())}")
@@ -525,6 +537,7 @@ def fetch_sbdb_candidates(object_name: str, retries: int, retry_delay_sec: float
         fullname = str(obj.get("fullname") or "").strip()
         if designation:
             _add_candidate(found, f"DES={designation};CAP;NOFRAG", fullname or designation, "SBDB-designation", "high")
+            _add_candidate(found, f"DES={designation};", fullname or designation, "SBDB-designation-unqualified", "medium")
     return found
 
 

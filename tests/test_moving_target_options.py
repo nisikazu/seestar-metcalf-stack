@@ -432,11 +432,14 @@ class HorizonsObjectResolutionTests(unittest.TestCase):
 
         self.assertEqual(candidates[0].command, "DES=24P;CAP;NOFRAG")
         self.assertEqual(candidates[0].source, "compact-periodic-comet")
+        self.assertEqual(candidates[1].command, "DES=24P;")
+        self.assertEqual(candidates[1].source, "compact-periodic-comet-unqualified")
 
     def test_named_comet_without_spaces_is_normalized(self):
         candidates = horizons.generate_object_candidates("C2025A6 (Lemmon)")
 
         self.assertEqual(candidates[0].command, "DES=C/2025 A6;CAP;NOFRAG")
+        self.assertEqual(candidates[1].command, "DES=C/2025 A6;")
 
     def test_numbered_asteroid_keeps_name_as_fallback(self):
         candidates = horizons.generate_object_candidates("98943 Torifune")
@@ -450,6 +453,26 @@ class HorizonsObjectResolutionTests(unittest.TestCase):
 
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].command, "DES=C/2025 A6;CAP;NOFRAG")
+
+    def test_comet_command_syntax_error_falls_back_to_unqualified_designation(self):
+        when = datetime(2026, 8, 19, 16, 47, 37, tzinfo=timezone.utc)
+        expected_rows = [horizons.EphemerisRow(when, "2026-Aug-19 16:47:37", 45.0, 9.0)]
+        args = Namespace()
+
+        with patch.object(
+            horizons,
+            "query_group",
+            side_effect=[horizons.HorizonsCommandError('Missing operator in "AP".'), expected_rows],
+        ) as query:
+            with redirect_stderr(io.StringIO()):
+                selected, rows, attempted = horizons.resolve_object_command(
+                    "220PMcNaught", args, [when], 139.6, 35.9, 0.0
+                )
+
+        self.assertEqual(selected.command, "DES=220P;")
+        self.assertEqual(rows, expected_rows)
+        self.assertEqual([item.command for item in attempted], ["DES=220P;CAP;NOFRAG", "DES=220P;"])
+        self.assertEqual(query.call_count, 2)
 
     def test_missing_ephemeris_markers_classifies_no_match(self):
         with self.assertRaises(horizons.HorizonsIdentificationError):

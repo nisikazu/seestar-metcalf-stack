@@ -4,6 +4,12 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.9.1 - 2026-08-24
+
+### Fixed
+
+- Handle a current JPL Horizons API compatibility problem where comet searches such as `DES=220P;CAP;NOFRAG` can be rejected with a syntax error. Automatic resolution now tries the historical `CAP`/`NOFRAG` form first, then falls back to an unqualified designation such as `DES=220P;` when Horizons rejects the modifiers. The same fallback is available for SBDB-derived candidates.
+
 ## v0.9.0 - 2026-08-24
 
 ### Improved
