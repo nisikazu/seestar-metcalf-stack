@@ -25,6 +25,7 @@
         "scripts\sharpcap_stacklog.py"
         "scripts\siril_preprocessing.py"
         "scripts\sun_pa.py"
+        "seestar-fixed-stack.cmd"
         "seestar-metcalf-stack.cmd"
         "seestar-metcalf-stack.sh"
         "set-astrometry-api-key.cmd"

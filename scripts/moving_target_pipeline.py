@@ -43,6 +43,7 @@ from sharpcap_stacklog import load_sharpcap_session, read_settings, write_manife
 from siril_preprocessing import (
     PreprocessingPlan,
     build_single_preprocess_script,
+    quote_siril_argument,
     resolve_preprocessing_plan,
     stage_preprocessing_files,
 )
@@ -89,7 +90,10 @@ class TeeTextIO:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Plate-solve, preprocess, and stack subframes on a moving target")
+    target_mode_default = os.environ.get("SEESTAR_STACK_TARGET_MODE", "moving").strip().lower()
+    if target_mode_default not in {"moving", "fixed"}:
+        target_mode_default = "moving"
+    parser = argparse.ArgumentParser(description="Plate-solve, preprocess, and stack astronomical subframes")
     parser.add_argument(
         "source_dir_arg",
         nargs="?",
@@ -98,6 +102,12 @@ def parse_args() -> argparse.Namespace:
         help="Subframe directory, or a SharpCap stacklog.csv file",
     )
     parser.add_argument("--source-dir", dest="source_dir_option", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--target-mode",
+        choices=("moving", "fixed"),
+        default=target_mode_default,
+        help="Stack on a moving target (default) or on fixed background stars.",
+    )
     parser.add_argument(
         "--ephemeris-csv",
         type=Path,
@@ -293,8 +303,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preview-at",
         choices=("none", "UL", "UR", "LL", "LR"),
-        default="UL",
-        help="Draw N/E and Sun annotations at this preview corner. Defaults to UL; use none to omit annotations.",
+        default=None,
+        help="Draw N/E and Sun annotations at this preview corner. Moving mode defaults to UL; fixed mode to none.",
     )
     parser.add_argument(
         "--annotate-size",
@@ -302,7 +312,7 @@ def parse_args() -> argparse.Namespace:
         default=60.0,
         help="Annotation radius in pixels for --preview-at. Defaults to 60.",
     )
-    parser.add_argument("--output-bitpix", choices=("float32", "uint16"), default="uint16")
+    parser.add_argument("--output-bitpix", choices=("float32", "uint16"), default=None)
     parser.add_argument(
         "--sun-pa",
         choices=("auto", "off"),
@@ -321,8 +331,8 @@ def parse_args() -> argparse.Namespace:
         "--saturation-warning",
         type=str.lower,
         choices=("enable", "disable"),
-        default="disable",
-        help="Enable or disable separate saturation-warning preview PNGs. Defaults to disable.",
+        default=None,
+        help="Enable or disable separate saturation-warning preview PNGs. Fixed mode defaults to enable.",
     )
     parser.add_argument(
         "--saturation-threshold-percent",
@@ -362,6 +372,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
     if args.background_normalization is None:
         args.background_normalization = "none" if args.padding_policy == "legacy" else "quadratic"
+    if args.output_bitpix is None:
+        args.output_bitpix = "float32" if args.target_mode == "fixed" else "uint16"
+    if args.saturation_warning is None:
+        args.saturation_warning = "enable" if args.target_mode == "fixed" else "disable"
+    if args.preview_at is None:
+        args.preview_at = "none" if args.target_mode == "fixed" else "UL"
+    if args.target_mode == "fixed" and args.preview_sun_pa_left:
+        parser.error("--preview-sun-pa-left is available only in moving-target mode")
     if args.background_normalization != "none" and args.padding_policy != "valid":
         parser.error("--background-normalization offset, plane, and quadratic require --padding-policy valid")
     if not 0.0 < args.saturation_threshold_percent <= 100.0:
@@ -598,15 +616,18 @@ def print_session_table(
         return
     quoted_source = f'"{args.source_dir}"'
     if os.name == "nt":
-        launcher = "seestar-metcalf-stack.cmd"
+        launcher = "seestar-fixed-stack.cmd" if args.target_mode == "fixed" else "seestar-metcalf-stack.cmd"
+        mode_argument = ""
     elif sys.platform == "darwin":
         launcher = "./seestar-metcalf-stack.sh"
+        mode_argument = " --target-mode fixed" if args.target_mode == "fixed" else ""
     else:
         launcher = "./seestar-metcalf-stack.sh"
+        mode_argument = " --target-mode fixed" if args.target_mode == "fixed" else ""
     print("\nSelect by number:")
-    print(f"  {launcher} {quoted_source} --session-index N")
+    print(f"  {launcher} {quoted_source}{mode_argument} --session-index N")
     print("Select the first session starting at or after a local date/time:")
-    print(f"  {launcher} {quoted_source} --session-at YYYYMMDD-hhmmss")
+    print(f"  {launcher} {quoted_source}{mode_argument} --session-at YYYYMMDD-hhmmss")
 
 
 def print_sessions(args: argparse.Namespace) -> None:
@@ -677,7 +698,7 @@ def validate_sharpcap_inputs(args: argparse.Namespace, reference_frame: Path) ->
     if getattr(args, "sharpcap_session", None) is None or is_fits_frame(reference_frame):
         return
     has_existing_ephemeris = args.ephemeris_csv is not None and args.ephemeris_csv.is_file()
-    if not (has_existing_ephemeris or args.horizons_object or args.horizons_command):
+    if args.target_mode == "moving" and not (has_existing_ephemeris or args.horizons_object or args.horizons_command):
         raise ValueError(
             "SharpCap PNG/TIFF input requires the moving target to be specified with "
             "--horizons-object, --horizons-command, or --ephemeris-csv."
@@ -728,11 +749,10 @@ def make_work_dir(base: Path, name: str) -> Path:
 def prepare_work_dir(args: argparse.Namespace, first_frame: Path) -> Path:
     if not args.work_name:
         sharpcap = getattr(args, "sharpcap_session", None)
-        if sharpcap is not None:
-            method = processing_method_token(args.stack_method, args.rankfit_fraction)
-            args.work_name = f"{safe_name(sharpcap.object_name)}_{method}"
-        else:
-            args.work_name = default_work_name(first_frame, args.stack_method, args.rankfit_fraction)
+        object_name = sharpcap.object_name if sharpcap is not None else read_object_name(first_frame)
+        method = processing_method_token(args.stack_method, args.rankfit_fraction)
+        mode = "fixed_" if args.target_mode == "fixed" else ""
+        args.work_name = f"{safe_name(object_name)}_{mode}{method}"
     if args.work_dir:
         args.work_dir.mkdir(parents=True, exist_ok=True)
         return args.work_dir
@@ -1088,7 +1108,7 @@ def build_siril_plate_solve_script(
     return "\n".join(
         [
             "requires 1.4.0",
-            f"load {input_fits.name}",
+            f"load {quote_siril_argument(input_fits.name)}",
             (
                 # Siril 1.4.1 rejects explicit coordinates in batch scripts.
                 # The validated approximate center is retained in the loaded
@@ -1096,7 +1116,7 @@ def build_siril_plate_solve_script(
                 f"platesolve -force -focal={focal_mm:.12g} "
                 f"-pixelsize={pixel_size_um:.12g} -noflip{catalog_option}"
             ),
-            f"save {output_fits.name}",
+            f"save {quote_siril_argument(output_fits.name)}",
             "close",
             "",
         ]
@@ -1344,7 +1364,7 @@ def solve_first_frame(args: argparse.Namespace, first_frame: Path) -> tuple[Path
 
 def run_stack(
     args: argparse.Namespace,
-    ephemeris_csv: Path,
+    ephemeris_csv: Path | None,
     wcs_fits: Path | None,
     astrometry_json: Path | None,
 ) -> dict[str, object]:
@@ -1353,8 +1373,8 @@ def run_stack(
         [
             "--source-dir",
             str(args.source_dir),
-            "--ephemeris-csv",
-            str(ephemeris_csv),
+            "--target-mode",
+            args.target_mode,
             "--work-dir",
             str(args.work_dir),
             "--registration-transform",
@@ -1403,6 +1423,8 @@ def run_stack(
             args.saturation_color,
         ],
     )
+    if ephemeris_csv is not None:
+        cmd.extend(["--ephemeris-csv", str(ephemeris_csv)])
     if args.pattern:
         cmd.extend(["--pattern", args.pattern])
     if args.frame_manifest:
@@ -1417,6 +1439,9 @@ def run_stack(
         cmd.extend(["--wcs-fits", str(wcs_fits)])
     if astrometry_json:
         cmd.extend(["--astrometry-json", str(astrometry_json)])
+    solution_source = plate_solution_source(wcs_fits, astrometry_json)
+    if solution_source:
+        cmd.extend(["--plate-solver-name", solution_source])
     if args.count is not None:
         cmd.extend(["--count", str(args.count)])
     if args.reference_frame_file:
@@ -1439,7 +1464,7 @@ def run_stack(
     if args.siril:
         cmd.extend(["--siril", str(args.siril)])
     cmd.append("--verbose" if args.verbose else "--no-verbose")
-    verbose(args, f"Starting {args.stack_method} stack worker")
+    verbose(args, f"Starting {args.target_mode} {args.stack_method} stack worker")
     process = subprocess.Popen(
         cmd,
         cwd=REPO_ROOT,
@@ -1540,16 +1565,23 @@ def main(args: argparse.Namespace) -> Path | None:
             f"hot={'on' if preprocessing_plan.hot_pixel_enabled else 'off'}; "
             f"cold={'on' if preprocessing_plan.cold_pixel_enabled else 'off'}",
         )
-    verbose(args, "Stage 1/3: obtaining target ephemeris")
-    ephemeris_csv = ensure_ephemeris(args, reference_frame, session_index)
-    verbose(args, "Stage 2/3: resolving reference-frame sky coordinates")
-    wcs_fits, astrometry_json = solve_first_frame(args, reference_frame)
-    verbose(args, f"Stage 3/3: registering and stacking with method={args.stack_method}")
+    if args.target_mode == "moving":
+        verbose(args, "Stage 1/3: obtaining target ephemeris")
+        ephemeris_csv = ensure_ephemeris(args, reference_frame, session_index)
+        verbose(args, "Stage 2/3: resolving reference-frame sky coordinates")
+        wcs_fits, astrometry_json = solve_first_frame(args, reference_frame)
+        verbose(args, f"Stage 3/3: registering and stacking with method={args.stack_method}")
+    else:
+        ephemeris_csv = None
+        verbose(args, "Stage 1/2: resolving reference-frame sky coordinates")
+        wcs_fits, astrometry_json = solve_first_frame(args, reference_frame)
+        verbose(args, f"Stage 2/2: registering and fixed stacking with method={args.stack_method}")
     stack_summary = run_stack(args, ephemeris_csv, wcs_fits, astrometry_json)
 
     pipeline_summary = {
         "source_dir": str(args.source_dir),
-        "ephemeris_csv": str(ephemeris_csv),
+        "target_mode": args.target_mode,
+        "ephemeris_csv": str(ephemeris_csv) if ephemeris_csv else None,
         "session": session_info,
         "reference_frame_mode": reference_mode,
         "reference_frame_index": reference_index,
@@ -1572,17 +1604,26 @@ def main(args: argparse.Namespace) -> Path | None:
         "stack": stack_summary,
     }
     work_dir = Path(str(stack_summary["work_dir"]))
-    summary_path = work_dir / "moving_target_pipeline_summary.json"
+    summary_name = "fixed_target_pipeline_summary.json" if args.target_mode == "fixed" else "moving_target_pipeline_summary.json"
+    summary_path = work_dir / summary_name
     summary_path.write_text(json.dumps(pipeline_summary, indent=2), encoding="utf-8")
     outputs = stack_summary.get("outputs", {})
-    print(
-        "Pipeline complete: "
-        f"used {stack_summary.get('used_frames')}/{stack_summary.get('input_frames')} frames; "
-        f"metcalf={outputs.get('metcalf_fits') or outputs.get('fits')}; "
-        f"star={outputs.get('star_fits')}; "
-        f"comparison={outputs.get('comparison_fits')}",
-        flush=True,
-    )
+    if args.target_mode == "fixed":
+        print(
+            "Fixed-target pipeline complete: "
+            f"used {stack_summary.get('used_frames')}/{stack_summary.get('input_frames')} frames; "
+            f"fixed={outputs.get('fixed_fits') or outputs.get('fits')}",
+            flush=True,
+        )
+    else:
+        print(
+            "Pipeline complete: "
+            f"used {stack_summary.get('used_frames')}/{stack_summary.get('input_frames')} frames; "
+            f"metcalf={outputs.get('metcalf_fits') or outputs.get('fits')}; "
+            f"star={outputs.get('star_fits')}; "
+            f"comparison={outputs.get('comparison_fits')}",
+            flush=True,
+        )
     print(f"Wrote pipeline summary: {summary_path}")
     return summary_path
 
@@ -1604,7 +1645,8 @@ def default_log_path(args: argparse.Namespace) -> Path:
     if args.log_file:
         return args.log_file.expanduser().resolve()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return (args.work_root / f"metcalf-{stamp}.log").expanduser().resolve()
+    prefix = "fixed" if args.target_mode == "fixed" else "metcalf"
+    return (args.work_root / f"{prefix}-{stamp}.log").expanduser().resolve()
 
 
 def run_cli(args: argparse.Namespace) -> int:
@@ -1615,7 +1657,7 @@ def run_cli(args: argparse.Namespace) -> int:
         stderr = TeeTextIO(sys.stderr, log_handle)
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             runtime = f"EXE: {sys.executable}" if getattr(sys, "frozen", False) else f"Python: {sys.executable}"
-            print("Seestar Metcalf Stack")
+            print("Seestar Fixed Stack" if args.target_mode == "fixed" else "Seestar Metcalf Stack")
             print(f"Runtime: {runtime}")
             print(f"Verbose: {'enabled' if args.verbose else 'disabled'}")
             print(f"Command:  {shlex.join(sys.argv)}")

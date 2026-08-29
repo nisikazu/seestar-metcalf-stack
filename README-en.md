@@ -5,8 +5,8 @@
 [日本語](README.md) | [macOS setup (Japanese)](README-macOS.md)
 
 Seestar Metcalf Stack turns subframe FITS files from Seestar, DWARF, and similar
-instruments, or SharpCap Live Stack raw frames into a stack that follows a moving comet or asteroid. It also creates
-a star-aligned stack from the same frames, plus a side-by-side comparison FITS.
+instruments, or SharpCap Live Stack raw frames into a stack that follows a moving comet or asteroid. The same processing
+base can also produce a background-star-aligned fixed-target stack for variable-star work.
 
 This is a post-processing tool. It does not control a Seestar and does not need
 the Seestar PEM/private communication key.
@@ -27,6 +27,30 @@ original frame files.
    ends in `_sub` and contains `.fit` or `.fits` files.
 4. Drag the subframe directory onto `seestar-metcalf-stack.cmd`, or run the
    command shown below.
+
+### Fixed-target stacking for variable stars
+
+On Windows, drag the subframe directory onto `seestar-fixed-stack.cmd`. This
+mode does not query JPL Horizons or apply a Metcalf motion. It uses only the
+background-star registration determined by Siril or a SharpCap StackLog and
+writes `*_fixed_stack.fit`. A target name and observing-site coordinates are
+not required, while plate solving still runs to attach a WCS.
+
+The fixed-mode defaults are mean combination, float32 FITS, saturation warnings
+enabled, and per-frame quadratic background correction. Every default can be
+overridden with the normal CLI options:
+
+```bat
+.\seestar-fixed-stack.cmd "C:\path\to\variable_star_sub"
+.\seestar-fixed-stack.cmd "C:\path\to\variable_star_sub" --background-normalization none
+.\seestar-fixed-stack.cmd "C:\path\to\variable_star_sub" --saturation-warning disable --output-bitpix uint16
+```
+
+Choose `--background-normalization none|offset|plane|quadratic` for the observing
+goal. `plane` or the default `quadratic` can remove changing low-altitude light
+pollution gradients frame by frame; use `none` when retaining the uncorrected
+linear count relationship is more important. Supply saved individual subframes,
+not a firmware-processed final stack.
 
 ### Information required for each input type
 
@@ -179,9 +203,9 @@ and how the background stars shifted. These tools provide those separate answers
   reliable center and image scale, making the local solve fast.
 - **Astrometry.net** is an optional fallback when Siril cannot solve the
   reference. Its account and API key are needed only for that fallback.
-- **JPL Horizons** supplies the target's RA/Dec at every exposure time. Those
-  positions determine how far the comet or asteroid moved between frames. No
-  JPL API key is required.
+- **JPL Horizons** supplies the target's RA/Dec at every exposure time in
+  moving-target mode. Fixed-target mode does not contact Horizons. No JPL API
+  key is required.
 - **Python, NumPy, and Pillow** are needed when running or modifying the source
   scripts. The distributed `seestar-metcalf-stack.exe` contains the Python
   runtime needed for normal use, so ordinary users do not need to install Python
@@ -198,7 +222,7 @@ previews.
 ## Requirements and package choices
 
 - Windows 10/11, or macOS 13 or newer when running the Python source
-- Internet access for JPL Horizons
+- Internet access for JPL Horizons in moving-target mode; fixed-target mode does not require it
 - Siril 1.4 or newer
 - An Astrometry.net API key only for optional fallback solving
 
@@ -489,6 +513,21 @@ The selected frame is first solved locally by Siril and is explicitly set as the
 registration reference. It is sent to Astrometry.net only if Siril fails. Its
 `DATE-OBS` and WCS are written to the final FITS.
 The FITS headers also contain `REFMODE`, `REFINDEX`, `MTREFRA`, and `MTREFDEC`.
+
+When a Siril solution contains SIP distortion, every available `A_*`, `B_*`,
+`AP_*`, and `BP_*` order and coefficient is preserved in the final FITS; the
+implementation is not limited to third order. Final products also record
+`CREATOR`, `SWVER`, the plate solver in `PLTSOLVR`, accepted-frame count in
+`NCOMBINE`, `TIMESYS=UTC`, the first accepted exposure start in `DATE-BEG`, and
+the final accepted exposure end in `DATE-END`. When every accepted frame has
+usable exposure metadata, `DATE-AVG` and `MJD-AVG` record the exposure-weighted
+mean of the accepted exposure midpoints, `TELAPSE` records the elapsed seconds
+from `DATE-BEG` to `DATE-END`, and `TOTEXP` records the sum of accepted exposure
+seconds. These four derived values are omitted rather than estimated if any
+accepted exposure duration is unknown. Reference-frame `DATE-OBS` and `EXPTIME`
+remain unchanged because the WCS belongs to that reference and a mean stack is
+still in per-frame ADU units. `HISTORY` identifies Metcalf, star-aligned,
+comparison, or fixed-stack products.
 
 ### Subframe saturation warning
 

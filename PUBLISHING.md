@@ -21,6 +21,7 @@ CI configuration, and release automation:
 - `seestar-metcalf-stack.cmd`
 - `seestar-metcalf-stack.sh`
 - `build-seestar-metcalf-stack-exe.ps1`
+- `run-release-tests.ps1`
 - `build-release-packages.ps1`
 - `release-package-manifest.psd1`
 - `verify-release-packages.ps1`
@@ -65,13 +66,25 @@ the release build.
 
 ## Release Assets
 
-Before creating a release, add the release version and date to both changelogs,
-then verify the public tree:
+Before creating a release, add the release version and date to both changelogs.
+Run the release validation with a representative FITS. It runs the complete unit
+suite, Python compilation, `git diff --check`, and one WCS-stripped live solve
+with each of Siril and Astrometry.net. It also verifies that both solvers wrote
+a real WCS FITS. The confirmation switch is required because one sanitized FITS
+is uploaded to Astrometry.net:
 
 ```powershell
-python -m unittest discover -s tests -p "test_*.py"
-git diff --check
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run-release-tests.ps1 `
+  -PlateSolveFits "C:\path\to\representative.fit" `
+  -Python "C:\path\to\python.exe" `
+  -Siril ".\tools\siril-1.4.1\siril\bin\siril-cli.exe" `
+  -AstrometryKeyFile ".\.astrometry_api_key" `
+  -ConfirmAstrometryUpload
 ```
+
+Do not continue to packaging if the remote solve times out or either WCS FITS
+is missing. Generated benchmark results stay under the ignored
+`developer-tools/plate-solve-benchmark/results/` directory.
 
 Confirm that no observing data, API key, FITS/PNG output, log, or local Siril
 installation is included in the staged files. The bug-report template under

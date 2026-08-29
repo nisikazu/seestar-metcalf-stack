@@ -262,6 +262,12 @@ def cosmetic_sigmas(plan: PreprocessingPlan) -> tuple[float, float]:
     return cold, hot
 
 
+def quote_siril_argument(value: str | Path) -> str:
+    """Quote one Siril script argument while retaining portable path separators."""
+    escaped = str(value).replace("\\", "/").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def siril_master_name(value: str | None, lines: list[str]) -> str | None:
     if not value:
         return None
@@ -273,7 +279,13 @@ def siril_master_name(value: str | None, lines: list[str]) -> str | None:
     script_converted = (
         f"calibration/{converted.name}" if converted.parent.name == "calibration" else converted.name
     )
-    lines.extend([f"load {script_source}", f"save {script_converted}", "close"])
+    lines.extend(
+        [
+            f"load {quote_siril_argument(script_source)}",
+            f"save {quote_siril_argument(script_converted)}",
+            "close",
+        ]
+    )
     return script_converted
 
 
@@ -329,9 +341,9 @@ def build_single_preprocess_script(
         command = "find_cosme_cfa" if cfa else "find_cosme"
         lines.extend(
             [
-                f"load {source.name}",
+                f"load {quote_siril_argument(source.name)}",
                 f"{command} {cold:.8g} {hot:.8g}",
-                f"save {corrected_intermediate.name}",
+                f"save {quote_siril_argument(corrected_intermediate.name)}",
                 "close",
             ]
         )
@@ -348,5 +360,5 @@ def build_single_preprocess_script(
     if cfa:
         options.extend(["-cfa", "-debayer"])
     options.append("-prefix=pp_")
-    lines.append(f"calibrate_single {input_path.name} " + " ".join(options))
+    lines.append(f"calibrate_single {quote_siril_argument(input_path.name)} " + " ".join(options))
     return "\n".join([*lines, ""]), f"pp_{input_path.name}"

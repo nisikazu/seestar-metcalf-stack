@@ -13,6 +13,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import statistics
 import subprocess
@@ -40,6 +41,14 @@ SCALE_CASES = (
     ("double", 2.0),
 )
 WCS_KEYS = {"CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2"}
+WCS_CARD_PATTERN = re.compile(
+    r"^(?:"
+    r"WCSAXES|WCSNAME|RADESYS|EQUINOX|LONPOLE|LATPOLE|"
+    r"CTYPE[12]|CUNIT[12]|CRVAL[12]|CRPIX[12]|CDELT[12]|CROTA[12]|"
+    r"(?:CD|PC|PV)[12]_\d+|"
+    r"(?:A|B|AP|BP)_(?:ORDER|DMAX|\d+_\d+)"
+    r")[A-Z]?$"
+)
 
 
 @dataclass(frozen=True)
@@ -78,6 +87,22 @@ def positive_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) and number > 0 else None
+
+
+def strip_fits_wcs_cards(path: Path) -> list[str]:
+    """Blank primary-header WCS cards while preserving pixels and pointing hints."""
+    data = bytearray(path.read_bytes())
+    removed: list[str] = []
+    for offset in range(0, min(len(data), 2880 * 32), 80):
+        card = bytes(data[offset : offset + 80]).decode("ascii", errors="ignore")
+        key = card[:8].strip().upper()
+        if key == "END":
+            break
+        if WCS_CARD_PATTERN.fullmatch(key):
+            data[offset : offset + 80] = b" " * 80
+            removed.append(key)
+    path.write_bytes(data)
+    return removed
 
 
 def parse_sexagesimal(value: str, *, is_ra: bool) -> float:
@@ -673,6 +698,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Reuse Siril's normal catalogue cache, or give every trial an empty isolated cache (default: reuse)",
     )
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--strip-input-wcs",
+        action="store_true",
+        help="Remove existing WCS cards from the benchmark copy before solving",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print inferred parameters and trial order without contacting either solver")
     args = parser.parse_args(argv)
     if args.repeats < 1:
@@ -718,6 +748,7 @@ def main(argv: list[str] | None = None) -> int:
         "solvers": list(solvers),
         "scale_case": args.scale_case,
         "siril_cache_mode": args.siril_cache_mode,
+        "strip_input_wcs": args.strip_input_wcs,
         "timeout_seconds": args.timeout_seconds,
         "seed": args.seed,
         "astrometry_uploads": astrometry_trials,
@@ -741,6 +772,9 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     benchmark_input = sanitize_fits_for_upload(source, output_root / "benchmark_input_sanitized.fit")
+    if args.strip_input_wcs:
+        removed_wcs_cards = strip_fits_wcs_cards(benchmark_input)
+        print(f"Removed {len(removed_wcs_cards)} existing WCS cards from benchmark input", flush=True)
     astrometry_key = read_api_key(args.astrometry_key_file) if astrometry_trials else None
     siril_path = resolve_siril(args.siril) if "siril" in solvers else None
     results: list[Result] = []

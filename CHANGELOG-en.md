@@ -4,6 +4,20 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.9.4 - 2026-08-29
+
+### Added
+
+- Add `seestar-fixed-stack.cmd` for background-star-aligned subframe stacking without a Horizons query or Metcalf motion. It writes `*_fixed_stack.fit` for variable-star and other fixed-target work.
+- Fixed mode defaults to mean, float32, saturation warnings enabled, and quadratic background correction; existing CLI options override each setting.
+- Add `CREATOR`, `SWVER`, `PLTSOLVR`, `TIMESYS`, `DATE-BEG`, `DATE-AVG`, `MJD-AVG`, `DATE-END`, `TELAPSE`, `TOTEXP`, and `NCOMBINE` to final FITS products, and identify Metcalf, star-aligned, comparison, and fixed-stack products in `HISTORY`.
+- Preserve every SIP distortion order and `A/B/AP/BP` coefficient supplied by a Siril WCS instead of assuming a third-order limit.
+
+### Fixed
+
+- Quote reference-frame names containing spaces in Siril scripts so CFA preprocessing and local plate solving no longer fail with `file not found`. This issue had been latent since local Siril solving was introduced in v0.7.1.
+- Download Astrometry.net WCS FITS files from the official `/wcs_file/{job_id}` site endpoint instead of an API JSON URL, so a successful solve now stores the complete WCS FITS as well as the JSON calibration.
+
 ## v0.9.3 - 2026-08-24
 
 ### Improved

@@ -4,7 +4,7 @@
 
 [English](README-en.md) | [macOSセットアップ](README-macOS.md)
 
-SeestarやDWARFなどのサブフレームFITS、またはSharpCap Live Stackのraw frameから、彗星や小惑星を追跡したメトカーフスタックを作るWindows/macOS向けツールです。同じフレームから背景星固定スタックと、両者を左右に並べた比較FITSも作成します。
+SeestarやDWARFなどのサブフレームFITS、またはSharpCap Live Stackのraw frameから、彗星や小惑星を追跡したメトカーフスタックを作るWindows/macOS向けツールです。同じ処理基盤で、変光星などを背景星基準で積算する固定天体スタックも作成できます。
 
 これは撮影後の画像処理専用ツールです。Seestar本体は制御せず、Seestar通信用のPEMや秘密キーも必要ありません。
 
@@ -16,6 +16,25 @@ SeestarやDWARFなどのサブフレームFITS、またはSharpCap Live Stackの
 2. 撮影設定で**サブフレーム保存をON**にします。保存されていないスタック済み画像だけでは、このツールでフレームごとの移動を計算できません。
 3. 観測終了後、サブフレームのフォルダをPCへコピーします。SeestarではUSB経由、またはSTAモードのネットワークファイル共有を利用できます。フォルダ名は通常`*_sub`で、内部に`.fit`または`.fits`ファイルが入ります。
 4. Windowsでは `seestar-metcalf-stack.cmd`、macOSではセットアップ時に作る `Seestar Metcalf Stack.app` へサブフレームフォルダをドラッグ&ドロップするか、コマンドで処理します。
+
+### 変光星などを固定天体としてスタックする
+
+Windowsでは、サブフレームフォルダを`seestar-fixed-stack.cmd`へドラッグ&ドロップします。JPL Horizonsによる天体運動の取得とMetcalf移動は行わず、SirilまたはSharpCap StackLogで求めた背景星位置合わせだけを使って`*_fixed_stack.fit`を作ります。固定モードでは対象天体名と観測地座標は不要です。WCSを付けるためのプレートソルブは通常どおり行います。
+
+測光用途を想定した固定モードの既定値は、平均スタック、`float32` FITS、飽和警告ON、二次曲面によるフレームごとの背景補正です。いずれも通常のオプションで変更できます。
+
+```bat
+rem 既定値で固定天体スタック
+.\seestar-fixed-stack.cmd "C:\path\to\variable_star_sub"
+
+rem 背景補正を行わない
+.\seestar-fixed-stack.cmd "C:\path\to\variable_star_sub" --background-normalization none
+
+rem 飽和警告を無効化し、従来形式のuint16で保存
+.\seestar-fixed-stack.cmd "C:\path\to\variable_star_sub" --saturation-warning disable --output-bitpix uint16
+```
+
+`--background-normalization none|offset|plane|quadratic`は観測目的に応じて選べます。低高度の光害勾配や時間変化をフレームごとに除くなら`plane`または既定の`quadratic`が有効です。補正を加えない元の線形カウント関係を優先する場合は`none`を指定してください。ファームウェアが加工した完成スタックではなく、保存した1枚ごとのサブフレームを入力に使います。
 
 ### 入力ごとに必要な情報
 
@@ -114,7 +133,7 @@ rem 補正済みフレームなのでCameraSettingsの補正をすべて無効�
 
 - **Siril** はdark/flat補正、ホット・クールピクセル補正、デベイヤ、基準フレームのプレートソルブ、必要な場合の背景星位置合わせ行列の推定を行います。Seestar FITSでは記録された中心座標と画素スケールを使うため、通常は短時間でローカル解決できます。
 - **Astrometry.net** はSirilで基準フレームを解決できない場合のフォールバックです。利用する場合だけアカウントとAPIキーが必要で、同梱の`set-astrometry-api-key.cmd`で設定できます。
-- **JPL Horizons** は各露光時刻における対象天体の赤経・赤緯を返します。この固有運動から、フレームごとに追加すべき移動量を求めます。JPLのAPIキーは不要です。
+- **JPL Horizons** は移動天体モードで、各露光時刻における対象天体の赤経・赤緯を返します。固定天体モードでは通信しません。JPLのAPIキーは不要です。
 - **Python、NumPy、Pillow** はソースコードを実行・改造する場合に必要です。配布版の `seestar-metcalf-stack.exe` には実行に必要なPythonランタイムが含まれているため、通常の利用者はPythonやライブラリを別途インストールする必要はありません。
 
 処理の分担は、Sirilが「raw画像を補正・カラー化し、画像がどこを向いているか」を、Horizonsが「対象がどう動いたか」を決めます。背景星の平行移動・回転は、完全なSharpCap StackLogがあればその記録を使い、なければSirilの`register -2pass`で位置合わせ行列だけを推定します。Python側はこの行列とMetcalf移動量を合成し、前処理済み画像から1回だけ補間して、メトカーフスタック、星固定スタック、線形FITSを書き出します。
@@ -122,7 +141,7 @@ rem 補正済みフレームなのでCameraSettingsの補正をすべて無効�
 ## 必要なものと配布版の違い
 
 - Windows 10/11、またはPythonソース版を実行するmacOS 13以降
-- JPL Horizonsへ接続できるネットワーク
+- 移動天体モードではJPL Horizonsへ接続できるネットワーク。固定天体モードでは不要
 - Siril 1.4以降
 - Astrometry.net APIキー（SirilでPlate Solveできない場合の任意のフォールバック）
 
@@ -299,6 +318,8 @@ Pythonコードを改造した場合は、古いEXEが優先実行されない�
 ```
 
 選ばれたフレームをSirilでPlate Solveし、位置合わせ基準にも明示設定します。Sirilで解けなかった場合だけAstrometry.netへ送ります。最終FITSの`DATE-OBS`とWCS座標はこの基準フレームを反映します。`REFMODE`、`REFINDEX`、`MTREFRA`、`MTREFDEC`にも基準情報を残します。
+
+Siril解にSIP歪み補正が含まれる場合は、次数を3次に限定せず、`A_*`、`B_*`、`AP_*`、`BP_*`の次数と係数を最終FITSへすべて継承します。最終FITSには生成元の`CREATOR`と`SWVER`、使用したプレートソルバ`PLTSOLVR`、採用フレーム数`NCOMBINE`、時刻系`TIMESYS=UTC`、最初の採用露光開始`DATE-BEG`、最後の採用露光終了`DATE-END`も記録します。全採用フレームで露光時間を取得できた場合は、採用露光中央時刻の露光時間加重平均を`DATE-AVG`と`MJD-AVG`、開始から終了までの実経過時間を秒単位の`TELAPSE`、露光時間合計を秒単位の`TOTEXP`へ記録します。露光時間が1枚でも不明な場合、不正確な`DATE-AVG`、`MJD-AVG`、`TELAPSE`、`TOTEXP`は出力しません。`DATE-OBS`と`EXPTIME`はWCSに対応する基準フレームの値を保ち、平均スタックの画素値を総露光相当へ見せかける上書きはしません。`HISTORY`にはMetcalf、星固定、左右比較、fixed stackのどの生成物かを記録します。
 
 ### サブフレームの飽和警告
 

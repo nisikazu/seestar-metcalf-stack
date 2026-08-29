@@ -533,6 +533,19 @@ class BoundedFrameProcessingTests(unittest.TestCase):
                 np.testing.assert_array_equal(parallel.metcalf_data, serial.metcalf_data)
             self.assertEqual(serial_results[0].timings["star_resample"], 0.0)
 
+            fixed_result = stacker.process_stack_frame(
+                tasks[1],
+                canvas,
+                "valid",
+                "offset",
+                True,
+                90.0,
+                "fixed",
+            )
+            self.assertIs(fixed_result.metcalf_data, fixed_result.star_data)
+            self.assertIs(fixed_result.metcalf_mask, fixed_result.star_mask)
+            self.assertEqual(fixed_result.timings["metcalf_shift"], 0.0)
+
 
 class ProgressiveCleanupTests(unittest.TestCase):
     def test_preprocessing_cleanup_preserves_only_final_sequence_and_metadata(self) -> None:

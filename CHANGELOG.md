@@ -4,6 +4,20 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## v0.9.4 - 2026-08-29
+
+### 追加
+
+- `seestar-fixed-stack.cmd`を追加しました。変光星などのサブフレームを背景星基準だけで位置合わせし、HorizonsやMetcalf移動を使わず`*_fixed_stack.fit`を生成します。
+- 固定モードは平均、float32、飽和警告ON、二次背景補正を既定とし、既存のコマンドラインオプションで個別に上書きできます。
+- 最終FITSへ`CREATOR`、`SWVER`、`PLTSOLVR`、`TIMESYS`、`DATE-BEG`、`DATE-AVG`、`MJD-AVG`、`DATE-END`、`TELAPSE`、`TOTEXP`、`NCOMBINE`を追加し、`HISTORY`でMetcalf、星固定、比較、fixed stackを区別します。
+- Siril WCSに含まれるSIP歪み補正の次数と`A/B/AP/BP`全係数を、3次に固定せず最終FITSへ継承します。
+
+### 修正
+
+- 空白を含む基準フレーム名をSirilスクリプト内で引用し、CFA前処理とローカルプレートソルブが`file not found`になる問題を修正しました。この問題はSirilローカルソルブを導入したv0.7.1から潜在していました。
+- Astrometry.netのWCS FITSをAPI JSON用URLではなく公式の`/wcs_file/{job_id}`から取得し、JSON解だけでなく完全なWCS FITSも保存できるようにしました。
+
 ## v0.9.3 - 2026-08-24
 
 ### 改善

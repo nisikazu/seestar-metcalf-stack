@@ -18,6 +18,7 @@ downloads/
 plate_solve/
 developer-tools/plate-solve-benchmark/results/
 developer-tools/background-normalization-benchmark/results/
+developer-tools/wcs-comparison/results/
 plate_solve_benchmark/
 .tmp/
 *.fit

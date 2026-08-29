@@ -81,6 +81,42 @@ class PlateSolveBenchmarkTests(unittest.TestCase):
 
         self.assertEqual(parsed.siril_cache_mode, "cold-each")
 
+    def test_strip_input_wcs_is_opt_in(self):
+        self.assertFalse(benchmark.parse_args(["frame.fit"]).strip_input_wcs)
+        self.assertTrue(benchmark.parse_args(["frame.fit", "--strip-input-wcs"]).strip_input_wcs)
+
+    def test_strip_fits_wcs_cards_preserves_pointing_and_pixels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "frame.fit"
+            cards = [
+                "SIMPLE  =                    T".ljust(80),
+                "BITPIX  =                    8".ljust(80),
+                "NAXIS   =                    0".ljust(80),
+                "RA      =               120.25".ljust(80),
+                "DEC     =                -20.5".ljust(80),
+                "CTYPE1  = 'RA---TAN-SIP'".ljust(80),
+                "CRVAL1  =               120.00".ljust(80),
+                "CD1_1   =              -0.001".ljust(80),
+                "A_ORDER =                    2".ljust(80),
+                "A_0_2   =              1.0E-8".ljust(80),
+                "END".ljust(80),
+            ]
+            pixels = b"pixel payload"
+            path.write_bytes("".join(cards).encode("ascii").ljust(2880, b" ") + pixels)
+
+            removed = benchmark.strip_fits_wcs_cards(path)
+            header = astrometry_solve.read_fits_header(path)
+
+            self.assertEqual(header["RA"], 120.25)
+            self.assertEqual(header["DEC"], -20.5)
+            self.assertNotIn("CTYPE1", header)
+            self.assertNotIn("CRVAL1", header)
+            self.assertNotIn("CD1_1", header)
+            self.assertNotIn("A_ORDER", header)
+            self.assertNotIn("A_0_2", header)
+            self.assertEqual(path.read_bytes()[-len(pixels) :], pixels)
+            self.assertEqual(set(removed), {"CTYPE1", "CRVAL1", "CD1_1", "A_ORDER", "A_0_2"})
+
     def test_cold_siril_environment_creates_windows_catalog_cache(self):
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
