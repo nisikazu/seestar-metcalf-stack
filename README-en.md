@@ -28,6 +28,80 @@ original frame files.
 4. Drag the subframe directory onto `seestar-metcalf-stack.cmd`, or run the
    command shown below.
 
+### Open Seestar internal storage from Windows
+
+Connect the PC and Seestar to the same STA network, or connect the PC to the Seestar AP,
+then double-click `seestar-open-storage.cmd`. The helper resolves `seestar.local` to
+IPv4 and directly tries `\\<IPv4>\EMMC Images\MyWorks` without relying on `net view`
+share enumeration. If the STA address fails, it also tries the AP address `10.0.0.1`.
+No PEM or API key is required.
+
+It is normal for `ping seestar.local` to display an IPv6 address. This helper explicitly
+selects the IPv4 A record for SMB access. If automatic discovery is unavailable, pass a
+known address:
+
+```bat
+.\seestar-open-storage.cmd 192.168.0.23
+```
+
+The helper diagnoses the connection in this order:
+
+1. Resolve `seestar.local` to IPv4.
+2. Check whether TCP 445 (SMB) is reachable.
+3. Directly open `\\<IPv4>\EMMC Images\MyWorks`.
+4. On failure, report the Windows insecure-guest, required-signing, and
+   required-encryption settings.
+5. If the STA address fails, also check `10.0.0.1`.
+
+**An open TCP 445 port followed by `net view` error 53 does not prove that the Seestar
+share is disabled.** If Windows says that organizational security policies block
+unauthenticated guest access, the Windows SMB client is rejecting the Seestar guest
+connection.
+
+To change the setting through the Windows UI, search the Start menu for `gpedit.msc`
+and look for **Lanman Workstation > Enable insecure guest logons**. If the helper also
+reports signing or encryption as `enabled`, disable the corresponding requirement in
+the same policy editor. If those items aren't available, use the PowerShell method below.
+
+To inspect the current values, open PowerShell as Administrator and run:
+
+```powershell
+Get-SmbClientConfiguration |
+  Select-Object EnableInsecureGuestLogons, RequireSecuritySignature, RequireEncryption
+```
+
+If you understand and accept the security trade-off, allow guest access with:
+
+```powershell
+Set-SmbClientConfiguration -EnableInsecureGuestLogons $true -Force
+```
+
+Only when `RequireSecuritySignature` is `True`, also disable the signing requirement,
+which is incompatible with guest access:
+
+```powershell
+Set-SmbClientConfiguration -RequireSecuritySignature $false -Force
+```
+
+Likewise, only when `RequireEncryption` is `True`, disable required encryption:
+
+```powershell
+Set-SmbClientConfiguration -RequireEncryption $false -Force
+```
+
+These settings affect all outbound SMB client connections on the PC, not only the
+Seestar. Allowing unauthenticated guest access and disabling required signing reduce
+protection against spoofed servers and adversary-in-the-middle attacks; disabling
+required encryption also reduces protection against eavesdropping. Use them only on a
+trusted network, record the original values, and restore those values after file copying.
+This helper never changes the settings automatically. Consult the system administrator
+when policy changes are prohibited on a managed PC.
+
+For the Windows behavior and security implications, see Microsoft's documentation for
+[insecure guest logons](https://learn.microsoft.com/windows-server/storage/file-server/enable-insecure-guest-logons-smb2-and-smb3),
+[SMB signing](https://learn.microsoft.com/windows-server/storage/file-server/smb-signing),
+and [required SMB encryption](https://learn.microsoft.com/windows-server/storage/file-server/configure-smb-client-require-encryption).
+
 ### Fixed-target stacking for variable stars
 
 On Windows, drag the subframe directory onto `seestar-fixed-stack.cmd`. This

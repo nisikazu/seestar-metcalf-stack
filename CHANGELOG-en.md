@@ -4,6 +4,15 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.9.5 - 2026-08-31
+
+### Added
+
+- Add `seestar-open-storage.cmd` for Windows. It resolves the Seestar IPv4 address through `seestar.local`, AP-mode defaults, or a local-network scan, then opens the network-shared `MyWorks` directory in Explorer.
+- Avoid relying on `net view`: check TCP 445 and directly access `\\<IPv4>\EMMC Images\MyWorks`. On failure, diagnose Windows insecure-guest, required-signing, and required-encryption policy, then explain the remediation and security impact without claiming an unverified Seestar app sharing toggle.
+- Keep the launcher open after a failure until the user presses a key, so the diagnostic guidance remains readable.
+- Add a brief Local Group Policy pointer, elevated PowerShell examples, and the machine-wide security warning for Windows SMB settings.
+
 ## v0.9.4 - 2026-08-29
 
 ### Added

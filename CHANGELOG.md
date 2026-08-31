@@ -4,6 +4,15 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## v0.9.5 - 2026-08-31
+
+### 追加
+
+- Windows向けの`seestar-open-storage.cmd`を追加しました。`seestar.local`のIPv4、APモードの既定アドレス、ローカルネットワーク探索の順にSeestarを見つけ、ネットワークファイル共有の`MyWorks`をExplorerで開きます。
+- `net view`に依存せず、TCP 445と`\\<IPv4>\EMMC Images\MyWorks`への直接接続を確認します。失敗時はWindowsの未認証guestログオン、SMB署名必須、SMB暗号化必須を診断し、必要な対処とセキュリティ上の影響を表示します。Seestarアプリに未確認の共有ON/OFF設定があるとは案内しません。
+- 診断を読めるよう、失敗時は任意のキーが押されるまでランチャーを閉じません。
+- READMEへ、ローカル グループ ポリシーで設定を探すヒント、管理者PowerShellの設定例、PC全体へ影響するセキュリティ上の注意を追加しました。
+
 ## v0.9.4 - 2026-08-29
 
 ### 追加

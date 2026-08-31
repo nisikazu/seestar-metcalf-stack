@@ -17,6 +17,57 @@ SeestarやDWARFなどのサブフレームFITS、またはSharpCap Live Stackの
 3. 観測終了後、サブフレームのフォルダをPCへコピーします。SeestarではUSB経由、またはSTAモードのネットワークファイル共有を利用できます。フォルダ名は通常`*_sub`で、内部に`.fit`または`.fits`ファイルが入ります。
 4. Windowsでは `seestar-metcalf-stack.cmd`、macOSではセットアップ時に作る `Seestar Metcalf Stack.app` へサブフレームフォルダをドラッグ&ドロップするか、コマンドで処理します。
 
+### WindowsからSeestar内部ストレージを開く
+
+SeestarとPCを同じSTAネットワークへ接続するか、PCをSeestarのAPへ接続して`seestar-open-storage.cmd`をダブルクリックします。ツールは`seestar.local`をIPv4へ解決し、共有列挙の`net view`には依存せず、`\\<IPv4>\EMMC Images\MyWorks`を直接試してExplorerで開きます。STA側で開けない場合はAP側の`10.0.0.1`も試します。PEMやAPIキーは不要です。
+
+Windowsの`ping seestar.local`がIPv6を表示しても異常ではありません。このツールはSMBアクセス用にIPv4のAレコードを明示的に選びます。自動探索できない場合は、判明しているIPアドレスを指定できます。
+
+```bat
+.\seestar-open-storage.cmd 192.168.0.23
+```
+
+ツールは次の順に原因を切り分けます。
+
+1. `seestar.local`からIPv4を取得します。
+2. TCP 445（SMB）へ到達できるか確認します。
+3. `\\<IPv4>\EMMC Images\MyWorks`を直接開きます。
+4. 失敗時はWindowsの未認証guestログオン、SMB署名必須、SMB暗号化必須の設定を表示します。
+5. STA側で開けなければ`10.0.0.1`も確認します。
+
+**TCP 445へ到達できても、`net view`のエラー53だけではSeestar側の共有が停止しているとは判断できません。** 「組織のセキュリティポリシーによって未認証のゲストアクセスがブロックされている」とWindowsに表示された場合は、Windows SMBクライアントがSeestarの未認証guest接続を拒否しています。
+
+Windowsの画面から変更したい場合は、スタートメニューで`gpedit.msc`を検索し、**Lanman ワークステーション > セキュリティで保護されていないゲスト ログオンを有効にする**を探してください。ヘルパーが署名または暗号化も`enabled`と表示した場合は、同じエディターで該当する必須設定を無効にします。項目が見つからない場合は、次のPowerShell方法を利用できます。
+
+変更前の状態を確認するには、PowerShellを管理者として開いて次を実行します。
+
+```powershell
+Get-SmbClientConfiguration |
+  Select-Object EnableInsecureGuestLogons, RequireSecuritySignature, RequireEncryption
+```
+
+セキュリティ上の影響を理解したうえでguest接続を許可する場合は、同じ管理者PowerShellで次を実行します。
+
+```powershell
+Set-SmbClientConfiguration -EnableInsecureGuestLogons $true -Force
+```
+
+`RequireSecuritySignature`が`True`の場合だけ、guest接続と両立しない署名必須も解除する必要があります。
+
+```powershell
+Set-SmbClientConfiguration -RequireSecuritySignature $false -Force
+```
+
+同様に`RequireEncryption`が`True`の場合だけ、暗号化必須を解除します。
+
+```powershell
+Set-SmbClientConfiguration -RequireEncryption $false -Force
+```
+
+これらはSeestarだけでなく、PCから行うSMB接続全体に影響する設定です。未認証guestの許可、署名必須や暗号化必須の解除は、偽装サーバー、中間者攻撃、盗聴に対する保護を弱めます。信頼できるネットワークで必要な間だけ使用し、最初に表示した値を記録して、ファイルコピー後は同じコマンドの`$true`/`$false`を元の値へ戻してください。本ツールがこれらの設定を自動変更することはありません。管理対象PCでポリシー変更が禁止されている場合は、管理者へ相談してください。
+
+仕様とリスクの詳細はMicrosoftの[未認証guestログオン](https://learn.microsoft.com/windows-server/storage/file-server/enable-insecure-guest-logons-smb2-and-smb3)、[SMB署名](https://learn.microsoft.com/windows-server/storage/file-server/smb-signing)、[SMB暗号化必須](https://learn.microsoft.com/windows-server/storage/file-server/configure-smb-client-require-encryption)の説明を参照してください。
+
 ### 変光星などを固定天体としてスタックする
 
 Windowsでは、サブフレームフォルダを`seestar-fixed-stack.cmd`へドラッグ&ドロップします。JPL Horizonsによる天体運動の取得とMetcalf移動は行わず、SirilまたはSharpCap StackLogで求めた背景星位置合わせだけを使って`*_fixed_stack.fit`を作ります。固定モードでは対象天体名と観測地座標は不要です。WCSを付けるためのプレートソルブは通常どおり行います。

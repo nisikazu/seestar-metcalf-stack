@@ -2,6 +2,15 @@
 
 利用者に影響する変更は[変更履歴](CHANGELOG.md)と[改訂内容とトラブルシュート](TROUBLESHOOTING.md)にまとめています。この文書は実装判断、検証、引き継ぎを目的とした開発者向け資料です。
 
+## 2026-08-31: Seestar SMBストレージランチャー
+
+- Windows向け`seestar-open-storage.cmd`は、PowerShell実装`seestar-open-storage.ps1`を呼ぶだけの薄いランチャーである。Metcalf Stack本体やPEM通信には依存しない。
+- 探索順は、利用者指定、`SEESTAR_HOST`、`seestar.local`/`seestar`のIPv4、ホストモード`10.0.0.1`、代替`192.168.4.1`、ローカル/24のTCP 4700並列探索である。`.local`がIPv6も返す環境でSMBを安定して開くため、UNCには解決済みIPv4を使う。
+- 共有パスは既存Seestarツールと同じ`\\<IPv4>\EMMC Images\MyWorks`とした。共有列挙の`net view`は判定に使わず、候補IPv4ごとにTCP 445と直接UNCを確認する。STA側失敗時にもAP側`10.0.0.1`を試す。
+- 実機では`seestar.local`から`192.168.0.23`を解決しTCP 4700/445とも到達したが、直接UNCは`UnauthorizedAccess (0x80070005)`となった。管理者権限で確認したWindows SMB設定は`EnableInsecureGuestLogons=False`、`RequireSecuritySignature=False`、`RequireEncryption=False`であり、この環境ではguest拒否が原因と判断できた。`445 open + net view error 53`をSeestar側共有OFFとは解釈しない。
+- ヘルパーは有効なSMB設定を読める場合はその値、読めない場合はLanmanWorkstationレジストリを表示する。必要に応じて`EnableInsecureGuestLogons`、`RequireSecuritySignature`、`RequireEncryption`の変更コマンドを案内するが、PC全体のSMBクライアント保護を弱めるため自動変更しない。低レベルSMBライブラリは新依存とWindows実効ポリシーとの差を増やすため、現段階ではTCP・直接UNC・OSポリシーの組み合わせを採用した。
+- `-FindOnly`はExplorerやSMBへ触れず、選択したIPv4とUNCを表示する診断・オフラインテスト用経路である。通常利用者はCMDをダブルクリックするか、第一引数へ既知IPを指定する。
+
 ## 2026-08-29: 固定天体スタック経路（次期0.9.x）
 
 - 共通CLIへ`--target-mode moving|fixed`を追加し、Windowsの`seestar-fixed-stack.cmd`は`fixed`を付加するだけの薄いランチャーとした。背景補正、保存形式、飽和警告などの既存オプションはそのまま受け渡す。

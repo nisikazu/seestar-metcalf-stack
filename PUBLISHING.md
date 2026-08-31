@@ -18,6 +18,8 @@ CI configuration, and release automation:
 - `DEVELOPMENT.md`
 - `PUBLISHING.md`
 - `requirements.txt`
+- `seestar-open-storage.cmd`
+- `seestar-fixed-stack.cmd`
 - `seestar-metcalf-stack.cmd`
 - `seestar-metcalf-stack.sh`
 - `build-seestar-metcalf-stack-exe.ps1`
