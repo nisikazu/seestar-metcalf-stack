@@ -30,6 +30,7 @@ from moving_target_stack import (
     SirilRegistrationError,
     normalize_saturation_color,
     parse_stack_workers,
+    parse_median_tile_rows,
     parse_time,
     processing_method_token,
     read_source_image,
@@ -248,6 +249,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Parallel workers for per-frame FITS/background/shift processing. "
             "auto selects 1, 2, or 4 from available RAM and frame size (default)."
+        ),
+    )
+    parser.add_argument(
+        "--median-tile-rows",
+        type=parse_median_tile_rows,
+        default="auto",
+        metavar="auto|N",
+        help=(
+            "Full-width output rows held in each median/rank-fit working cube. "
+            "auto uses at most about half of currently available RAM (default)."
         ),
     )
     parser.add_argument(
@@ -1385,6 +1396,8 @@ def run_stack(
             args.stack_method,
             "--stack-workers",
             str(args.stack_workers),
+            "--median-tile-rows",
+            str(args.median_tile_rows),
             "--padding-policy",
             args.padding_policy,
             "--background-normalization",

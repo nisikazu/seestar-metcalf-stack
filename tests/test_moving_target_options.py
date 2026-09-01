@@ -1664,6 +1664,7 @@ class CrossPlatformCliTests(unittest.TestCase):
         self.assertEqual(args.preview_sigma_low, -1.0)
         self.assertEqual(args.preview_sigma_high, 3.0)
         self.assertEqual(args.stack_workers, "auto")
+        self.assertEqual(args.median_tile_rows, "auto")
 
     def test_fixed_launcher_mode_uses_photometry_defaults(self):
         with patch.dict(os.environ, {"SEESTAR_STACK_TARGET_MODE": "fixed"}):
@@ -1709,6 +1710,16 @@ class CrossPlatformCliTests(unittest.TestCase):
             args = pipeline.parse_args()
 
         self.assertEqual(args.stack_workers, 4)
+
+    def test_pipeline_accepts_explicit_median_tile_rows(self):
+        with patch.object(
+            sys,
+            "argv",
+            ["seestar-metcalf-stack", "frames", "--median-tile-rows", "48"],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.median_tile_rows, 48)
 
     def test_pipeline_accepts_legacy_padding_and_zero_inclusion(self):
         with patch.object(

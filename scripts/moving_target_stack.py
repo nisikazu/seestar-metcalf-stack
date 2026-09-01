@@ -1022,6 +1022,9 @@ AUTO_WORKER_UNKNOWN_RAM_DEFAULT = 2
 AUTO_WORKER_RESERVE_MIN_BYTES = 512 * MEBIBYTE
 AUTO_WORKER_RESERVE_FRACTION = 0.25
 AUTO_WORKER_FIXED_OVERHEAD_BYTES = 64 * MEBIBYTE
+MEDIAN_TILE_RAM_FRACTION = 0.50
+MEDIAN_TILE_UNKNOWN_RAM_ROWS = 16
+RANKFIT_WORKSPACE_BYTES = 16 * MEBIBYTE
 
 
 @dataclass
@@ -1078,6 +1081,35 @@ class StackFrameResult:
     timings: dict[str, float]
 
 
+@dataclass
+class StackFrameAnalysis:
+    """Frame-wide metadata evaluated before an order-statistic cube is allocated."""
+
+    task: StackFrameTask
+    prepared_unit_scale: float
+    background_model: BackgroundModel | None
+    background_correction: np.ndarray | None
+    saturation_level: float | None
+    saturation_threshold_count: float | None
+    subframe_max_count: float | None
+    saturated_pixel_count: int
+    timings: dict[str, float]
+
+
+@dataclass
+class StackTileFrameResult:
+    """One frame resampled only onto the current output-row tile."""
+
+    task: StackFrameTask
+    star_data: np.ndarray
+    star_mask: np.ndarray
+    metcalf_data: np.ndarray
+    metcalf_mask: np.ndarray
+    star_saturation_mask: np.ndarray | None
+    metcalf_saturation_mask: np.ndarray | None
+    timings: dict[str, float]
+
+
 @dataclass(frozen=True)
 class StackWorkerMemoryEstimate:
     """Conservative array-allocation estimate used by automatic worker selection."""
@@ -1105,6 +1137,54 @@ class StackWorkerPlan:
     fallback_events: list[dict[str, object]]
 
 
+@dataclass
+class MedianTilePlan:
+    """Bounded in-memory cube plan for median and rank-fit stacking."""
+
+    requested: str | int
+    initial_rows: int
+    current_rows: int
+    available_bytes: int | None
+    budget_bytes: int | None
+    bytes_per_row: int
+    frame_count: int
+    channels: int
+    width: int
+    height: int
+    cube_count: int
+    reason: str
+    fallback_events: list[dict[str, object]]
+
+    def cube_bytes(self, rows: int | None = None) -> int:
+        return self.bytes_per_row * (self.current_rows if rows is None else rows)
+
+
+@dataclass
+class OrderStatisticTileResult:
+    """Completed row tile, committed only after every frame and combination succeeds."""
+
+    star_data: np.ndarray
+    star_coverage: np.ndarray
+    metcalf_data: np.ndarray | None
+    metcalf_coverage: np.ndarray | None
+    star_saturation_mask: np.ndarray | None
+    metcalf_saturation_mask: np.ndarray | None
+    timings: dict[str, float]
+
+
+@dataclass
+class OrderStatisticStackResult:
+    """Full output assembled from independent order-statistic row tiles."""
+
+    star_data: np.ndarray
+    star_coverage: np.ndarray
+    metcalf_data: np.ndarray | None
+    metcalf_coverage: np.ndarray | None
+    star_saturation_mask: np.ndarray | None
+    metcalf_saturation_mask: np.ndarray | None
+    timings: dict[str, float]
+
+
 def parse_stack_workers(value: str) -> str | int:
     normalized = str(value).strip().lower()
     if normalized == "auto":
@@ -1116,6 +1196,19 @@ def parse_stack_workers(value: str) -> str | int:
     if workers not in {1, 2, 4}:
         raise argparse.ArgumentTypeError("--stack-workers must be auto, 1, 2, or 4")
     return workers
+
+
+def parse_median_tile_rows(value: str) -> str | int:
+    normalized = str(value).strip().lower()
+    if normalized == "auto":
+        return "auto"
+    try:
+        rows = int(normalized)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("--median-tile-rows must be auto or a positive integer") from error
+    if rows < 1:
+        raise argparse.ArgumentTypeError("--median-tile-rows must be auto or a positive integer")
+    return rows
 
 
 def format_memory_size(byte_count: int | None) -> str:
@@ -1312,6 +1405,86 @@ def describe_stack_worker_plan(plan: StackWorkerPlan) -> str:
         f"[workers] explicit={plan.initial_workers}; available RAM={format_memory_size(plan.available_bytes)}; "
         f"frame={frame_text}; canvas={canvas_text}; projected={format_memory_size(projected)}; "
         "the user setting takes precedence over the estimate"
+    )
+
+
+def order_statistic_image_shape(source_shape: tuple[int, ...], canvas: StackCanvas) -> tuple[int, ...]:
+    if len(source_shape) == 2:
+        return canvas.shape
+    if len(source_shape) == 3:
+        return (int(source_shape[0]), *canvas.shape)
+    raise ValueError(f"Unsupported order-statistic image shape: {source_shape}")
+
+
+def select_median_tile_plan(
+    requested: str | int,
+    frame_count: int,
+    image_shape: tuple[int, ...],
+    target_mode: str,
+    available_bytes: int | None = None,
+) -> MedianTilePlan:
+    """Choose full-width cube rows without using more than half of available RAM in auto mode."""
+    if frame_count < 1:
+        raise ValueError("Median tile planning requires at least one frame")
+    if len(image_shape) == 2:
+        channels = 1
+        height, width = image_shape
+    elif len(image_shape) == 3:
+        channels, height, width = image_shape
+    else:
+        raise ValueError(f"Unsupported median image shape: {image_shape}")
+    cube_count = 2 if target_mode == "moving" else 1
+    bytes_per_row = (
+        int(frame_count)
+        * int(channels)
+        * int(width)
+        * np.dtype(np.float32).itemsize
+        * cube_count
+    )
+    bytes_per_row += int(channels) * int(width) * np.dtype(np.uint32).itemsize * cube_count
+    available = available_ram_bytes() if available_bytes is None else available_bytes
+    budget: int | None = None
+    if requested == "auto":
+        if available is None:
+            rows = min(int(height), MEDIAN_TILE_UNKNOWN_RAM_ROWS)
+            reason = "available RAM could not be measured; conservative row fallback"
+        else:
+            budget = max(1, int(available * MEDIAN_TILE_RAM_FRACTION))
+            rows = max(1, min(int(height), budget // max(bytes_per_row, 1)))
+            if rows < height and rows >= 16:
+                rows = max(16, rows // 16 * 16)
+            reason = "largest full-width row tile fitting 50% of available RAM"
+            if bytes_per_row > budget:
+                reason = "one cube row exceeds 50% of available RAM; using the minimum"
+    else:
+        rows = min(int(height), int(requested))
+        reason = "explicit user row count"
+    return MedianTilePlan(
+        requested=requested,
+        initial_rows=rows,
+        current_rows=rows,
+        available_bytes=available,
+        budget_bytes=budget,
+        bytes_per_row=int(bytes_per_row),
+        frame_count=int(frame_count),
+        channels=int(channels),
+        width=int(width),
+        height=int(height),
+        cube_count=cube_count,
+        reason=reason,
+        fallback_events=[],
+    )
+
+
+def describe_median_tile_plan(plan: MedianTilePlan) -> str:
+    requested = "auto" if plan.requested == "auto" else str(plan.requested)
+    tile_count = math.ceil(plan.height / plan.initial_rows)
+    return (
+        f"[median-tiles] requested={requested}; available RAM={format_memory_size(plan.available_bytes)}; "
+        f"cube budget={format_memory_size(plan.budget_bytes)}; frames={plan.frame_count}; "
+        f"channels={plan.channels}; width={plan.width}; cubes={plan.cube_count}; "
+        f"rows={plan.initial_rows}; tiles={tile_count}; "
+        f"working cubes={format_memory_size(plan.cube_bytes(plan.initial_rows))}; {plan.reason}"
     )
 
 
@@ -2155,6 +2328,43 @@ def build_bilinear_translation_plan(
             identity=True,
         )
 
+    # A row tile of an unshifted frame is an exact crop, not a bilinear
+    # translation. Preserve every source edge while keeping the legacy support
+    # semantics for actual nonzero shifts.
+    rounded_origin_x = int(round(canvas.origin_x))
+    rounded_origin_y = int(round(canvas.origin_y))
+    direct_crop = (
+        abs(dx) < 1.0e-9
+        and abs(dy) < 1.0e-9
+        and abs(canvas.origin_x - rounded_origin_x) < 1.0e-9
+        and abs(canvas.origin_y - rounded_origin_y) < 1.0e-9
+        and rounded_origin_x >= 0
+        and rounded_origin_y >= 0
+        and rounded_origin_x + output_width <= source_width
+        and rounded_origin_y + output_height <= source_height
+    )
+    if direct_crop:
+        output_slice = (slice(0, output_height), slice(0, output_width))
+        valid = (
+            np.ones(canvas.shape, dtype=bool)
+            if source_valid is None
+            else source_valid[
+                rounded_origin_y : rounded_origin_y + output_height,
+                rounded_origin_x : rounded_origin_x + output_width,
+            ].copy()
+        )
+        return BilinearTranslationPlan(
+            output_shape=canvas.shape,
+            output_slice=output_slice,
+            source_y0=rounded_origin_y,
+            source_y1=rounded_origin_y + output_height,
+            source_x0=rounded_origin_x,
+            source_x1=rounded_origin_x + output_width,
+            weight_x=0.0,
+            weight_y=0.0,
+            valid_mask=valid,
+        )
+
     # Canvas pixel (u, v) represents registration coordinate
     # (u + origin_x, v + origin_y). Inverse sampling therefore reads source
     # coordinate (u + origin_x - dx, v + origin_y - dy).
@@ -2220,12 +2430,19 @@ def apply_bilinear_translation_plan(
     y0, y1 = plan.source_y0, plan.source_y1
     x0, x1 = plan.source_x0, plan.source_x1
     wx, wy = plan.weight_x, plan.weight_y
-    blended = (
-        (1.0 - wx) * (1.0 - wy) * data[y0:y1, x0:x1]
-        + wx * (1.0 - wy) * data[y0:y1, x0 + 1 : x1 + 1]
-        + (1.0 - wx) * wy * data[y0 + 1 : y1 + 1, x0:x1]
-        + wx * wy * data[y0 + 1 : y1 + 1, x0 + 1 : x1 + 1]
-    )
+    if wx == 0.0 and wy == 0.0:
+        blended = data[y0:y1, x0:x1]
+    elif wx == 0.0:
+        blended = (1.0 - wy) * data[y0:y1, x0:x1] + wy * data[y0 + 1 : y1 + 1, x0:x1]
+    elif wy == 0.0:
+        blended = (1.0 - wx) * data[y0:y1, x0:x1] + wx * data[y0:y1, x0 + 1 : x1 + 1]
+    else:
+        blended = (
+            (1.0 - wx) * (1.0 - wy) * data[y0:y1, x0:x1]
+            + wx * (1.0 - wy) * data[y0:y1, x0 + 1 : x1 + 1]
+            + (1.0 - wx) * wy * data[y0 + 1 : y1 + 1, x0:x1]
+            + wx * wy * data[y0 + 1 : y1 + 1, x0 + 1 : x1 + 1]
+        )
     target = output[plan.output_slice]
     valid_region = plan.valid_mask[plan.output_slice]
     target[valid_region] = blended[valid_region]
@@ -2403,8 +2620,542 @@ def process_stack_frame(
     )
 
 
+def analyze_order_statistic_frame(
+    task: StackFrameTask,
+    padding_policy: str,
+    background_mode: str,
+    saturation_enabled: bool,
+    saturation_threshold_percent: float,
+) -> StackFrameAnalysis:
+    """Evaluate frame-wide models before allocating any median/rank-fit cube."""
+    timings = {
+        "fits_read": 0.0,
+        "background_fit": 0.0,
+        "saturation": 0.0,
+    }
+    started = time.perf_counter()
+    image, prepared_unit_scale = restore_registered_units(read_fits(task.prepared), task.source_header)
+    source_valid = registered_valid_mask(image.data) if padding_policy == "valid" else None
+    timings["fits_read"] = time.perf_counter() - started
+
+    saturation_level: float | None = None
+    saturation_threshold_count: float | None = None
+    subframe_max_count: float | None = None
+    saturated_pixel_count = 0
+    if saturation_enabled:
+        started = time.perf_counter()
+        saturation_mask, saturation_level, saturation_threshold_count, subframe_max_count = detect_saturation(
+            image.data,
+            task.source_header,
+            saturation_threshold_percent,
+        )
+        saturated_pixel_count = int(np.count_nonzero(saturation_mask))
+        timings["saturation"] = time.perf_counter() - started
+
+    background_model: BackgroundModel | None = None
+    background_correction: np.ndarray | None = None
+    if background_mode != "none":
+        if source_valid is None:
+            raise RuntimeError(
+                f"Background normalization requires a validity mask for frame {task.index} ({task.source_name})"
+            )
+        started = time.perf_counter()
+        try:
+            background_model = fit_background_surface(image.data, source_valid, background_mode)
+        except ValueError as error:
+            raise RuntimeError(
+                f"Cannot estimate the background of usable frame {task.index} ({task.source_name}): {error}"
+            ) from error
+        timings["background_fit"] = time.perf_counter() - started
+        background_correction = -background_model.coefficients
+
+    return StackFrameAnalysis(
+        task=task,
+        prepared_unit_scale=prepared_unit_scale,
+        background_model=background_model,
+        background_correction=background_correction,
+        saturation_level=saturation_level,
+        saturation_threshold_count=saturation_threshold_count,
+        subframe_max_count=subframe_max_count,
+        saturated_pixel_count=saturated_pixel_count,
+        timings=timings,
+    )
+
+
+def process_stack_tile_frame(
+    task: StackFrameTask,
+    analysis: StackFrameAnalysis,
+    canvas: StackCanvas,
+    padding_policy: str,
+    background_mode: str,
+    saturation_enabled: bool,
+    target_mode: str = "moving",
+) -> StackTileFrameResult:
+    """Read one frame and produce only the requested output-row tile."""
+    timings = {
+        "fits_read": 0.0,
+        "background_apply": 0.0,
+        "star_resample": 0.0,
+        "metcalf_shift": 0.0,
+        "saturation": 0.0,
+    }
+    started = time.perf_counter()
+    image, prepared_unit_scale = restore_registered_units(read_fits(task.prepared), task.source_header)
+    if not math.isclose(prepared_unit_scale, analysis.prepared_unit_scale, rel_tol=0.0, abs_tol=1.0e-12):
+        raise RuntimeError(f"Registered-unit scale changed while rereading frame {task.index}")
+    source_valid = registered_valid_mask(image.data) if padding_policy == "valid" else None
+    resample_source_valid = None if source_valid is None or bool(np.all(source_valid)) else source_valid
+    timings["fits_read"] = time.perf_counter() - started
+
+    stack_data = image.data
+    if background_mode != "none":
+        if source_valid is None or analysis.background_correction is None:
+            raise RuntimeError(f"Background analysis is missing for usable frame {task.index}")
+        started = time.perf_counter()
+        stack_data = apply_background_model(
+            image.data,
+            source_valid,
+            analysis.background_correction,
+            background_mode,
+        )
+        timings["background_apply"] = time.perf_counter() - started
+
+    source_to_registration = matrix3(task.source_to_registration)
+    if canvas.is_identity_for(stack_data.shape[-2:]) and np.allclose(
+        source_to_registration, np.eye(3), rtol=0.0, atol=1.0e-10
+    ):
+        star_data = stack_data
+        star_mask = np.ones(canvas.shape, dtype=bool) if source_valid is None else source_valid
+    else:
+        started = time.perf_counter()
+        star_data, star_mask = resample_affine(
+            stack_data,
+            source_to_registration,
+            resample_source_valid,
+            canvas,
+        )
+        timings["star_resample"] = time.perf_counter() - started
+
+    if target_mode == "fixed":
+        metcalf_transform = source_to_registration
+        metcalf_data = star_data
+        metcalf_mask = star_mask
+    else:
+        started = time.perf_counter()
+        metcalf_transform = compose_output_transform(source_to_registration, task.dx, task.dy)
+        metcalf_data, metcalf_mask = resample_affine(
+            stack_data,
+            metcalf_transform,
+            resample_source_valid,
+            canvas,
+        )
+        timings["metcalf_shift"] = time.perf_counter() - started
+
+    star_saturation_mask: np.ndarray | None = None
+    metcalf_saturation_mask: np.ndarray | None = None
+    if (
+        saturation_enabled
+        and analysis.saturated_pixel_count > 0
+        and analysis.saturation_threshold_count is not None
+    ):
+        started = time.perf_counter()
+        over = np.isfinite(image.data) & (image.data > analysis.saturation_threshold_count)
+        frame_saturation_mask = np.any(over, axis=0) if image.data.ndim == 3 else over
+        star_saturation_mask = resample_boolean_affine(
+            frame_saturation_mask,
+            source_to_registration,
+            canvas,
+        ) & star_mask
+        if target_mode == "fixed":
+            metcalf_saturation_mask = star_saturation_mask
+        else:
+            metcalf_saturation_mask = resample_boolean_affine(
+                frame_saturation_mask,
+                metcalf_transform,
+                canvas,
+            ) & metcalf_mask
+        timings["saturation"] = time.perf_counter() - started
+
+    return StackTileFrameResult(
+        task=task,
+        star_data=star_data,
+        star_mask=star_mask,
+        metcalf_data=metcalf_data,
+        metcalf_mask=metcalf_mask,
+        star_saturation_mask=star_saturation_mask,
+        metcalf_saturation_mask=metcalf_saturation_mask,
+        timings=timings,
+    )
+
+
+def add_order_statistic_sample(
+    cube: np.ndarray,
+    index: int,
+    image: np.ndarray,
+    mask2d: np.ndarray,
+    exclude_zero_samples: bool,
+    sample_counts: np.ndarray | None = None,
+) -> None:
+    """Store one tile in a preallocated cube, encoding missing samples as NaN."""
+    destination = cube[index]
+    if destination.shape != image.shape:
+        raise ValueError(f"Order-statistic tile shape changed: {image.shape} != {destination.shape}")
+    destination.fill(np.nan)
+    valid = mask2d[np.newaxis, :, :] if image.ndim == 3 else mask2d
+    if exclude_zero_samples:
+        valid = valid & (image != 0.0)
+    np.copyto(destination, image, where=valid, casting="unsafe")
+    if sample_counts is not None:
+        if sample_counts.shape != image.shape:
+            raise ValueError(f"Order-statistic count shape changed: {sample_counts.shape} != {image.shape}")
+        np.add(sample_counts, valid, out=sample_counts, casting="unsafe")
+
+
+def finalize_median_cube(cube: np.ndarray, sample_counts: np.ndarray) -> np.ndarray:
+    """Sort a tile cube in place and select its per-pixel finite median."""
+    if sample_counts.shape != cube.shape[1:]:
+        raise ValueError(f"Median sample-count shape changed: {sample_counts.shape} != {cube.shape[1:]}")
+    cube.sort(axis=0)
+    ordered = cube.reshape(cube.shape[0], -1)
+    valid_counts = sample_counts.reshape(-1)
+    median = np.zeros(ordered.shape[1], dtype=np.float64)
+    for sample_count_value in np.unique(valid_counts):
+        sample_count = int(sample_count_value)
+        if sample_count == 0:
+            continue
+        pixels = valid_counts == sample_count
+        middle = sample_count // 2
+        if sample_count % 2:
+            median[pixels] = ordered[middle, pixels]
+        else:
+            median[pixels] = (ordered[middle - 1, pixels] + ordered[middle, pixels]) / 2.0
+    return median.reshape(cube.shape[1:])
+
+
+def finalize_rankfit_cube(
+    cube: np.ndarray,
+    sample_counts: np.ndarray,
+    fraction_percent: int,
+    degree: int = 5,
+) -> np.ndarray:
+    """Sort an in-memory tile cube in place and evaluate its central rank fit."""
+    if not 1 <= fraction_percent <= 100:
+        raise ValueError("rank-fit fraction must be an integer from 1 to 100")
+    if sample_counts.shape != cube.shape[1:]:
+        raise ValueError(f"Rank-fit sample-count shape changed: {sample_counts.shape} != {cube.shape[1:]}")
+    cube.sort(axis=0)
+    ordered = cube.reshape(cube.shape[0], -1)
+    valid_counts = sample_counts.reshape(-1)
+    fitted = np.zeros(ordered.shape[1], dtype=np.float64)
+    for sample_count_value in np.unique(valid_counts):
+        sample_count = int(sample_count_value)
+        if sample_count == 0:
+            continue
+        pixels = valid_counts == sample_count
+        selected_count = max(1, math.ceil(sample_count * fraction_percent / 100.0))
+        if selected_count < degree + 2:
+            middle = sample_count // 2
+            if sample_count % 2:
+                fitted[pixels] = ordered[middle, pixels]
+            else:
+                fitted[pixels] = (ordered[middle - 1, pixels] + ordered[middle, pixels]) / 2.0
+            continue
+        selected_start = (sample_count - selected_count) // 2
+        full_rank = np.arange(sample_count, dtype=np.float64) - (sample_count - 1) / 2.0
+        full_rank /= max(np.max(np.abs(full_rank)), 1.0)
+        rank = full_rank[selected_start : selected_start + selected_count]
+        design = np.polynomial.polynomial.polyvander(rank, degree)
+        center_weights = np.linalg.pinv(design)[0]
+        pixel_indices = np.flatnonzero(pixels)
+        # Boolean selection of every tile pixel at once can create another
+        # cube-sized temporary. Bound the mixed float32/float64 matrix-product
+        # workspace independently of the selected tile height.
+        bytes_per_pixel = selected_count * (
+            np.dtype(np.float32).itemsize + np.dtype(np.float64).itemsize
+        ) + np.dtype(np.float64).itemsize
+        pixel_chunk = max(1, RANKFIT_WORKSPACE_BYTES // max(bytes_per_pixel, 1))
+        for pixel_start in range(0, pixel_indices.size, pixel_chunk):
+            chunk_indices = pixel_indices[pixel_start : pixel_start + pixel_chunk]
+            selected = ordered[
+                selected_start : selected_start + selected_count,
+                chunk_indices,
+            ]
+            fitted[chunk_indices] = center_weights @ selected
+    return fitted.reshape(cube.shape[1:])
+
+
+def finalize_order_statistic_cube(
+    cube: np.ndarray,
+    sample_counts: np.ndarray,
+    method: str,
+    rankfit_fraction: int,
+) -> np.ndarray:
+    """Finalize one bounded cube, mutating it to avoid a second cube-sized allocation."""
+    if method == "median":
+        return finalize_median_cube(cube, sample_counts)
+    if method == "rankfit":
+        return finalize_rankfit_cube(cube, sample_counts, rankfit_fraction)
+    raise ValueError(f"Unsupported order-statistic stack method: {method}")
+
+
+def build_order_statistic_tile(
+    tasks: list[StackFrameTask],
+    analyses: dict[int, StackFrameAnalysis],
+    source_shape: tuple[int, ...],
+    canvas: StackCanvas,
+    method: str,
+    rankfit_fraction: int,
+    exclude_zero_samples: bool,
+    padding_policy: str,
+    background_mode: str,
+    saturation_enabled: bool,
+    target_mode: str,
+    worker_plan: StackWorkerPlan,
+    on_worker_fallback=None,
+    on_frame=None,
+) -> OrderStatisticTileResult:
+    """Build and combine one row tile without exposing partial results to the full stack."""
+    timings = {
+        "fits_read": 0.0,
+        "background_apply": 0.0,
+        "star_resample": 0.0,
+        "star_accumulation": 0.0,
+        "metcalf_shift": 0.0,
+        "metcalf_accumulation": 0.0,
+        "saturation": 0.0,
+        "order_statistic_combine": 0.0,
+    }
+    tile_image_shape = order_statistic_image_shape(source_shape, canvas)
+    star_cube = np.empty((len(tasks), *tile_image_shape), dtype=np.float32)
+    metcalf_cube = (
+        np.empty((len(tasks), *tile_image_shape), dtype=np.float32)
+        if target_mode == "moving"
+        else None
+    )
+    star_coverage = np.zeros(canvas.shape, dtype=np.uint32)
+    metcalf_coverage = np.zeros(canvas.shape, dtype=np.uint32) if target_mode == "moving" else None
+    star_sample_counts = np.zeros(tile_image_shape, dtype=np.uint32)
+    metcalf_sample_counts = (
+        np.zeros(tile_image_shape, dtype=np.uint32)
+        if target_mode == "moving"
+        else None
+    )
+    star_saturation_mask = np.zeros(canvas.shape, dtype=bool) if saturation_enabled else None
+    metcalf_saturation_mask = (
+        np.zeros(canvas.shape, dtype=bool)
+        if saturation_enabled and target_mode == "moving"
+        else None
+    )
+
+    worker = lambda task: process_stack_tile_frame(
+        task,
+        analyses[task.index],
+        canvas,
+        padding_policy,
+        background_mode,
+        saturation_enabled,
+        target_mode,
+    )
+    for cube_index, result in enumerate(
+        adaptive_ordered_bounded_map(worker, tasks, worker_plan, on_worker_fallback)
+    ):
+        if on_frame is not None:
+            on_frame(cube_index + 1, result.task)
+        for operation, elapsed in result.timings.items():
+            timings[operation] += elapsed
+        started = time.perf_counter()
+        add_order_statistic_sample(
+            star_cube,
+            cube_index,
+            result.star_data,
+            result.star_mask,
+            exclude_zero_samples,
+            star_sample_counts,
+        )
+        np.add(star_coverage, result.star_mask, out=star_coverage, casting="unsafe")
+        timings["star_accumulation"] += time.perf_counter() - started
+        if target_mode == "moving":
+            if metcalf_cube is None or metcalf_coverage is None:
+                raise RuntimeError("Metcalf tile cube was not initialized")
+            if metcalf_sample_counts is None:
+                raise RuntimeError("Metcalf tile sample counts were not initialized")
+            started = time.perf_counter()
+            add_order_statistic_sample(
+                metcalf_cube,
+                cube_index,
+                result.metcalf_data,
+                result.metcalf_mask,
+                exclude_zero_samples,
+                metcalf_sample_counts,
+            )
+            np.add(metcalf_coverage, result.metcalf_mask, out=metcalf_coverage, casting="unsafe")
+            timings["metcalf_accumulation"] += time.perf_counter() - started
+        if star_saturation_mask is not None and result.star_saturation_mask is not None:
+            star_saturation_mask |= result.star_saturation_mask
+        if metcalf_saturation_mask is not None and result.metcalf_saturation_mask is not None:
+            metcalf_saturation_mask |= result.metcalf_saturation_mask
+
+    started = time.perf_counter()
+    star_data = finalize_order_statistic_cube(star_cube, star_sample_counts, method, rankfit_fraction)
+    metcalf_data = (
+        finalize_order_statistic_cube(metcalf_cube, metcalf_sample_counts, method, rankfit_fraction)
+        if metcalf_cube is not None and metcalf_sample_counts is not None
+        else None
+    )
+    timings["order_statistic_combine"] += time.perf_counter() - started
+    return OrderStatisticTileResult(
+        star_data=star_data,
+        star_coverage=star_coverage,
+        metcalf_data=metcalf_data,
+        metcalf_coverage=metcalf_coverage,
+        star_saturation_mask=star_saturation_mask,
+        metcalf_saturation_mask=metcalf_saturation_mask,
+        timings=timings,
+    )
+
+
+def stack_order_statistic_rows(
+    tasks: list[StackFrameTask],
+    analyses: dict[int, StackFrameAnalysis],
+    source_shape: tuple[int, ...],
+    canvas: StackCanvas,
+    method: str,
+    rankfit_fraction: int,
+    exclude_zero_samples: bool,
+    padding_policy: str,
+    background_mode: str,
+    saturation_enabled: bool,
+    target_mode: str,
+    worker_plan: StackWorkerPlan,
+    tile_plan: MedianTilePlan,
+    on_worker_fallback=None,
+    on_tile_fallback=None,
+    on_tile_started=None,
+    on_frame=None,
+) -> OrderStatisticStackResult:
+    """Assemble a full median/rank-fit product from bounded full-width row cubes."""
+    image_shape = order_statistic_image_shape(source_shape, canvas)
+    star_data = np.zeros(image_shape, dtype=np.float64)
+    metcalf_data = np.zeros(image_shape, dtype=np.float64) if target_mode == "moving" else None
+    star_coverage = np.zeros(canvas.shape, dtype=np.uint32)
+    metcalf_coverage = np.zeros(canvas.shape, dtype=np.uint32) if target_mode == "moving" else None
+    star_saturation_mask = np.zeros(canvas.shape, dtype=bool) if saturation_enabled else None
+    metcalf_saturation_mask = (
+        np.zeros(canvas.shape, dtype=bool)
+        if saturation_enabled and target_mode == "moving"
+        else None
+    )
+    timings: dict[str, float] = {
+        "fits_read": 0.0,
+        "background_apply": 0.0,
+        "star_resample": 0.0,
+        "star_accumulation": 0.0,
+        "metcalf_shift": 0.0,
+        "metcalf_accumulation": 0.0,
+        "saturation": 0.0,
+        "order_statistic_combine": 0.0,
+    }
+    row_start = 0
+    tile_index = 0
+    while row_start < canvas.shape[0]:
+        row_count = min(tile_plan.current_rows, canvas.shape[0] - row_start)
+        while True:
+            row_end = row_start + row_count
+            tile_canvas = StackCanvas(
+                shape=(row_count, canvas.shape[1]),
+                origin_x=canvas.origin_x,
+                origin_y=canvas.origin_y + row_start,
+            )
+            if on_tile_started is not None:
+                on_tile_started(tile_index + 1, row_start, row_end, row_count)
+            try:
+                tile = build_order_statistic_tile(
+                    tasks,
+                    analyses,
+                    source_shape,
+                    tile_canvas,
+                    method,
+                    rankfit_fraction,
+                    exclude_zero_samples,
+                    padding_policy,
+                    background_mode,
+                    saturation_enabled,
+                    target_mode,
+                    worker_plan,
+                    on_worker_fallback,
+                    (
+                        None
+                        if on_frame is None
+                        else lambda frame_number, task: on_frame(
+                            tile_index + 1,
+                            row_start,
+                            row_end,
+                            frame_number,
+                            len(tasks),
+                            task,
+                        )
+                    ),
+                )
+                break
+            except MemoryError as error:
+                error_text = str(error) or error.__class__.__name__
+                error.__traceback__ = None
+                if row_count <= 1:
+                    raise MemoryError(
+                        "An order-statistic cube allocation failed at one output row. Close other applications, "
+                        "reduce the image width/frame count, or use a machine with more available RAM."
+                    ) from error
+                next_rows = max(1, row_count // 2)
+                event = {
+                    "row_start": row_start,
+                    "from_rows": row_count,
+                    "to_rows": next_rows,
+                    "available_bytes_after_failure": available_ram_bytes(),
+                    "error": error_text,
+                }
+                tile_plan.fallback_events.append(event)
+                tile_plan.current_rows = next_rows
+                row_count = min(next_rows, canvas.shape[0] - row_start)
+                gc.collect()
+                if on_tile_fallback is not None:
+                    on_tile_fallback(event)
+
+        output_slice = (
+            (slice(row_start, row_end), slice(None))
+            if len(image_shape) == 2
+            else (slice(None), slice(row_start, row_end), slice(None))
+        )
+        star_data[output_slice] = tile.star_data
+        star_coverage[row_start:row_end] = tile.star_coverage
+        if target_mode == "moving":
+            if metcalf_data is None or metcalf_coverage is None:
+                raise RuntimeError("Metcalf order-statistic output was not initialized")
+            if tile.metcalf_data is None or tile.metcalf_coverage is None:
+                raise RuntimeError("Metcalf order-statistic tile is missing")
+            metcalf_data[output_slice] = tile.metcalf_data
+            metcalf_coverage[row_start:row_end] = tile.metcalf_coverage
+        if star_saturation_mask is not None and tile.star_saturation_mask is not None:
+            star_saturation_mask[row_start:row_end] = tile.star_saturation_mask
+        if metcalf_saturation_mask is not None and tile.metcalf_saturation_mask is not None:
+            metcalf_saturation_mask[row_start:row_end] = tile.metcalf_saturation_mask
+        for operation, elapsed in tile.timings.items():
+            timings[operation] += elapsed
+        row_start = row_end
+        tile_index += 1
+
+    return OrderStatisticStackResult(
+        star_data=star_data,
+        star_coverage=star_coverage,
+        metcalf_data=metcalf_data,
+        metcalf_coverage=metcalf_coverage,
+        star_saturation_mask=star_saturation_mask,
+        metcalf_saturation_mask=metcalf_saturation_mask,
+        timings=timings,
+    )
+
+
 class MedianAccumulator:
-    """Disk-backed per-pixel median accumulator for large Seestar sequences."""
+    """Legacy disk-backed accumulator retained as a numerical regression oracle."""
 
     def __init__(
         self,
@@ -3587,6 +4338,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--median-tile-rows",
+        type=parse_median_tile_rows,
+        default="auto",
+        metavar="auto|N",
+        help=(
+            "Full-width output rows held in each median/rank-fit working cube. "
+            "auto uses at most about half of currently available RAM (default)."
+        ),
+    )
+    parser.add_argument(
         "--rankfit-fraction",
         type=int,
         default=50,
@@ -4137,8 +4898,7 @@ def main() -> int:
     star_count_image: np.ndarray | None = None
     metcalf_coverage: np.ndarray | None = None
     star_coverage: np.ndarray | None = None
-    median_stack: MedianAccumulator | None = None
-    median_star_stack: MedianAccumulator | None = None
+    median_tile_plan: MedianTilePlan | None = None
     frame_rows: list[dict[str, object]] = []
     used_times: list[datetime] = []
     used_exposures: list[float | None] = []
@@ -4160,6 +4920,8 @@ def main() -> int:
         "metcalf_shift": 0.0,
         "metcalf_accumulation": 0.0,
         "saturation": 0.0,
+        "order_statistic_analysis": 0.0,
+        "order_statistic_combine": 0.0,
         "total_stacking_wall": 0.0,
     }
     stack_tasks: list[StackFrameTask] = []
@@ -4287,25 +5049,10 @@ def main() -> int:
             flush=True,
         )
 
-    worker = lambda task: process_stack_frame(
-        task,
-        stack_canvas,
-        args.padding_policy,
-        args.background_normalization,
-        saturation_enabled,
-        args.saturation_threshold_percent,
-        args.target_mode,
-    )
-    for result in adaptive_ordered_bounded_map(worker, stack_tasks, worker_plan, report_worker_fallback):
+    def record_frame_analysis(result: StackFrameResult | StackFrameAnalysis) -> bool:
+        nonlocal used, saturated_frame_count, saturation_level_unavailable_frames
         task = result.task
         i = task.index
-        if args.verbose:
-            print(
-                f"[stack:{args.stack_method}] frame {i}/{len(copied)}: {task.source_name}",
-                flush=True,
-            )
-        for operation, elapsed in result.timings.items():
-            stack_timing_seconds[operation] += elapsed
         background_model = result.background_model
         background_correction = result.background_correction
         if background_model is not None:
@@ -4333,13 +5080,6 @@ def main() -> int:
                     )
             elif frame_saturation_warning:
                 saturated_frame_count += 1
-                if star_saturation_mask is None or result.star_saturation_mask is None:
-                    raise RuntimeError("Saturation warning masks were not initialized")
-                star_saturation_mask |= result.star_saturation_mask
-                if args.target_mode == "moving":
-                    if metcalf_saturation_mask is None or result.metcalf_saturation_mask is None:
-                        raise RuntimeError("Metcalf saturation warning masks were not initialized")
-                    metcalf_saturation_mask |= result.metcalf_saturation_mask
                 if args.verbose:
                     print(
                         f"[saturation] {task.source_name}: max={result.subframe_max_count:.3f}, "
@@ -4347,61 +5087,6 @@ def main() -> int:
                         flush=True,
                     )
 
-        if args.stack_method == "mean":
-            started = time.perf_counter()
-            star_sum_image, star_count_image = add_to_average(
-                star_sum_image,
-                star_count_image,
-                result.star_data,
-                result.star_mask,
-            )
-            stack_timing_seconds["star_accumulation"] += time.perf_counter() - started
-            if args.target_mode == "moving":
-                started = time.perf_counter()
-                sum_image, count_image = add_to_average(
-                    sum_image,
-                    count_image,
-                    result.metcalf_data,
-                    result.metcalf_mask,
-                )
-                stack_timing_seconds["metcalf_accumulation"] += time.perf_counter() - started
-        else:
-            if median_star_stack is None:
-                median_star_stack = MedianAccumulator(
-                    work_dir / f"{args.stack_method}_star_frames.npy",
-                    len(files),
-                    result.star_data.shape,
-                    exclude_zero_samples=(
-                        args.zero_sample_policy == "exclude" and args.background_normalization == "none"
-                    ),
-                )
-            if args.target_mode == "moving" and median_stack is None:
-                median_stack = MedianAccumulator(
-                    work_dir / f"{args.stack_method}_metcalf_frames.npy",
-                    len(files),
-                    result.metcalf_data.shape,
-                    exclude_zero_samples=(
-                        args.zero_sample_policy == "exclude" and args.background_normalization == "none"
-                    ),
-                )
-            if median_star_stack is None:
-                raise RuntimeError("Star median accumulator was not initialized")
-            started = time.perf_counter()
-            median_star_stack.add(result.star_data, result.star_mask)
-            stack_timing_seconds["star_accumulation"] += time.perf_counter() - started
-            if args.target_mode == "moving":
-                if median_stack is None:
-                    raise RuntimeError("Metcalf median accumulator was not initialized")
-                started = time.perf_counter()
-                median_stack.add(result.metcalf_data, result.metcalf_mask)
-                stack_timing_seconds["metcalf_accumulation"] += time.perf_counter() - started
-            if star_coverage is None:
-                star_coverage = np.zeros(result.star_mask.shape, dtype=np.uint32)
-            if args.target_mode == "moving" and metcalf_coverage is None:
-                metcalf_coverage = np.zeros(result.metcalf_mask.shape, dtype=np.uint32)
-            if metcalf_coverage is not None:
-                np.add(metcalf_coverage, result.metcalf_mask, out=metcalf_coverage, casting="unsafe")
-            np.add(star_coverage, result.star_mask, out=star_coverage, casting="unsafe")
         used += 1
         used_times.append(task.frame_time)
         used_exposures.append(exposure_seconds_from_header(task.source_header))
@@ -4444,8 +5129,160 @@ def main() -> int:
                 "saturated_pixel_count": result.saturated_pixel_count if saturation_enabled else None,
             }
         )
+        return frame_saturation_warning
+
+    if args.stack_method == "mean":
+        worker = lambda task: process_stack_frame(
+            task,
+            stack_canvas,
+            args.padding_policy,
+            args.background_normalization,
+            saturation_enabled,
+            args.saturation_threshold_percent,
+            args.target_mode,
+        )
+        for result in adaptive_ordered_bounded_map(worker, stack_tasks, worker_plan, report_worker_fallback):
+            task = result.task
+            if args.verbose:
+                print(
+                    f"[stack:{args.stack_method}] frame {task.index}/{len(copied)}: {task.source_name}",
+                    flush=True,
+                )
+            for operation, elapsed in result.timings.items():
+                stack_timing_seconds[operation] += elapsed
+            frame_saturation_warning = record_frame_analysis(result)
+            if frame_saturation_warning:
+                if star_saturation_mask is None or result.star_saturation_mask is None:
+                    raise RuntimeError("Saturation warning masks were not initialized")
+                star_saturation_mask |= result.star_saturation_mask
+                if args.target_mode == "moving":
+                    if metcalf_saturation_mask is None or result.metcalf_saturation_mask is None:
+                        raise RuntimeError("Metcalf saturation warning masks were not initialized")
+                    metcalf_saturation_mask |= result.metcalf_saturation_mask
+            started = time.perf_counter()
+            star_sum_image, star_count_image = add_to_average(
+                star_sum_image,
+                star_count_image,
+                result.star_data,
+                result.star_mask,
+            )
+            stack_timing_seconds["star_accumulation"] += time.perf_counter() - started
+            if args.target_mode == "moving":
+                started = time.perf_counter()
+                sum_image, count_image = add_to_average(
+                    sum_image,
+                    count_image,
+                    result.metcalf_data,
+                    result.metcalf_mask,
+                )
+                stack_timing_seconds["metcalf_accumulation"] += time.perf_counter() - started
+            if not args.no_cleanup:
+                removed_intermediate_images.extend(remove_intermediate_paths([task.prepared]))
+    else:
+        analyses_by_index: dict[int, StackFrameAnalysis] = {}
+        analysis_wall_started = time.perf_counter()
+        analysis_worker = lambda task: analyze_order_statistic_frame(
+            task,
+            args.padding_policy,
+            args.background_normalization,
+            saturation_enabled,
+            args.saturation_threshold_percent,
+        )
+        for analysis in adaptive_ordered_bounded_map(
+            analysis_worker,
+            stack_tasks,
+            worker_plan,
+            report_worker_fallback,
+        ):
+            task = analysis.task
+            if args.verbose:
+                print(
+                    f"[analyze:{args.stack_method}] frame {task.index}/{len(copied)}: {task.source_name}",
+                    flush=True,
+                )
+            for operation, elapsed in analysis.timings.items():
+                stack_timing_seconds[operation] += elapsed
+            analyses_by_index[task.index] = analysis
+            record_frame_analysis(analysis)
+        stack_timing_seconds["order_statistic_analysis"] = time.perf_counter() - analysis_wall_started
+
+        tile_image_shape = order_statistic_image_shape(tuple(reference.data.shape), stack_canvas)
+        median_tile_plan = select_median_tile_plan(
+            args.median_tile_rows,
+            len(stack_tasks),
+            tile_image_shape,
+            args.target_mode,
+        )
+        print(describe_median_tile_plan(median_tile_plan), flush=True)
+
+        def report_median_tile_fallback(event: dict[str, object]) -> None:
+            print(
+                "[median-tiles:fallback] Memory allocation failed for uncommitted rows "
+                f"{event['row_start'] + 1} onward with {event['from_rows']} rows. "
+                f"The tile cube was discarded; retrying with {event['to_rows']} rows. "
+                f"Available RAM now={format_memory_size(event['available_bytes_after_failure'])}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        def report_tile_started(tile_number: int, row_start: int, row_end: int, row_count: int) -> None:
+            if args.verbose:
+                print(
+                    f"[stack:{args.stack_method}] tile {tile_number}: rows "
+                    f"{row_start + 1}-{row_end}/{stack_canvas.shape[0]} ({row_count} rows)",
+                    flush=True,
+                )
+
+        def report_tile_frame(
+            tile_number: int,
+            row_start: int,
+            row_end: int,
+            frame_number: int,
+            frame_count: int,
+            task: StackFrameTask,
+        ) -> None:
+            if args.verbose:
+                print(
+                    f"[stack:{args.stack_method}] tile {tile_number} rows {row_start + 1}-{row_end}: "
+                    f"frame {frame_number}/{frame_count} ({task.source_name})",
+                    flush=True,
+                )
+
+        tiled = stack_order_statistic_rows(
+            stack_tasks,
+            analyses_by_index,
+            tuple(reference.data.shape),
+            stack_canvas,
+            args.stack_method,
+            args.rankfit_fraction,
+            args.zero_sample_policy == "exclude" and args.background_normalization == "none",
+            args.padding_policy,
+            args.background_normalization,
+            saturation_enabled,
+            args.target_mode,
+            worker_plan,
+            median_tile_plan,
+            report_worker_fallback,
+            report_median_tile_fallback,
+            report_tile_started,
+            report_tile_frame,
+        )
+        star_stack = tiled.star_data
+        star_coverage = tiled.star_coverage
+        star_saturation_mask = tiled.star_saturation_mask
+        if args.target_mode == "moving":
+            if tiled.metcalf_data is None or tiled.metcalf_coverage is None:
+                raise RuntimeError("Metcalf order-statistic stack is missing")
+            stack = tiled.metcalf_data
+            metcalf_coverage = tiled.metcalf_coverage
+            metcalf_saturation_mask = tiled.metcalf_saturation_mask
+        else:
+            stack = star_stack
+            metcalf_coverage = star_coverage
+        for operation, elapsed in tiled.timings.items():
+            stack_timing_seconds[operation] += elapsed
         if not args.no_cleanup:
-            removed_intermediate_images.extend(remove_intermediate_paths([task.prepared]))
+            removed_intermediate_images.extend(remove_intermediate_paths([task.prepared for task in stack_tasks]))
 
     frame_rows.sort(key=lambda row: int(row["index"]))
 
@@ -4478,36 +5315,6 @@ def main() -> int:
         if args.target_mode == "moving":
             stack = finalize_average(sum_image, count_image)
             metcalf_coverage = count_image
-        else:
-            stack = star_stack
-            metcalf_coverage = star_coverage
-    elif args.stack_method == "median":
-        if median_star_stack is None:
-            raise RuntimeError("Star median accumulator was not initialized")
-        star_stack = median_star_stack.finalize()
-        if median_star_stack.close(remove=not args.no_cleanup):
-            median_temp_removed.append(str(median_star_stack.path))
-        if args.target_mode == "moving":
-            if median_stack is None:
-                raise RuntimeError("Metcalf median accumulator was not initialized")
-            stack = median_stack.finalize()
-            if median_stack.close(remove=not args.no_cleanup):
-                median_temp_removed.append(str(median_stack.path))
-        else:
-            stack = star_stack
-            metcalf_coverage = star_coverage
-    else:
-        if median_star_stack is None:
-            raise RuntimeError("Star rank-fit accumulator was not initialized")
-        star_stack = median_star_stack.finalize_rankfit(args.rankfit_fraction)
-        if median_star_stack.close(remove=not args.no_cleanup):
-            median_temp_removed.append(str(median_star_stack.path))
-        if args.target_mode == "moving":
-            if median_stack is None:
-                raise RuntimeError("Metcalf rank-fit accumulator was not initialized")
-            stack = median_stack.finalize_rankfit(args.rankfit_fraction)
-            if median_stack.close(remove=not args.no_cleanup):
-                median_temp_removed.append(str(median_stack.path))
         else:
             stack = star_stack
             metcalf_coverage = star_coverage
@@ -5101,6 +5908,29 @@ def main() -> int:
             "canvas_shape": list(worker_plan.estimate.canvas_shape),
             "fallback_events": worker_plan.fallback_events,
         },
+        "median_tile_rows_requested": args.median_tile_rows if args.stack_method != "mean" else None,
+        "median_tile_plan": (
+            {
+                "initial_rows": median_tile_plan.initial_rows,
+                "final_rows": median_tile_plan.current_rows,
+                "available_ram_bytes": median_tile_plan.available_bytes,
+                "cube_budget_bytes": median_tile_plan.budget_bytes,
+                "bytes_per_row": median_tile_plan.bytes_per_row,
+                "initial_cube_bytes": median_tile_plan.cube_bytes(median_tile_plan.initial_rows),
+                "final_cube_bytes": median_tile_plan.cube_bytes(median_tile_plan.current_rows),
+                "initial_tile_count": math.ceil(median_tile_plan.height / median_tile_plan.initial_rows),
+                "final_tile_count": math.ceil(median_tile_plan.height / median_tile_plan.current_rows),
+                "frame_count": median_tile_plan.frame_count,
+                "channels": median_tile_plan.channels,
+                "width": median_tile_plan.width,
+                "height": median_tile_plan.height,
+                "simultaneous_cubes": median_tile_plan.cube_count,
+                "reason": median_tile_plan.reason,
+                "fallback_events": median_tile_plan.fallback_events,
+            }
+            if median_tile_plan is not None
+            else None
+        ),
         "stack_canvas": {
             "policy": "reference-footprint",
             "shape": [canvas_height, canvas_width],
@@ -5108,7 +5938,10 @@ def main() -> int:
             "origin_y": stack_canvas.origin_y,
         },
         "stack_timing_seconds": stack_timing_seconds,
-        "stack_timing_note": "per-operation worker CPU sums; total_stacking_wall is elapsed wall time",
+        "stack_timing_note": (
+            "per-operation worker CPU sums; order_statistic_analysis and total_stacking_wall are elapsed wall time; "
+            "median/rank-fit FITS reads and background application include repeated row-tile passes"
+        ),
         "pipeline_timing_seconds": pipeline_timing_seconds,
         "temporary_storage": {
             "scope": str(registration_dir),

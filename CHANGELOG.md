@@ -4,6 +4,14 @@
 
 形式は[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)を参考にしています。
 
+## Unreleased
+
+### 改善
+
+- median/rankfitを全幅の行タイル単位で処理するようにし、全採用フレーム×全画面の巨大な一時キューブを不要にしました。背景近似とフレーム評価を先に確定し、各タイルだけをRAM上で結合します。
+- median/rankfitのproduction経路ではcubeをディスクへ書き出さず、RAM上の行タイルだけで処理します。
+- `--median-tile-rows auto|N`を追加しました。`N`は分割数ではなく、1回に処理する縦方向のピクセル行数です。既定の`auto`は星固定・Metcalf固定の作業キューブ合計をavailable RAMのおよそ半分以下に収め、選択結果を画面とsummary JSONへ記録します。確保失敗時は未確定タイルを破棄し、行数を半分にして再試行します。
+
 ## v0.9.5 - 2026-08-31
 
 ### 追加

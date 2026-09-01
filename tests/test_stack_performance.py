@@ -191,6 +191,16 @@ class SliceTranslationRegressionTests(unittest.TestCase):
         self.assertFalse(np.any(valid))
         self.assertFalse(np.any(actual))
 
+    def test_integer_identity_row_tile_keeps_source_bottom_and_right_edges(self):
+        canvas = stacker.StackCanvas(shape=(3, self.mono.shape[1]), origin_x=0.0, origin_y=6.0)
+        actual, valid = stacker.shift_plane(self.mono, 0.0, 0.0, self.valid, canvas)
+
+        expected_valid = self.valid[6:9]
+        expected = np.where(expected_valid, self.mono[6:9], 0.0)
+        np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_array_equal(valid, expected_valid)
+        self.assertEqual(float(actual[-1, -1]), float(self.mono[-1, -1]))
+
 
 class MatrixOnlyResamplingTests(unittest.TestCase):
     def test_siril_matrix_conversion_accounts_for_row_direction_and_different_canvas_height(self):
@@ -545,6 +555,331 @@ class BoundedFrameProcessingTests(unittest.TestCase):
             self.assertIs(fixed_result.metcalf_data, fixed_result.star_data)
             self.assertIs(fixed_result.metcalf_mask, fixed_result.star_mask)
             self.assertEqual(fixed_result.timings["metcalf_shift"], 0.0)
+
+
+class MedianRowTilingTests(unittest.TestCase):
+    def test_in_memory_median_and_rankfit_match_disk_backed_accumulator(self):
+        rng = np.random.default_rng(20260901)
+        images = rng.normal(100.0, 8.0, size=(13, 3, 4, 5)).astype(np.float32)
+        masks = rng.random((13, 4, 5)) > 0.2
+        images[0, :, 1, 2] = 0.0
+        with tempfile.TemporaryDirectory() as temporary:
+            for method in ("median", "rankfit"):
+                with self.subTest(method=method):
+                    accumulator = stacker.MedianAccumulator(
+                        Path(temporary) / f"{method}.npy",
+                        len(images),
+                        images.shape[1:],
+                        True,
+                    )
+                    cube = np.empty_like(images)
+                    sample_counts = np.zeros(images.shape[1:], dtype=np.uint32)
+                    for index, (image, mask) in enumerate(zip(images, masks)):
+                        accumulator.add(image, mask)
+                        stacker.add_order_statistic_sample(
+                            cube,
+                            index,
+                            image,
+                            mask,
+                            True,
+                            sample_counts,
+                        )
+                    expected = (
+                        accumulator.finalize(row_chunk=2)
+                        if method == "median"
+                        else accumulator.finalize_rankfit(50, row_chunk=2)
+                    )
+                    actual = stacker.finalize_order_statistic_cube(cube, sample_counts, method, 50)
+                    accumulator.close(remove=True)
+                    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1.0e-6)
+
+    def test_auto_tile_plan_limits_cubes_to_half_of_available_ram(self):
+        available = 2 * stacker.GIBIBYTE
+        plan = stacker.select_median_tile_plan(
+            "auto",
+            frame_count=1000,
+            image_shape=(3, 1080, 1920),
+            target_mode="moving",
+            available_bytes=available,
+        )
+
+        self.assertLessEqual(plan.cube_bytes(plan.initial_rows), available // 2)
+        self.assertEqual(plan.cube_count, 2)
+        self.assertGreaterEqual(plan.initial_rows, 1)
+
+        explicit = stacker.select_median_tile_plan(
+            37,
+            frame_count=1000,
+            image_shape=(3, 1080, 1920),
+            target_mode="moving",
+            available_bytes=128 * stacker.MEBIBYTE,
+        )
+        self.assertEqual(explicit.initial_rows, 37)
+        self.assertEqual(explicit.reason, "explicit user row count")
+
+    def test_rankfit_matrix_workspace_is_bounded(self):
+        selected_count = 1000
+        bytes_per_pixel = selected_count * (
+            np.dtype(np.float32).itemsize + np.dtype(np.float64).itemsize
+        ) + np.dtype(np.float64).itemsize
+        pixel_chunk = max(1, stacker.RANKFIT_WORKSPACE_BYTES // bytes_per_pixel)
+
+        self.assertLessEqual(pixel_chunk * bytes_per_pixel, stacker.RANKFIT_WORKSPACE_BYTES)
+        self.assertGreaterEqual(pixel_chunk, 1)
+
+    def test_unknown_ram_uses_conservative_rows(self):
+        # Supplying None asks the function to query the OS, so patch the query
+        # to exercise the genuinely unknown-RAM branch.
+        with patch.object(stacker, "available_ram_bytes", return_value=None):
+            plan = stacker.select_median_tile_plan(
+                "auto",
+                frame_count=10,
+                image_shape=(3, 100, 120),
+                target_mode="fixed",
+            )
+        self.assertEqual(plan.initial_rows, stacker.MEDIAN_TILE_UNKNOWN_RAM_ROWS)
+
+    def test_tile_allocation_failure_retries_without_committing_partial_output(self):
+        canvas = stacker.StackCanvas.reference_footprint((4, 3))
+        task = stacker.StackFrameTask(
+            index=1,
+            source_name="one.fit",
+            prepared=Path("one.fit"),
+            source_header={},
+            source_to_registration=tuple(np.eye(3).ravel()),
+            frame_time=datetime(2026, 8, 31, tzinfo=timezone.utc),
+            target=stacker.TargetPoint(datetime(2026, 8, 31, tzinfo=timezone.utc), 0.0, 0.0),
+            target_x=1.0,
+            target_y=1.0,
+            dx=0.0,
+            dy=0.0,
+        )
+        worker_estimate = stacker.estimate_stack_worker_memory((4, 3), canvas, "none", False)
+        worker_plan = stacker.select_stack_worker_plan(1, worker_estimate, stacker.GIBIBYTE)
+        tile_plan = stacker.select_median_tile_plan(
+            4,
+            frame_count=1,
+            image_shape=(4, 3),
+            target_mode="fixed",
+            available_bytes=stacker.GIBIBYTE,
+        )
+        attempts = []
+
+        def fake_tile(_tasks, _analyses, _shape, tile_canvas, *_args, **_kwargs):
+            attempts.append((tile_canvas.origin_y, tile_canvas.shape[0]))
+            if tile_canvas.shape[0] > 2:
+                raise MemoryError("injected cube failure")
+            value = tile_canvas.origin_y + 1.0
+            return stacker.OrderStatisticTileResult(
+                star_data=np.full(tile_canvas.shape, value),
+                star_coverage=np.ones(tile_canvas.shape, dtype=np.uint32),
+                metcalf_data=None,
+                metcalf_coverage=None,
+                star_saturation_mask=None,
+                metcalf_saturation_mask=None,
+                timings={},
+            )
+
+        with patch.object(stacker, "build_order_statistic_tile", side_effect=fake_tile):
+            result = stacker.stack_order_statistic_rows(
+                [task],
+                {},
+                (4, 3),
+                canvas,
+                "median",
+                50,
+                True,
+                "valid",
+                "none",
+                False,
+                "fixed",
+                worker_plan,
+                tile_plan,
+            )
+
+        self.assertEqual(attempts, [(0.0, 4), (0.0, 2), (2.0, 2)])
+        np.testing.assert_array_equal(result.star_data[:2], np.ones((2, 3)))
+        np.testing.assert_array_equal(result.star_data[2:], np.full((2, 3), 3.0))
+        self.assertEqual(tile_plan.current_rows, 2)
+        self.assertEqual(len(tile_plan.fallback_events), 1)
+
+    def test_row_tiling_matches_full_frame_disk_backed_median(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_header = {
+                "BITPIX": -32,
+                "DATE-OBS": "2026-08-31T00:00:00Z",
+                "SATURATE": 1000.0,
+            }
+            tasks = []
+            for index, (dx, dy, tx, ty) in enumerate(
+                ((0.0, 0.0, 0.0, 0.0), (0.6, -0.4, 0.25, 0.15), (-0.35, 0.7, -0.2, 0.3)),
+                start=1,
+            ):
+                yy, xx = np.indices((120, 160), dtype=np.float32)
+                mono = 200.0 + 0.7 * xx + 1.3 * yy + index
+                data = np.stack((mono, mono * 1.1 + 2.0, mono * 0.9 - 3.0)).astype(np.float32)
+                data[:, 0, :] = 0.0
+                data[1, 50 + index, 70] = 950.0
+                path = root / f"registered_{index:02d}.fit"
+                stacker.write_fits_float32(path, data, source_header, {})
+                angle = math.radians(0.25 * index)
+                matrix = np.asarray(
+                    (
+                        (math.cos(angle), -math.sin(angle), tx),
+                        (math.sin(angle), math.cos(angle), ty),
+                        (0.0, 0.0, 1.0),
+                    )
+                )
+                when = datetime(2026, 8, 31, 0, index, tzinfo=timezone.utc)
+                tasks.append(
+                    stacker.StackFrameTask(
+                        index=index,
+                        source_name=path.name,
+                        prepared=path,
+                        source_header=source_header,
+                        source_to_registration=tuple(matrix.ravel()),
+                        frame_time=when,
+                        target=stacker.TargetPoint(when, 10.0, 20.0),
+                        target_x=80.0,
+                        target_y=60.0,
+                        dx=dx,
+                        dy=dy,
+                    )
+                )
+
+            canvas = stacker.StackCanvas.reference_footprint((120, 160))
+            full_results = [
+                stacker.process_stack_frame(task, canvas, "valid", "offset", True, 90.0, "moving")
+                for task in tasks
+            ]
+            star_accumulator = stacker.MedianAccumulator(root / "star.npy", len(tasks), (3, 120, 160), False)
+            metcalf_accumulator = stacker.MedianAccumulator(
+                root / "metcalf.npy", len(tasks), (3, 120, 160), False
+            )
+            expected_star_coverage = np.zeros(canvas.shape, dtype=np.uint32)
+            expected_metcalf_coverage = np.zeros(canvas.shape, dtype=np.uint32)
+            expected_star_saturation = np.zeros(canvas.shape, dtype=bool)
+            expected_metcalf_saturation = np.zeros(canvas.shape, dtype=bool)
+            for result in full_results:
+                star_accumulator.add(result.star_data, result.star_mask)
+                metcalf_accumulator.add(result.metcalf_data, result.metcalf_mask)
+                expected_star_coverage += result.star_mask
+                expected_metcalf_coverage += result.metcalf_mask
+                if result.star_saturation_mask is not None:
+                    expected_star_saturation |= result.star_saturation_mask
+                if result.metcalf_saturation_mask is not None:
+                    expected_metcalf_saturation |= result.metcalf_saturation_mask
+            expected_star = star_accumulator.finalize(row_chunk=24)
+            expected_metcalf = metcalf_accumulator.finalize(row_chunk=24)
+            star_accumulator.close(remove=True)
+            metcalf_accumulator.close(remove=True)
+
+            analyses = {
+                task.index: stacker.analyze_order_statistic_frame(task, "valid", "offset", True, 90.0)
+                for task in tasks
+            }
+            worker_estimate = stacker.estimate_stack_worker_memory((3, 120, 160), canvas, "offset", True)
+            worker_plan = stacker.select_stack_worker_plan(1, worker_estimate, stacker.GIBIBYTE)
+            tile_plan = stacker.select_median_tile_plan(
+                24,
+                len(tasks),
+                (3, 120, 160),
+                "moving",
+                stacker.GIBIBYTE,
+            )
+            actual = stacker.stack_order_statistic_rows(
+                tasks,
+                analyses,
+                (3, 120, 160),
+                canvas,
+                "median",
+                50,
+                False,
+                "valid",
+                "offset",
+                True,
+                "moving",
+                worker_plan,
+                tile_plan,
+            )
+
+            np.testing.assert_allclose(actual.star_data, expected_star, rtol=0.0, atol=1.0e-6)
+            np.testing.assert_allclose(actual.metcalf_data, expected_metcalf, rtol=0.0, atol=1.0e-6)
+            np.testing.assert_array_equal(actual.star_coverage, expected_star_coverage)
+            np.testing.assert_array_equal(actual.metcalf_coverage, expected_metcalf_coverage)
+            np.testing.assert_array_equal(actual.star_saturation_mask, expected_star_saturation)
+            np.testing.assert_array_equal(actual.metcalf_saturation_mask, expected_metcalf_saturation)
+
+            rankfit_star_accumulator = stacker.MedianAccumulator(
+                root / "rankfit_star.npy", len(tasks), (3, 120, 160), False
+            )
+            rankfit_metcalf_accumulator = stacker.MedianAccumulator(
+                root / "rankfit_metcalf.npy", len(tasks), (3, 120, 160), False
+            )
+            for result in full_results:
+                rankfit_star_accumulator.add(result.star_data, result.star_mask)
+                rankfit_metcalf_accumulator.add(result.metcalf_data, result.metcalf_mask)
+            expected_rankfit_star = rankfit_star_accumulator.finalize_rankfit(50, row_chunk=24)
+            expected_rankfit_metcalf = rankfit_metcalf_accumulator.finalize_rankfit(50, row_chunk=24)
+            rankfit_star_accumulator.close(remove=True)
+            rankfit_metcalf_accumulator.close(remove=True)
+
+            rankfit_actual = stacker.stack_order_statistic_rows(
+                tasks,
+                analyses,
+                (3, 120, 160),
+                canvas,
+                "rankfit",
+                50,
+                False,
+                "valid",
+                "offset",
+                True,
+                "moving",
+                worker_plan,
+                tile_plan,
+            )
+            np.testing.assert_allclose(
+                rankfit_actual.star_data,
+                expected_rankfit_star,
+                rtol=0.0,
+                atol=1.0e-6,
+            )
+            np.testing.assert_allclose(
+                rankfit_actual.metcalf_data,
+                expected_rankfit_metcalf,
+                rtol=0.0,
+                atol=1.0e-6,
+            )
+            np.testing.assert_array_equal(rankfit_actual.star_coverage, expected_star_coverage)
+            np.testing.assert_array_equal(rankfit_actual.metcalf_coverage, expected_metcalf_coverage)
+
+            fixed_actual = stacker.stack_order_statistic_rows(
+                tasks,
+                analyses,
+                (3, 120, 160),
+                canvas,
+                "median",
+                50,
+                False,
+                "valid",
+                "offset",
+                True,
+                "fixed",
+                worker_plan,
+                stacker.select_median_tile_plan(
+                    24,
+                    len(tasks),
+                    (3, 120, 160),
+                    "fixed",
+                    stacker.GIBIBYTE,
+                ),
+            )
+            np.testing.assert_allclose(fixed_actual.star_data, expected_star, rtol=0.0, atol=1.0e-6)
+            np.testing.assert_array_equal(fixed_actual.star_coverage, expected_star_coverage)
+            self.assertIsNone(fixed_actual.metcalf_data)
+            self.assertIsNone(fixed_actual.metcalf_coverage)
 
 
 class ProgressiveCleanupTests(unittest.TestCase):

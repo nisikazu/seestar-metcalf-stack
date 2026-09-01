@@ -2,6 +2,17 @@
 
 利用者に影響する変更は[変更履歴](CHANGELOG.md)と[改訂内容とトラブルシュート](TROUBLESHOOTING.md)にまとめています。この文書は実装判断、検証、引き継ぎを目的とした開発者向け資料です。
 
+## 2026-09-01: median/rankfitのbounded row-tile処理
+
+- 従来の`MedianAccumulator`は全採用フレーム×全画面の`float32` memmapを作り、ディスク容量は抑えられず、OS cache次第では物理RAMも大きく消費した。productionの`median`/`rankfit`は二段階の全幅行タイル方式へ変更し、cubeをディスクへ書き出さずRAM上だけで処理する。旧クラスは数値回帰用の参照実装としてだけ残す。
+- 第1段階は各採用FITSを1回読み、ADU復元、valid mask、RGB背景面fit、飽和レベルと該当画素数を確定する。背景係数とフレーム評価を保持し、画素キューブは保持しない。第2段階は`StackCanvas`を同じ登録座標系の全幅行タイルへ分け、各FITSを再読込して背景面を適用し、星固定とMetcalf固定をそのタイルへ直接resampleする。
+- 各タイルは`(frame, channel, tile-row, width)`の`float32`キューブとチャンネル別`uint32`有効標本数を持つ。moving modeでは星固定とMetcalf固定の2キューブを同時に予算化する。`np.ndarray.sort(axis=0)`でキューブをin-placeに並べ、別のcube-size配列を作らずmedian/rankfitを得る。rankfitの中央標本matrix積も16 MiB単位の画素チャンクへ制限し、タイルとは別の巨大なadvanced-index配列を作らない。coverageは従来どおり2次元の実寄与フレーム数であり、0除外時のチャンネル別標本数とは分離する。
+- `--median-tile-rows auto|N`を追加した。値`N`の単位は分割数ではなく1タイルに含める縦方向のピクセル行数であり、各タイルは画像の全幅を持つ。例えば高さ1920ピクセルで`N=720`なら720行ずつの3タイルになる。`auto`はavailable RAMの50%を作業キューブ上限とし、`frame_count * channels * width * sizeof(float32) * cube_count`と標本数mapを1行当たり容量として最大行数を選ぶ。RAM不明時は保守的な固定行数を使い、明示値は画像高までに制限して優先する。計画と実績はsummaryの`median_tile_plan`へ記録する。
+- `MemoryError`時はまだglobal出力へcommitしていないタイルを破棄し、行数を半分にして同じ`row_start`から再実行する。1行でも確保できなければ、他アプリを閉じるか入力規模/RAMを見直す利用者向けエラーにする。frame workerはglobal出力へ書かないため、worker数低減とタイル行数低減の両方でrollbackを必要としない。
+- row tileは`StackCanvas(shape, origin_x, origin_y)`として作り、registration座標系とoutput canvasを混同しない。現行はreference footprintだが、実装は`reference.shape == canvas.shape`を要求せず、将来のexpanded canvasにも同じorigin付きタイルを適用できる。zero-shiftかつ整数originの直接cropだけは、bilinearの4近傍要件で最終行/列を失わない専用経路を持つ。
+- 5枚RGB実データでは128行×15タイルと1920行×1タイルの星固定・Metcalf FITSがともに全画素でbit-identicalだった。前者はstack 19.862秒・peak RSS約740 MiB、後者は8.565秒・約854 MiBで、分割を細かくするほどRAMは減り再読込コストが増えることを確認した。
+- 247枚RGB moving実データではavailable RAM 8.76 GiBから720行×3タイル、2キューブ合計4.31 GiBを自動選択した。fallback 0、peak RSS 4.98 GiB、stack 215.547秒、pipeline 268.475秒で完走した。全画面2キューブなら約11.5 GiB必要な入力である。詳細は[median row tiling results](developer-tools/stack-performance-analysis/RESULTS-20260901-MEDIAN-TILING.md)を参照する。
+
 ## 2026-08-31: Seestar SMBストレージランチャー
 
 - Windows向け`seestar-open-storage.cmd`は、PowerShell実装`seestar-open-storage.ps1`を呼ぶだけの薄いランチャーである。Metcalf Stack本体やPEM通信には依存しない。
@@ -279,9 +290,10 @@ JSON calibrationの中心、pixel scale、orientationからTAN WCSを構成し�
 - `rankfit`: 0を除外して明るさ順に並べ、中央の指定割合へ5次多項式を当て、
   順位中央の値を返します。標本が少ない画素は中央値へフォールバックします。
 
-メジアンとランクフィットは、全フレームを`float32`のdisk-backed memmapへ置くため、
-平均より大きな一時ディスク領域を使います。プレビューPNGは非線形な表示用
-ストレッチであり、測光には使えません。
+メジアンとランクフィットのproduction経路は、背景面fitとフレーム評価を先に確定し、
+全幅の行タイルごとにbounded RAM cubeを構築します。全画面×全フレームのmemmapは
+作りません。小さい`--median-tile-rows`はRAMを減らす代わりにFITS再読込回数を増やします。
+プレビューPNGは非線形な表示用ストレッチであり、測光には使えません。
 
 ### 線形FITS
 
@@ -316,6 +328,7 @@ CSVにはフレームごとの最大値、判定閾値、飽和画素数を、su
 
 | 時期 | 主な追加 |
 | --- | --- |
+| 開発中 / 2026-09-01 | median/rankfitを全幅行タイル方式へ変更。available RAMの約半分を上限に自動分割し、全フレーム×全画面キューブを不要化。明示行数、MemoryError時の未確定タイル再試行、計画・実測ログを追加 |
 | v0.3.0 / 2026-07-14 | 初回公開。セッション分割、Horizons座標、Astrometry.net解、Siril星登録、メトカーフ/星固定/左右比較FITS、平均・メジアン・ランクフィット、線形FITS、PNG、CSV、JSONを統合 |
 | v0.4.0 / 2026-07-14 | Astrometry.net補助処理をNode.jsからPythonへ移し、Node.js依存を削除。PyInstaller EXEと2種類のWindows配布ZIPを追加 |
 | v0.4.1 / 2026-07-14 | 公開名を`seestar-metcalf-stack`へ統一。第1引数をソースフォルダとし、CMDへのドラッグ&ドロップと通常CLIを同じ入口へ統合 |
@@ -475,6 +488,7 @@ Astrometry request、Siril失敗検出、飽和閾値・マスク伝播・警告
 12. slice translationの正負・整数/小数・片軸0、mono/RGB、画像端、NaN/0 padding、valid/saturation maskを旧実装と比較する
 13. `--stack-workers 1|2|4`の出力FITSが全画素一致し、summaryのoperation timingとworker数が一致する
 14. 非Reference shape/originの`StackCanvas`で画素配置、valid mask、WCS `CRPIX`再基準化が一致する
+15. median/rankfitの全画面と複数行タイルで画素、coverage、valid mask、saturation maskが一致し、タイルMemoryError再試行で未確定結果が混ざらない
 
 実観測FITS、APIキー、観測地点、ログはリポジトリへcommitしないでください。
 

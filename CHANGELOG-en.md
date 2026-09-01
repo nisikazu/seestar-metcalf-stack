@@ -4,6 +4,13 @@ This document records changes that affect users. See [DEVELOPMENT.md](DEVELOPMEN
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Improved
+
+- Median and rank-fit production paths now process full-width row tiles in memory without creating a disk-backed cube temporary file.
+- Add `--median-tile-rows auto|N`. `N` is a pixel row count for one tile, not a number of divisions. Automatic selection uses about half of available RAM and retries an uncommitted tile at half the row count after an allocation failure.
+
 ## v0.9.5 - 2026-08-31
 
 ### Added

@@ -533,12 +533,38 @@ This feature is intended for ordinary comet and asteroid fields. A very large co
 
 Median is more resistant to satellites, airplanes, hot pixels, and other
 one-frame outliers. In a Metcalf stack, it reduces star trails and is intended
-to improve the accuracy of comet photometry. However, it is slower, uses large
-temporary disk-backed arrays, and usually has lower statistical efficiency.
-Exact-zero padding is excluded from the median samples by default:
+to improve the accuracy of comet photometry. However, it is slower and usually
+has lower statistical efficiency than a mean. Exact-zero padding is excluded
+from the median samples by default:
 
 ```bat
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median
+```
+
+Median and rank-fit first analyze every accepted frame for its background model
+and saturation scalar. The final output is then processed as full-width row
+tiles. Only the samples needed for one tile are loaded into bounded in-memory
+`float32` cubes; those cubes are discarded after the tile is committed. A long
+sequence therefore does not require a full-image cube containing every frame,
+and production processing does not create a disk-backed cube temporary file.
+
+The default is `--median-tile-rows auto`. At stack time, it selects the largest
+row count for which the combined star-aligned and Metcalf cubes, including RGB,
+accepted-frame count, and image width, use no more than about half of currently
+available RAM. The selected rows, estimated cube bytes, and any allocation
+fallbacks are printed and recorded in the summary JSON. If an uncommitted tile
+cannot be allocated, it is discarded and the same row range is retried from the
+beginning with half as many rows.
+
+The value of `--median-tile-rows` is **a pixel row count, not a number of
+divisions**. Each tile spans the full image width. For example, with a
+1920-pixel-high image, `--median-tile-rows 720` processes 720 rows at a time in
+three tiles. Set an explicit row count to compare speed and memory use. Smaller
+tiles reduce peak RAM but normally take longer because every subframe must be
+read more times:
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median --median-tile-rows 128
 ```
 
 Use `--zero-sample-policy include` to include exact zeros for comparison with
@@ -722,11 +748,12 @@ point. The default unsigned 16-bit output uses no rescaling; use
 `--output-bitpix float32` when you want to preserve fractional interpolation
 values directly.
 
-Source/conversion/calibration staging is removed after preprocessing. On the
-normal Siril path, preprocessed inputs are removed after their accepted stack
-contribution and no registered FITS are created. SharpCap StackLog transformed
-images are removed after each accepted contribution, and median temporary arrays
-after finalization. Use `--no-cleanup` to keep them for diagnosis.
+Source/conversion/calibration staging is removed after preprocessing, and the
+normal Siril path creates no registered FITS. Mean stacking removes each
+preprocessed input after its accepted contribution. Median/rank-fit must reread
+inputs for each row tile, so it retains them until every tile is complete and
+then removes them. It does not create a full-image median-cube temporary file.
+Use `--no-cleanup` to keep intermediate inputs for diagnosis.
 
 ## When Horizons cannot identify the target
 
