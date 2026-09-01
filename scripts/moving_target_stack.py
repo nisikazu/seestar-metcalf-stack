@@ -59,7 +59,7 @@ DEFAULT_PYTHON = (
 )
 
 SOFTWARE_NAME = "Seestar Metcalf Stack"
-SOFTWARE_VERSION = "0.9.5"
+SOFTWARE_VERSION = "0.9.6"
 SIP_KEY_PATTERN = re.compile(r"^(?:A|B|AP|BP)_(?:ORDER|DMAX|\d+_\d+)$")
 SOURCE_METADATA_KEYS = (
     "OBJECT",

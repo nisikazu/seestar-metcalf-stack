@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## v0.9.6 - 2026-09-02
+
 ### Improved
 
 - Median and rank-fit production paths now process full-width row tiles in memory without creating a disk-backed cube temporary file.
