@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Added
+
+- Add `--output-region-mode reference|union|cover-count|cover-ratio`. The default preserves the reference footprint, `union` encloses all accepted footprints, and coverage modes output the bounding rectangle meeting `--cover-count N` or `--cover-ratio M%`.
+- Apply an independent output-canvas shape and origin to mean, median, rank-fit, valid and saturation masks, and WCS rebasing. FITS headers and summary JSON record the selected region.
+
+### Known limitation
+
+- Expanded output is not yet available on the SharpCap StackLog registration path because its pre-aligned temporary images are already cropped to the reference footprint.
+
 ## v0.9.6 - 2026-09-02
 
 ### Improved

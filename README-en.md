@@ -629,6 +629,47 @@ remain unchanged because the WCS belongs to that reference and a mean stack is
 still in per-frame ADU units. `HISTORY` identifies Metcalf, star-aligned,
 comparison, or fixed-stack products.
 
+### Output beyond the reference-frame footprint
+
+The default `--output-region-mode reference` preserves the existing behavior:
+the output has the same footprint and dimensions as the selected reference
+frame. Use `union` to retain the complete registered footprint of every
+accepted frame:
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region-mode union
+```
+
+Use `cover-count` to output the bounding rectangle of pixels covered by at
+least a specified number of accepted frames. Frames rejected by registration,
+for example during cloud passage, are not included in this count:
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region-mode cover-count --cover-count 20
+```
+
+Use `cover-ratio` for a percentage of accepted frames. `75` and `75%` are
+equivalent, decimal percentages are accepted, and the required frame count is
+rounded up. For example, 75 percent of 53 accepted frames requires 40 frames:
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region-mode cover-ratio --cover-ratio 75%
+```
+
+In moving-target mode, the star-aligned and Metcalf-aligned products retain the
+same dimensions by using one bounding rectangle that includes every qualifying
+region from both coordinate systems. The FITS WCS rebases `CRPIX1/2` to the
+new output origin. `OUTREG`, `OUTORGX`, `OUTORGY`, and accepted-frame count
+`OUTFRMS` record the selection. Modes with an effective minimum coverage also
+write `OUTCOV`; a ratio request additionally writes `OUTRAT`.
+
+An expanded region increases image dimensions, RAM use, processing time, and
+output size. Existing row tiling also applies to expanded median and rank-fit
+products. `union`, `cover-count`, and `cover-ratio` require the default
+`--padding-policy valid`. The SharpCap StackLog registration path currently
+supports `reference` only because its temporary registered images have already
+been cropped to the reference footprint.
+
 ### Subframe saturation warning
 
 For comet or comparison-star photometry, a stacked image can hide saturation

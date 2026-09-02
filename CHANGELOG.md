@@ -6,6 +6,15 @@
 
 ## Unreleased
 
+### 追加
+
+- `--output-region-mode reference|union|cover-count|cover-ratio`を追加しました。既定の`reference`は従来の基準フレーム範囲、`union`は採用フレームの全範囲、coverageモードは`--cover-count N`または`--cover-ratio M%`を満たす領域の外接矩形を出力します。
+- 登録座標系と出力canvasの原点・shapeを分離したまま、平均、メジアン、ランクフィット、valid mask、飽和警告、WCS再基準化へ拡張領域を適用します。選択内容はFITSヘッダーとsummary JSONへ記録します。
+
+### 既知の制限
+
+- SharpCap StackLogの位置合わせ経路は、前処理済み画像が既に基準範囲へ切り出されているため、拡張出力はまだ利用できません。
+
 ## v0.9.6 - 2026-09-02
 
 ### 改善

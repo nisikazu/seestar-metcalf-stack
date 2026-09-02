@@ -1665,6 +1665,9 @@ class CrossPlatformCliTests(unittest.TestCase):
         self.assertEqual(args.preview_sigma_high, 3.0)
         self.assertEqual(args.stack_workers, "auto")
         self.assertEqual(args.median_tile_rows, "auto")
+        self.assertEqual(args.output_region_mode, "reference")
+        self.assertIsNone(args.output_region_cover_count)
+        self.assertIsNone(args.output_region_cover_ratio)
 
     def test_fixed_launcher_mode_uses_photometry_defaults(self):
         with patch.dict(os.environ, {"SEESTAR_STACK_TARGET_MODE": "fixed"}):
@@ -1720,6 +1723,51 @@ class CrossPlatformCliTests(unittest.TestCase):
             args = pipeline.parse_args()
 
         self.assertEqual(args.median_tile_rows, 48)
+
+    def test_pipeline_accepts_output_region_cover_count(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "seestar-metcalf-stack",
+                "frames",
+                "--output-region-mode",
+                "cover-count",
+                "--output-region-cover-count",
+                "12",
+            ],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.output_region_mode, "cover-count")
+        self.assertEqual(args.output_region_cover_count, 12)
+
+    def test_pipeline_accepts_output_region_cover_ratio_with_percent_sign(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "seestar-metcalf-stack",
+                "frames",
+                "--output-region-mode",
+                "cover-ratio",
+                "--cover-ratio",
+                "62.5%",
+            ],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.output_region_mode, "cover-ratio")
+        self.assertEqual(args.output_region_cover_ratio, 62.5)
+
+    def test_pipeline_rejects_cover_count_without_count(self):
+        with patch.object(
+            sys,
+            "argv",
+            ["seestar-metcalf-stack", "frames", "--output-region-mode", "cover-count"],
+        ):
+            with self.assertRaises(SystemExit):
+                pipeline.parse_args()
 
     def test_pipeline_accepts_legacy_padding_and_zero_inclusion(self):
         with patch.object(

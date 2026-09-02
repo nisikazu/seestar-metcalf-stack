@@ -29,6 +29,7 @@ from typing import TextIO
 from moving_target_stack import (
     SirilRegistrationError,
     normalize_saturation_color,
+    parse_output_region_ratio,
     parse_stack_workers,
     parse_median_tile_rows,
     parse_time,
@@ -37,6 +38,7 @@ from moving_target_stack import (
     read_fits_header,
     run_siril,
     select_reference_index,
+    validate_output_region_options,
     wcs_cd_matrix,
     write_registered_float,
 )
@@ -262,6 +264,31 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--output-region-mode",
+        choices=("reference", "union", "cover-count", "cover-ratio"),
+        default="reference",
+        help=(
+            "Output footprint: reference frame (default), all accepted frame footprints, "
+            "or the bounding rectangle covered by a minimum frame count/ratio."
+        ),
+    )
+    parser.add_argument(
+        "--output-region-cover-count",
+        "--cover-count",
+        dest="output_region_cover_count",
+        type=int,
+        metavar="N",
+        help="Minimum accepted-frame coverage for --output-region-mode cover-count.",
+    )
+    parser.add_argument(
+        "--output-region-cover-ratio",
+        "--cover-ratio",
+        dest="output_region_cover_ratio",
+        type=parse_output_region_ratio,
+        metavar="M[%]",
+        help="Minimum accepted-frame coverage percentage for --output-region-mode cover-ratio.",
+    )
+    parser.add_argument(
         "--rankfit-fraction",
         type=int,
         default=50,
@@ -393,6 +420,15 @@ def parse_args() -> argparse.Namespace:
         parser.error("--preview-sun-pa-left is available only in moving-target mode")
     if args.background_normalization != "none" and args.padding_policy != "valid":
         parser.error("--background-normalization offset, plane, and quadratic require --padding-policy valid")
+    try:
+        validate_output_region_options(
+            args.output_region_mode,
+            args.output_region_cover_count,
+            args.output_region_cover_ratio,
+            args.padding_policy,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     if not 0.0 < args.saturation_threshold_percent <= 100.0:
         parser.error("--saturation-threshold-percent must be greater than 0 and at most 100")
     if not args.hot_pixel_sigma > 0.0 or not args.cold_pixel_sigma > 0.0:
@@ -1398,6 +1434,8 @@ def run_stack(
             str(args.stack_workers),
             "--median-tile-rows",
             str(args.median_tile_rows),
+            "--output-region-mode",
+            args.output_region_mode,
             "--padding-policy",
             args.padding_policy,
             "--background-normalization",
@@ -1436,6 +1474,10 @@ def run_stack(
             args.saturation_color,
         ],
     )
+    if args.output_region_cover_count is not None:
+        cmd.extend(["--output-region-cover-count", str(args.output_region_cover_count)])
+    if args.output_region_cover_ratio is not None:
+        cmd.extend(["--output-region-cover-ratio", str(args.output_region_cover_ratio)])
     if ephemeris_csv is not None:
         cmd.extend(["--ephemeris-csv", str(ephemeris_csv)])
     if args.pattern:
@@ -1607,6 +1649,9 @@ def main(args: argparse.Namespace) -> Path | None:
         "plate_solver_requested": args.plate_solver,
         "plate_solution_source": plate_solution_source(wcs_fits, astrometry_json),
         "padding_policy": args.padding_policy,
+        "output_region_mode": args.output_region_mode,
+        "output_region_cover_count": args.output_region_cover_count,
+        "output_region_cover_ratio_percent": args.output_region_cover_ratio,
         "zero_sample_policy": args.zero_sample_policy if args.stack_method != "mean" else None,
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,
         "saturation_warning": args.saturation_warning,

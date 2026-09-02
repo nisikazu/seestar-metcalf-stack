@@ -117,6 +117,17 @@ chmod +x seestar-metcalf-stack.sh setup-macos.sh set-astrometry-api-key.sh macos
 
 その後、`sh setup-macos.sh`をもう一度実行してください。
 
+## 基準フレーム外の出力範囲
+
+macOSでもWindows版と同じ`--output-region-mode`を使用できます。既定の`reference`は基準フレーム範囲、`union`は全採用フレーム範囲です。指定枚数以上または指定割合以上が重なる領域の外接矩形は、次のように指定します。
+
+```sh
+./seestar-metcalf-stack.sh "/path/to/frames" --output-region-mode cover-count --cover-count 20
+./seestar-metcalf-stack.sh "/path/to/frames" --output-region-mode cover-ratio --cover-ratio 75%
+```
+
+拡張出力の詳しい意味、RAM・容量への影響、SharpCap StackLog経路の制限は[日本語README](README.md#基準フレーム外まで出力する)を参照してください。
+
 ## 現在のmacOS配布方針
 
 現時点では、署名済みmacOSバイナリは配布せず、Pythonソースとローカル生成する

@@ -35,7 +35,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from fits_preview import annotate_preview_png, export_preview_png, rotate_preview_png, write_annotation_overlay_png
 from sharpcap_stacklog import load_manifest
@@ -141,6 +141,21 @@ class StackCanvas:
 
 
 @dataclass(frozen=True)
+class OutputRegionPlan:
+    """Selected rectangular output region in registration coordinates."""
+
+    mode: str
+    canvas: StackCanvas
+    candidate_canvas: StackCanvas
+    frame_count: int
+    effective_cover_count: int | None = None
+    requested_cover_count: int | None = None
+    requested_cover_ratio_percent: float | None = None
+    qualifying_pixel_count: int | None = None
+    footprint_products: tuple[str, ...] = ("star",)
+
+
+@dataclass(frozen=True)
 class BilinearTranslationPlan:
     """Reusable source/output slices and mask for one translation onto a canvas."""
 
@@ -154,6 +169,7 @@ class BilinearTranslationPlan:
     weight_y: float
     valid_mask: np.ndarray
     identity: bool = False
+    direct_copy: bool = False
 
 
 @dataclass
@@ -1211,6 +1227,48 @@ def parse_median_tile_rows(value: str) -> str | int:
     return rows
 
 
+def parse_output_region_ratio(value: str) -> float:
+    normalized = str(value).strip()
+    if normalized.endswith("%"):
+        normalized = normalized[:-1].strip()
+    try:
+        ratio = float(normalized)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("--output-region-cover-ratio must be a percentage from 0 to 100") from error
+    if not 0.0 < ratio <= 100.0:
+        raise argparse.ArgumentTypeError("--output-region-cover-ratio must be greater than 0 and at most 100")
+    return ratio
+
+
+def validate_output_region_options(
+    mode: str,
+    cover_count: int | None,
+    cover_ratio_percent: float | None,
+    padding_policy: str,
+) -> None:
+    if mode == "cover-count":
+        if cover_count is None:
+            raise ValueError("--output-region-mode cover-count requires --output-region-cover-count N")
+        if cover_count < 1:
+            raise ValueError("--output-region-cover-count must be a positive integer")
+        if cover_ratio_percent is not None:
+            raise ValueError("--output-region-cover-ratio is only valid with --output-region-mode cover-ratio")
+    elif mode == "cover-ratio":
+        if cover_ratio_percent is None:
+            raise ValueError("--output-region-mode cover-ratio requires --output-region-cover-ratio M")
+        if not 0.0 < cover_ratio_percent <= 100.0:
+            raise ValueError("--output-region-cover-ratio must be greater than 0 and at most 100")
+        if cover_count is not None:
+            raise ValueError("--output-region-cover-count is only valid with --output-region-mode cover-count")
+    else:
+        if cover_count is not None:
+            raise ValueError("--output-region-cover-count is only valid with --output-region-mode cover-count")
+        if cover_ratio_percent is not None:
+            raise ValueError("--output-region-cover-ratio is only valid with --output-region-mode cover-ratio")
+    if mode != "reference" and padding_policy != "valid":
+        raise ValueError("expanded output regions require --padding-policy valid")
+
+
 def format_memory_size(byte_count: int | None) -> str:
     if byte_count is None:
         return "unknown"
@@ -2032,6 +2090,181 @@ def compose_output_transform(
     return translation_matrix(dx, dy) @ matrix3(source_to_registration)
 
 
+def transformed_frame_footprint(
+    source_shape: tuple[int, int],
+    source_to_registration: tuple[float, ...] | np.ndarray,
+) -> np.ndarray:
+    """Map source pixel-centre corners into registration coordinates."""
+    source_height, source_width = source_shape
+    if source_height < 1 or source_width < 1:
+        raise ValueError(f"Source footprint dimensions must be positive: {source_shape}")
+    corners = np.asarray(
+        (
+            (0.0, 0.0, 1.0),
+            (source_width - 1.0, 0.0, 1.0),
+            (source_width - 1.0, source_height - 1.0, 1.0),
+            (0.0, source_height - 1.0, 1.0),
+        ),
+        dtype=np.float64,
+    )
+    mapped = (matrix3(source_to_registration) @ corners.T).T
+    denominator = mapped[:, 2]
+    if not np.all(np.isfinite(mapped)) or np.any(np.abs(denominator) <= 1.0e-12):
+        raise ValueError("Registration transform maps a source corner to a non-finite output position")
+    polygon = mapped[:, :2] / denominator[:, np.newaxis]
+    if not np.all(np.isfinite(polygon)):
+        raise ValueError("Registration transform produced a non-finite source footprint")
+    return polygon
+
+
+def _bounding_canvas(polygons: list[np.ndarray]) -> StackCanvas:
+    if not polygons:
+        raise ValueError("No transformed frame footprints were available")
+    points = np.concatenate(polygons, axis=0)
+    origin_x = math.floor(float(np.min(points[:, 0])))
+    origin_y = math.floor(float(np.min(points[:, 1])))
+    maximum_x = math.ceil(float(np.max(points[:, 0])))
+    maximum_y = math.ceil(float(np.max(points[:, 1])))
+    width = maximum_x - origin_x + 1
+    height = maximum_y - origin_y + 1
+    if width < 1 or height < 1:
+        raise ValueError("Transformed frame footprints produced an empty output canvas")
+    if width > 2_000_000 or height > 2_000_000 or width * height > 2_000_000_000:
+        raise ValueError(
+            f"Transformed frame footprints produced an unsafe canvas ({width}x{height}); "
+            "check the registration diagnostics for an outlier transform"
+        )
+    return StackCanvas(shape=(height, width), origin_x=float(origin_x), origin_y=float(origin_y))
+
+
+def _rasterized_coverage_count(polygons: list[np.ndarray], canvas: StackCanvas) -> np.ndarray:
+    count_dtype = np.uint16 if len(polygons) <= np.iinfo(np.uint16).max else np.uint32
+    height, width = canvas.shape
+    estimated_bytes = height * width * (np.dtype(count_dtype).itemsize + 2)
+    available = available_ram_bytes()
+    if available is not None and estimated_bytes > available // 2:
+        raise MemoryError(
+            f"Coverage prepass needs about {format_memory_size(estimated_bytes)}, but only "
+            f"{format_memory_size(available)} RAM is currently available"
+        )
+    try:
+        coverage = np.zeros(canvas.shape, dtype=count_dtype)
+        for polygon in polygons:
+            mask_image = Image.new("1", (width, height), 0)
+            points = [
+                (float(point[0] - canvas.origin_x), float(point[1] - canvas.origin_y))
+                for point in polygon
+            ]
+            ImageDraw.Draw(mask_image).polygon(points, fill=1)
+            coverage += np.asarray(mask_image, dtype=np.uint8)
+        return coverage
+    except MemoryError:
+        raise
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"Cannot rasterize transformed frame coverage on a {width}x{height} canvas: {error}") from error
+
+
+def select_output_region_plan(
+    tasks: list[StackFrameTask],
+    registration_shape: tuple[int, int],
+    target_mode: str,
+    mode: str,
+    cover_count: int | None = None,
+    cover_ratio_percent: float | None = None,
+) -> OutputRegionPlan:
+    """Select a common star/Metcalf output rectangle from accepted frame footprints."""
+    frame_count = len(tasks)
+    if frame_count < 1:
+        raise ValueError("No accepted frames were available for output-region selection")
+    reference_canvas = StackCanvas.reference_footprint(registration_shape)
+    if mode == "reference":
+        return OutputRegionPlan(
+            mode=mode,
+            canvas=reference_canvas,
+            candidate_canvas=reference_canvas,
+            frame_count=frame_count,
+        )
+
+    star_polygons: list[np.ndarray] = []
+    metcalf_polygons: list[np.ndarray] = []
+    for task in tasks:
+        source_shape = (int(task.source_header["NAXIS2"]), int(task.source_header["NAXIS1"]))
+        star_transform = matrix3(task.source_to_registration)
+        star_polygons.append(transformed_frame_footprint(source_shape, star_transform))
+        if target_mode == "moving":
+            metcalf_transform = compose_output_transform(star_transform, task.dx, task.dy)
+            metcalf_polygons.append(transformed_frame_footprint(source_shape, metcalf_transform))
+
+    footprint_groups = [("star", star_polygons)]
+    if metcalf_polygons:
+        footprint_groups.append(("metcalf", metcalf_polygons))
+    candidate_canvas = _bounding_canvas(
+        [polygon for _name, polygons in footprint_groups for polygon in polygons]
+    )
+    products = tuple(name for name, _polygons in footprint_groups)
+    if mode == "union":
+        return OutputRegionPlan(
+            mode=mode,
+            canvas=candidate_canvas,
+            candidate_canvas=candidate_canvas,
+            frame_count=frame_count,
+            effective_cover_count=1,
+            footprint_products=products,
+        )
+
+    if mode == "cover-count":
+        if cover_count is None:
+            raise ValueError("cover-count output region requires a frame count")
+        threshold = int(cover_count)
+        if threshold > frame_count:
+            raise ValueError(
+                f"--output-region-cover-count {threshold} exceeds the {frame_count} accepted frame(s)"
+            )
+    elif mode == "cover-ratio":
+        if cover_ratio_percent is None:
+            raise ValueError("cover-ratio output region requires a percentage")
+        threshold = max(1, math.ceil(frame_count * cover_ratio_percent / 100.0 - 1.0e-12))
+    else:
+        raise ValueError(f"Unsupported output-region mode: {mode}")
+
+    try:
+        qualifying = np.zeros(candidate_canvas.shape, dtype=bool)
+        for _name, polygons in footprint_groups:
+            coverage = _rasterized_coverage_count(polygons, candidate_canvas)
+            qualifying |= coverage >= threshold
+            del coverage
+    except MemoryError as error:
+        raise RuntimeError(
+            f"Not enough RAM to evaluate {mode} coverage on the candidate canvas "
+            f"{candidate_canvas.shape[1]}x{candidate_canvas.shape[0]}: {error}"
+        ) from error
+
+    rows = np.flatnonzero(np.any(qualifying, axis=1))
+    columns = np.flatnonzero(np.any(qualifying, axis=0))
+    if rows.size == 0 or columns.size == 0:
+        raise ValueError(
+            f"No output pixels are covered by at least {threshold} of the {frame_count} accepted frame(s)"
+        )
+    row_start, row_end = int(rows[0]), int(rows[-1])
+    column_start, column_end = int(columns[0]), int(columns[-1])
+    selected_canvas = StackCanvas(
+        shape=(row_end - row_start + 1, column_end - column_start + 1),
+        origin_x=candidate_canvas.origin_x + column_start,
+        origin_y=candidate_canvas.origin_y + row_start,
+    )
+    return OutputRegionPlan(
+        mode=mode,
+        canvas=selected_canvas,
+        candidate_canvas=candidate_canvas,
+        frame_count=frame_count,
+        effective_cover_count=threshold,
+        requested_cover_count=cover_count,
+        requested_cover_ratio_percent=cover_ratio_percent,
+        qualifying_pixel_count=int(np.count_nonzero(qualifying)),
+        footprint_products=products,
+    )
+
+
 def _normalize_bilinear_axis(
     coordinate: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -2338,31 +2571,46 @@ def build_bilinear_translation_plan(
         and abs(dy) < 1.0e-9
         and abs(canvas.origin_x - rounded_origin_x) < 1.0e-9
         and abs(canvas.origin_y - rounded_origin_y) < 1.0e-9
-        and rounded_origin_x >= 0
-        and rounded_origin_y >= 0
-        and rounded_origin_x + output_width <= source_width
-        and rounded_origin_y + output_height <= source_height
     )
     if direct_crop:
-        output_slice = (slice(0, output_height), slice(0, output_width))
-        valid = (
-            np.ones(canvas.shape, dtype=bool)
+        output_x0 = max(0, -rounded_origin_x)
+        output_x1 = min(output_width, source_width - rounded_origin_x)
+        output_y0 = max(0, -rounded_origin_y)
+        output_y1 = min(output_height, source_height - rounded_origin_y)
+        valid = np.zeros(canvas.shape, dtype=bool)
+        if output_x1 <= output_x0 or output_y1 <= output_y0:
+            return BilinearTranslationPlan(
+                output_shape=canvas.shape,
+                output_slice=None,
+                source_y0=0,
+                source_y1=0,
+                source_x0=0,
+                source_x1=0,
+                weight_x=0.0,
+                weight_y=0.0,
+                valid_mask=valid,
+            )
+        source_x0 = output_x0 + rounded_origin_x
+        source_x1 = output_x1 + rounded_origin_x
+        source_y0 = output_y0 + rounded_origin_y
+        source_y1 = output_y1 + rounded_origin_y
+        output_slice = (slice(output_y0, output_y1), slice(output_x0, output_x1))
+        valid[output_slice] = (
+            True
             if source_valid is None
-            else source_valid[
-                rounded_origin_y : rounded_origin_y + output_height,
-                rounded_origin_x : rounded_origin_x + output_width,
-            ].copy()
+            else source_valid[source_y0:source_y1, source_x0:source_x1]
         )
         return BilinearTranslationPlan(
             output_shape=canvas.shape,
             output_slice=output_slice,
-            source_y0=rounded_origin_y,
-            source_y1=rounded_origin_y + output_height,
-            source_x0=rounded_origin_x,
-            source_x1=rounded_origin_x + output_width,
+            source_y0=source_y0,
+            source_y1=source_y1,
+            source_x0=source_x0,
+            source_x1=source_x1,
             weight_x=0.0,
             weight_y=0.0,
             valid_mask=valid,
+            direct_copy=True,
         )
 
     # Canvas pixel (u, v) represents registration coordinate
@@ -2424,7 +2672,8 @@ def apply_bilinear_translation_plan(
         raise ValueError(f"Translation plan expects a 2D plane, received shape {data.shape}")
     if plan.identity:
         return data.astype(np.float64, copy=True), plan.valid_mask
-    output = np.zeros(plan.output_shape, dtype=np.float32)
+    output_dtype = data.dtype if plan.direct_copy else np.float32
+    output = np.zeros(plan.output_shape, dtype=output_dtype)
     if plan.output_slice is None or not np.any(plan.valid_mask):
         return output, plan.valid_mask
     y0, y1 = plan.source_y0, plan.source_y1
@@ -4348,6 +4597,31 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--output-region-mode",
+        choices=("reference", "union", "cover-count", "cover-ratio"),
+        default="reference",
+        help=(
+            "Output footprint: reference frame (default), all accepted frame footprints, "
+            "or the bounding rectangle covered by a minimum frame count/ratio."
+        ),
+    )
+    parser.add_argument(
+        "--output-region-cover-count",
+        "--cover-count",
+        dest="output_region_cover_count",
+        type=int,
+        metavar="N",
+        help="Minimum accepted-frame coverage for --output-region-mode cover-count.",
+    )
+    parser.add_argument(
+        "--output-region-cover-ratio",
+        "--cover-ratio",
+        dest="output_region_cover_ratio",
+        type=parse_output_region_ratio,
+        metavar="M[%]",
+        help="Minimum accepted-frame coverage percentage for --output-region-mode cover-ratio.",
+    )
+    parser.add_argument(
         "--rankfit-fraction",
         type=int,
         default=50,
@@ -4482,6 +4756,15 @@ def main() -> int:
         parser.error("--registration-minpairs must be at least 1")
     if args.background_normalization != "none" and args.padding_policy != "valid":
         parser.error("--background-normalization offset, plane, and quadratic require --padding-policy valid")
+    try:
+        validate_output_region_options(
+            args.output_region_mode,
+            args.output_region_cover_count,
+            args.output_region_cover_ratio,
+            args.padding_policy,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     if not 0.0 < args.saturation_threshold_percent <= 100.0:
         parser.error("--saturation-threshold-percent must be greater than 0 and at most 100")
     try:
@@ -4823,12 +5106,7 @@ def main() -> int:
     reference = read_fits(processed_files[reference_index - 1])
     height = int(reference.header["NAXIS2"])
     width = int(reference.header["NAXIS1"])
-    # The current product uses the reference footprint, but translation and
-    # accumulation receive an explicit registration-coordinate canvas so a
-    # future expanded footprint can change shape/origin without replacing the
-    # resampler.
-    stack_canvas = StackCanvas.reference_footprint((height, width))
-    canvas_height, canvas_width = stack_canvas.shape
+    registration_shape = (height, width)
     if args.wcs_fits:
         wcs = WcsModel.from_wcs_fits(args.wcs_fits)
     else:
@@ -4847,7 +5125,6 @@ def main() -> int:
             float(fixed_wcs_header["CRVAL2"]),
         )
     reference_x, reference_y = wcs.world_to_pixel(reference_target.ra_deg, reference_target.dec_deg)
-    output_reference_x, output_reference_y = stack_canvas.registration_to_output_pixel(reference_x, reference_y)
     sun_header: dict[str, object] = {}
     sun_pa_status = "off"
     if args.target_mode == "moving" and args.sun_pa == "auto":
@@ -4883,21 +5160,9 @@ def main() -> int:
         )
     saturation_enabled = args.saturation_warning == "enable"
     warning_color_rgb = saturation_rgb(args.saturation_color)
-    metcalf_saturation_mask = (
-        np.zeros(stack_canvas.shape, dtype=bool)
-        if saturation_enabled and args.target_mode == "moving"
-        else None
-    )
-    star_saturation_mask = np.zeros(stack_canvas.shape, dtype=bool) if saturation_enabled else None
     saturated_frame_count = 0
     saturation_level_unavailable_frames = 0
 
-    sum_image: np.ndarray | None = None
-    count_image: np.ndarray | None = None
-    star_sum_image: np.ndarray | None = None
-    star_count_image: np.ndarray | None = None
-    metcalf_coverage: np.ndarray | None = None
-    star_coverage: np.ndarray | None = None
     median_tile_plan: MedianTilePlan | None = None
     frame_rows: list[dict[str, object]] = []
     used_times: list[datetime] = []
@@ -4920,6 +5185,7 @@ def main() -> int:
         "metcalf_shift": 0.0,
         "metcalf_accumulation": 0.0,
         "saturation": 0.0,
+        "output_region": 0.0,
         "order_statistic_analysis": 0.0,
         "order_statistic_combine": 0.0,
         "total_stacking_wall": 0.0,
@@ -4984,7 +5250,7 @@ def main() -> int:
             source_to_registration = siril_matrix_to_array_coordinates(
                 star_reg.matrix,
                 source_shape,
-                stack_canvas.shape,
+                registration_shape,
             )
         stack_tasks.append(
             StackFrameTask(
@@ -5004,6 +5270,48 @@ def main() -> int:
 
     if not stack_tasks:
         raise RuntimeError("No registered frame transforms were available for stacking")
+    if use_sharpcap_registration and args.output_region_mode != "reference":
+        raise RuntimeError(
+            "Expanded output regions are not yet available for the SharpCap StackLog path because its "
+            "registered temporary images have already been cropped to the reference footprint. "
+            "Use --output-region-mode reference."
+        )
+
+    output_region_started = time.perf_counter()
+    output_region_plan = select_output_region_plan(
+        stack_tasks,
+        registration_shape,
+        args.target_mode,
+        args.output_region_mode,
+        args.output_region_cover_count,
+        args.output_region_cover_ratio,
+    )
+    stack_timing_seconds["output_region"] = time.perf_counter() - output_region_started
+    stack_canvas = output_region_plan.canvas
+    canvas_height, canvas_width = stack_canvas.shape
+    output_reference_x, output_reference_y = stack_canvas.registration_to_output_pixel(reference_x, reference_y)
+    coverage_detail = ""
+    if output_region_plan.effective_cover_count is not None:
+        coverage_detail = f"; minimum coverage={output_region_plan.effective_cover_count}/{len(stack_tasks)}"
+    print(
+        f"[output-region] mode={output_region_plan.mode}; canvas={canvas_width}x{canvas_height}; "
+        f"origin=({stack_canvas.origin_x:.0f},{stack_canvas.origin_y:.0f}); "
+        f"products={'+'.join(output_region_plan.footprint_products)}{coverage_detail}",
+        flush=True,
+    )
+
+    metcalf_saturation_mask = (
+        np.zeros(stack_canvas.shape, dtype=bool)
+        if saturation_enabled and args.target_mode == "moving"
+        else None
+    )
+    star_saturation_mask = np.zeros(stack_canvas.shape, dtype=bool) if saturation_enabled else None
+    sum_image: np.ndarray | None = None
+    count_image: np.ndarray | None = None
+    star_sum_image: np.ndarray | None = None
+    star_count_image: np.ndarray | None = None
+    metcalf_coverage: np.ndarray | None = None
+    star_coverage: np.ndarray | None = None
     if not args.no_cleanup:
         if use_sharpcap_registration:
             skipped_inputs = [
@@ -5433,10 +5741,20 @@ def main() -> int:
     registration_diagnostics_csv = work_dir / f"{output_stem}_registration_diagnostics.csv"
     summary_json = work_dir / f"{output_stem}_summary.json"
     star_wcs_header = stack_canvas.rebase_wcs_header(
-        wcs.to_fits_header(canvas_width, canvas_height)
+        wcs.to_fits_header(width, height)
     )
     plate_solver_name = args.plate_solver_name or infer_plate_solver_name(args.wcs_fits, args.astrometry_json)
     session_header = stack_session_header(used_times, used_exposures, plate_solver_name)
+    output_region_header: dict[str, object] = {
+        "OUTREG": output_region_plan.mode,
+        "OUTORGX": stack_canvas.origin_x,
+        "OUTORGY": stack_canvas.origin_y,
+        "OUTFRMS": output_region_plan.frame_count,
+    }
+    if output_region_plan.effective_cover_count is not None:
+        output_region_header["OUTCOV"] = output_region_plan.effective_cover_count
+    if output_region_plan.requested_cover_ratio_percent is not None:
+        output_region_header["OUTRAT"] = output_region_plan.requested_cover_ratio_percent
     background_header = {"BGNORM": args.background_normalization}
     if background_output_levels is not None:
         background_header.update(
@@ -5467,6 +5785,7 @@ def main() -> int:
     extra_header = {
         **star_wcs_header,
         **session_header,
+        **output_region_header,
         "TARGMODE": "moving",
         "MTSTACK": True,
         "MTFRAMES": used,
@@ -5488,6 +5807,7 @@ def main() -> int:
     star_extra_header = {
         **star_wcs_header,
         **session_header,
+        **output_region_header,
         "TARGMODE": "moving",
         "STARSTK": True,
         "MTSTACK": False,
@@ -5505,6 +5825,7 @@ def main() -> int:
     comparison_extra_header = {
         **star_wcs_header,
         **session_header,
+        **output_region_header,
         "TARGMODE": "moving",
         "COMBSTK": True,
         "COMBLEFT": "star_stack",
@@ -5526,6 +5847,7 @@ def main() -> int:
     fixed_extra_header = {
         **star_wcs_header,
         **session_header,
+        **output_region_header,
         "TARGMODE": "fixed",
         "FIXEDSTK": True,
         "STARSTK": True,
@@ -5932,10 +6254,20 @@ def main() -> int:
             else None
         ),
         "stack_canvas": {
-            "policy": "reference-footprint",
+            "policy": output_region_plan.mode,
             "shape": [canvas_height, canvas_width],
             "origin_x": stack_canvas.origin_x,
             "origin_y": stack_canvas.origin_y,
+            "registration_shape": [height, width],
+            "candidate_shape": list(output_region_plan.candidate_canvas.shape),
+            "candidate_origin_x": output_region_plan.candidate_canvas.origin_x,
+            "candidate_origin_y": output_region_plan.candidate_canvas.origin_y,
+            "accepted_frame_count": output_region_plan.frame_count,
+            "requested_cover_count": output_region_plan.requested_cover_count,
+            "requested_cover_ratio_percent": output_region_plan.requested_cover_ratio_percent,
+            "effective_cover_count": output_region_plan.effective_cover_count,
+            "qualifying_pixel_count": output_region_plan.qualifying_pixel_count,
+            "footprint_products": list(output_region_plan.footprint_products),
         },
         "stack_timing_seconds": stack_timing_seconds,
         "stack_timing_note": (

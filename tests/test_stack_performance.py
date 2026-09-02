@@ -97,6 +97,151 @@ def brute_canvas_shift(data, dx, dy, source_valid, canvas):
     return output, valid
 
 
+class OutputRegionTests(unittest.TestCase):
+    @staticmethod
+    def task(index, transform, *, dx=0.0, dy=0.0, shape=(4, 5)):
+        return stacker.StackFrameTask(
+            index=index,
+            source_name=f"frame_{index:03d}.fit",
+            prepared=Path(f"frame_{index:03d}.fit"),
+            source_header={"NAXIS2": shape[0], "NAXIS1": shape[1]},
+            source_to_registration=tuple(float(value) for value in np.asarray(transform).ravel()),
+            frame_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            target=stacker.TargetPoint(datetime(2026, 1, 1, tzinfo=timezone.utc), 10.0, 20.0),
+            target_x=2.0,
+            target_y=2.0,
+            dx=dx,
+            dy=dy,
+        )
+
+    def test_reference_mode_keeps_registration_footprint(self):
+        tasks = [self.task(1, stacker.translation_matrix(20.0, -30.0))]
+        plan = stacker.select_output_region_plan(tasks, (4, 5), "fixed", "reference")
+
+        self.assertEqual(plan.canvas, stacker.StackCanvas.reference_footprint((4, 5)))
+        self.assertIsNone(plan.effective_cover_count)
+
+    def test_union_encloses_positive_and_negative_fixed_frame_transforms(self):
+        tasks = [
+            self.task(1, np.eye(3)),
+            self.task(2, stacker.translation_matrix(3.0, -2.0)),
+        ]
+        plan = stacker.select_output_region_plan(tasks, (4, 5), "fixed", "union")
+
+        self.assertEqual(plan.canvas.shape, (6, 8))
+        self.assertEqual((plan.canvas.origin_x, plan.canvas.origin_y), (0.0, -2.0))
+        self.assertEqual(plan.footprint_products, ("star",))
+
+    def test_moving_union_encloses_star_and_metcalf_footprints(self):
+        tasks = [self.task(1, np.eye(3), dx=-4.0, dy=2.0)]
+        plan = stacker.select_output_region_plan(tasks, (4, 5), "moving", "union")
+
+        self.assertEqual(plan.canvas.shape, (6, 9))
+        self.assertEqual((plan.canvas.origin_x, plan.canvas.origin_y), (-4.0, 0.0))
+        self.assertEqual(plan.footprint_products, ("star", "metcalf"))
+
+    def test_union_encloses_rotated_frame_without_reference_shape_assumption(self):
+        angle = math.radians(30.0)
+        rotation = np.asarray(
+            (
+                (math.cos(angle), -math.sin(angle), -2.0),
+                (math.sin(angle), math.cos(angle), 3.0),
+                (0.0, 0.0, 1.0),
+            )
+        )
+        task = self.task(1, rotation, shape=(7, 11))
+        footprint = stacker.transformed_frame_footprint((7, 11), rotation)
+        plan = stacker.select_output_region_plan([task], (4, 5), "fixed", "union")
+
+        self.assertLessEqual(plan.canvas.origin_x, float(np.min(footprint[:, 0])))
+        self.assertLessEqual(plan.canvas.origin_y, float(np.min(footprint[:, 1])))
+        self.assertGreaterEqual(
+            plan.canvas.origin_x + plan.canvas.shape[1] - 1,
+            float(np.max(footprint[:, 0])),
+        )
+        self.assertGreaterEqual(
+            plan.canvas.origin_y + plan.canvas.shape[0] - 1,
+            float(np.max(footprint[:, 1])),
+        )
+
+    def test_expanded_canvas_rebases_reference_wcs_without_changing_linear_terms(self):
+        canvas = stacker.StackCanvas(shape=(12, 20), origin_x=-7.0, origin_y=4.0)
+        header = {
+            "CRPIX1": 3.0,
+            "CRPIX2": 2.5,
+            "CRVAL1": 100.0,
+            "CRVAL2": -10.0,
+            "CD1_1": -0.001,
+            "CD1_2": 0.0002,
+            "CD2_1": 0.0003,
+            "CD2_2": 0.001,
+            "A_ORDER": 2,
+            "A_2_0": 1.0e-6,
+        }
+
+        rebased = canvas.rebase_wcs_header(header)
+
+        self.assertEqual(rebased["CRPIX1"], 10.0)
+        self.assertEqual(rebased["CRPIX2"], -1.5)
+        for key in ("CRVAL1", "CRVAL2", "CD1_1", "CD1_2", "CD2_1", "CD2_2", "A_ORDER", "A_2_0"):
+            self.assertEqual(rebased[key], header[key])
+
+    def test_cover_count_returns_bounding_rectangle_of_qualified_pixels(self):
+        tasks = [
+            self.task(1, np.eye(3)),
+            self.task(2, stacker.translation_matrix(2.0, 0.0)),
+            self.task(3, stacker.translation_matrix(8.0, 0.0)),
+        ]
+        plan = stacker.select_output_region_plan(
+            tasks,
+            (4, 5),
+            "fixed",
+            "cover-count",
+            cover_count=2,
+        )
+
+        self.assertEqual(plan.canvas.shape, (4, 3))
+        self.assertEqual((plan.canvas.origin_x, plan.canvas.origin_y), (2.0, 0.0))
+        self.assertEqual(plan.effective_cover_count, 2)
+        self.assertEqual(plan.qualifying_pixel_count, 12)
+
+    def test_cover_ratio_rounds_required_frame_count_up(self):
+        tasks = [
+            self.task(1, np.eye(3)),
+            self.task(2, stacker.translation_matrix(2.0, 0.0)),
+            self.task(3, stacker.translation_matrix(8.0, 0.0)),
+        ]
+        plan = stacker.select_output_region_plan(
+            tasks,
+            (4, 5),
+            "fixed",
+            "cover-ratio",
+            cover_ratio_percent=50.0,
+        )
+
+        self.assertEqual(plan.effective_cover_count, 2)
+        self.assertEqual(plan.canvas.shape, (4, 3))
+        self.assertEqual(plan.canvas.origin_x, 2.0)
+
+    def test_cover_count_rejects_more_than_accepted_frames(self):
+        with self.assertRaisesRegex(ValueError, "exceeds the 1 accepted"):
+            stacker.select_output_region_plan(
+                [self.task(1, np.eye(3))],
+                (4, 5),
+                "fixed",
+                "cover-count",
+                cover_count=2,
+            )
+
+    def test_ratio_parser_accepts_optional_percent_sign(self):
+        self.assertEqual(stacker.parse_output_region_ratio("37.5"), 37.5)
+        self.assertEqual(stacker.parse_output_region_ratio("37.5%"), 37.5)
+
+    def test_expanded_modes_require_valid_padding(self):
+        with self.assertRaisesRegex(ValueError, "padding-policy valid"):
+            stacker.validate_output_region_options("union", None, None, "legacy")
+
+
 class SliceTranslationRegressionTests(unittest.TestCase):
     def test_canvas_rebases_output_pixels_and_wcs_origin(self) -> None:
         canvas = stacker.StackCanvas(shape=(15, 19), origin_x=-3.5, origin_y=2.25)
@@ -200,6 +345,23 @@ class SliceTranslationRegressionTests(unittest.TestCase):
         np.testing.assert_array_equal(actual, expected)
         np.testing.assert_array_equal(valid, expected_valid)
         self.assertEqual(float(actual[-1, -1]), float(self.mono[-1, -1]))
+
+    def test_integer_identity_on_expanded_canvas_keeps_all_source_edges(self):
+        data = self.mono.astype(np.float64) + 1.0e-7
+        canvas = stacker.StackCanvas(
+            shape=(data.shape[0] + 5, data.shape[1] + 7),
+            origin_x=-3.0,
+            origin_y=-2.0,
+        )
+
+        actual, valid = stacker.shift_plane(data, 0.0, 0.0, self.valid, canvas)
+
+        crop = actual[2 : 2 + data.shape[0], 3 : 3 + data.shape[1]]
+        crop_valid = valid[2 : 2 + data.shape[0], 3 : 3 + data.shape[1]]
+        np.testing.assert_array_equal(crop, np.where(self.valid, data, 0.0))
+        np.testing.assert_array_equal(crop_valid, self.valid)
+        self.assertEqual(actual.dtype, data.dtype)
+        self.assertEqual(int(np.count_nonzero(valid)), int(np.count_nonzero(self.valid)))
 
 
 class MatrixOnlyResamplingTests(unittest.TestCase):
