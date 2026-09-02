@@ -234,8 +234,10 @@ class OutputRegionTests(unittest.TestCase):
             )
 
     def test_ratio_parser_accepts_optional_percent_sign(self):
-        self.assertEqual(stacker.parse_output_region_ratio("37.5"), 37.5)
-        self.assertEqual(stacker.parse_output_region_ratio("37.5%"), 37.5)
+        self.assertEqual(stacker.parse_output_region("37.5%")[0:3], ("cover-ratio", None, 37.5))
+        self.assertEqual(stacker.parse_output_region("reference"), ("reference", None, None))
+        self.assertEqual(stacker.parse_output_region("union"), ("union", None, None))
+        self.assertEqual(stacker.parse_output_region("20"), ("cover-count", 20, None))
 
     def test_expanded_modes_require_valid_padding(self):
         with self.assertRaisesRegex(ValueError, "padding-policy valid"):

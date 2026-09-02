@@ -4,12 +4,12 @@
 
 ## 2026-09-02: registration座標に基づくexpanded output canvas
 
-- `--output-region-mode`へ`reference`、`union`、`cover-count`、`cover-ratio`を実装した。`reference`は完全互換の既定、`union`は全採用footprintの外接矩形、coverageモードは指定枚数または採用枚数に対する指定割合（切り上げ）を満たす画素群の外接矩形である。
+- `--output-region`に`reference`、`union`、整数の枚数、`%`付きの割合を受け付ける。`reference`は完全互換の既定、`union`は全採用footprintの外接矩形、整数は指定枚数、割合は採用枚数に対する指定割合（切り上げ）を満たす画素群の外接矩形である。
 - Siril行列のY反転変換は不変の`registration_shape`で行い、選択後の`StackCanvas(shape, origin_x, origin_y)`を混ぜない。source四隅を登録座標へprojective変換し、coverage prepassは候補canvas上のfootprintを整数count mapへラスタライズする。異常な変換による過大canvasと、available RAMの半分を超えるcoverage mapは明示エラーにする。
 - moving modeでは星固定と`T_motion @ H_star`によるMetcalf固定のfootprintを別々に評価する。左右比較FITSの両半分を同じshapeに保つため、どちらかの生成物でcoverage条件を満たす領域の和集合に対する外接矩形を共通canvasとする。fixed modeは星固定footprintだけを使う。
 - resampler、mean accumulator、median/rankfit row tile、valid mask、飽和maskは既存の独立canvas APIをそのまま使用する。WCSは登録基準画像のheaderを作ってからcanvas originだけ`CRPIX1/2`へ反映するため、CD/PC/SIP係数は変えない。FITSの`OUTREG`/`OUTORGX`/`OUTORGY`/`OUTFRMS`/`OUTCOV`/`OUTRAT`とsummaryのcandidate/selected canvasへ判断を記録する。
 - coverageは登録に成功して実際のstack taskになったフレームだけを数える。外接矩形内には、回転したfootprintの角や、条件を満たす画素群の非矩形形状により、寄与0または閾値未満の画素が残り得る。実際の平均除算・median標本選択は従来どおり画素単位のvalid maskを使う。
-- 220Pの実データ20枚で回帰した。`reference`は1080x1920・原点(0,0)、`union`は1105x1963・原点(-3,-20)となり、共通領域を切り出したstar/Metcalf FITSはどちらも`reference`と全画素完全一致（最大差0 ADU）した。`cover-count 10`と`cover-ratio 50%`はどちらも1094x1925・原点(0,-5)・実効閾値10/20となり、star/Metcalfの全画素が完全一致した。5枚の`median --median-tile-rows 256 --output-region-mode union`も1086x1926・原点(-3,-2)の拡張canvasを8個の全幅行タイルで処理し、5/5枚を完走した。自動テストは213件すべて成功。
+- 220Pの実データ20枚で回帰した。`reference`は1080x1920・原点(0,0)、`union`は1105x1963・原点(-3,-20)となり、共通領域を切り出したstar/Metcalf FITSはどちらも`reference`と全画素完全一致（最大差0 ADU）した。`--output-region 10`と`--output-region 50%`はどちらも1094x1925・原点(0,-5)・実効閾値10/20となり、star/Metcalfの全画素が完全一致した。5枚の`median --median-tile-rows 256 --output-region union`も1086x1926・原点(-3,-2)の拡張canvasを8個の全幅行タイルで処理し、5/5枚を完走した。自動テストは213件すべて成功。
 - SharpCap StackLog経路は、現在`transform_image()`で基準shapeの`r_*.fit`を先に生成するため、失われた外側を後段で復元できない。非`reference`指定は黙って不完全画像を作らず、理由と回避方法を表示して終了する。将来はSharpCap行列をsourceへ直接合成する経路へ変更すれば同じcanvas policyを利用できる。
 - この機能は同一登録座標系内の拡張であり、天球上の離れたフレームを連結するモザイクではない。将来のモザイクは各フレームWCSの共通投影面への変換、歪み、背景・photometric normalization、接続グラフを別レイヤーとして追加する。
 

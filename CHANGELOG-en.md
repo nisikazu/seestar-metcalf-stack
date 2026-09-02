@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- Add `--output-region-mode reference|union|cover-count|cover-ratio`. The default preserves the reference footprint, `union` encloses all accepted footprints, and coverage modes output the bounding rectangle meeting `--cover-count N` or `--cover-ratio M%`.
+- Add the compact `--output-region reference|union|N|M%` option. The default preserves the reference footprint, `union` encloses all accepted footprints, an integer outputs the bounding rectangle covered by at least N accepted frames, and a percentage outputs the bounding rectangle covered by at least that fraction of accepted frames.
 - Apply an independent output-canvas shape and origin to mean, median, rank-fit, valid and saturation masks, and WCS rebasing. FITS headers and summary JSON record the selected region.
 
 ### Known limitation

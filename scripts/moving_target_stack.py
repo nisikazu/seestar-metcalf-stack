@@ -1227,17 +1227,33 @@ def parse_median_tile_rows(value: str) -> str | int:
     return rows
 
 
-def parse_output_region_ratio(value: str) -> float:
+def parse_output_region(value: str) -> tuple[str, int | None, float | None]:
+    """Parse the compact output-region CLI syntax."""
     normalized = str(value).strip()
+    lowered = normalized.lower()
+    if lowered == "reference":
+        return "reference", None, None
+    if lowered == "union":
+        return "union", None, None
     if normalized.endswith("%"):
-        normalized = normalized[:-1].strip()
-    try:
-        ratio = float(normalized)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("--output-region-cover-ratio must be a percentage from 0 to 100") from error
-    if not 0.0 < ratio <= 100.0:
-        raise argparse.ArgumentTypeError("--output-region-cover-ratio must be greater than 0 and at most 100")
-    return ratio
+        ratio_text = normalized[:-1].strip()
+        try:
+            ratio = float(ratio_text)
+        except ValueError as error:
+            raise ValueError(
+                "--output-region must be reference, union, a positive integer, or a percentage such as 75.0%"
+            ) from error
+        if not 0.0 < ratio <= 100.0:
+            raise ValueError("--output-region percentage must be greater than 0 and at most 100")
+        return "cover-ratio", None, ratio
+    if not re.fullmatch(r"[0-9]+", normalized):
+        raise ValueError(
+            "--output-region must be reference, union, a positive integer, or a percentage such as 75.0%"
+        )
+    count = int(normalized)
+    if count < 1:
+        raise ValueError("--output-region frame count must be a positive integer")
+    return "cover-count", count, None
 
 
 def validate_output_region_options(
@@ -1248,23 +1264,23 @@ def validate_output_region_options(
 ) -> None:
     if mode == "cover-count":
         if cover_count is None:
-            raise ValueError("--output-region-mode cover-count requires --output-region-cover-count N")
+            raise ValueError("--output-region must be a positive integer for frame-count coverage")
         if cover_count < 1:
-            raise ValueError("--output-region-cover-count must be a positive integer")
+            raise ValueError("--output-region frame count must be a positive integer")
         if cover_ratio_percent is not None:
-            raise ValueError("--output-region-cover-ratio is only valid with --output-region-mode cover-ratio")
+            raise ValueError("--output-region cannot contain both a frame count and a percentage")
     elif mode == "cover-ratio":
         if cover_ratio_percent is None:
-            raise ValueError("--output-region-mode cover-ratio requires --output-region-cover-ratio M")
+            raise ValueError("--output-region must be a percentage for ratio coverage")
         if not 0.0 < cover_ratio_percent <= 100.0:
-            raise ValueError("--output-region-cover-ratio must be greater than 0 and at most 100")
+            raise ValueError("--output-region percentage must be greater than 0 and at most 100")
         if cover_count is not None:
-            raise ValueError("--output-region-cover-count is only valid with --output-region-mode cover-count")
+            raise ValueError("--output-region cannot contain both a percentage and a frame count")
     else:
         if cover_count is not None:
-            raise ValueError("--output-region-cover-count is only valid with --output-region-mode cover-count")
+            raise ValueError("--output-region frame count is only valid for an integer --output-region")
         if cover_ratio_percent is not None:
-            raise ValueError("--output-region-cover-ratio is only valid with --output-region-mode cover-ratio")
+            raise ValueError("--output-region percentage is only valid for a percent --output-region")
     if mode != "reference" and padding_policy != "valid":
         raise ValueError("expanded output regions require --padding-policy valid")
 
@@ -2218,7 +2234,7 @@ def select_output_region_plan(
         threshold = int(cover_count)
         if threshold > frame_count:
             raise ValueError(
-                f"--output-region-cover-count {threshold} exceeds the {frame_count} accepted frame(s)"
+                f"--output-region {threshold} exceeds the {frame_count} accepted frame(s)"
             )
     elif mode == "cover-ratio":
         if cover_ratio_percent is None:
@@ -4597,29 +4613,13 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--output-region-mode",
-        choices=("reference", "union", "cover-count", "cover-ratio"),
+        "--output-region",
         default="reference",
+        metavar="reference|union|N|M%",
         help=(
             "Output footprint: reference frame (default), all accepted frame footprints, "
-            "or the bounding rectangle covered by a minimum frame count/ratio."
+            "or a bounding rectangle covered by N frames or M percent of accepted frames."
         ),
-    )
-    parser.add_argument(
-        "--output-region-cover-count",
-        "--cover-count",
-        dest="output_region_cover_count",
-        type=int,
-        metavar="N",
-        help="Minimum accepted-frame coverage for --output-region-mode cover-count.",
-    )
-    parser.add_argument(
-        "--output-region-cover-ratio",
-        "--cover-ratio",
-        dest="output_region_cover_ratio",
-        type=parse_output_region_ratio,
-        metavar="M[%]",
-        help="Minimum accepted-frame coverage percentage for --output-region-mode cover-ratio.",
     )
     parser.add_argument(
         "--rankfit-fraction",
@@ -4742,6 +4742,12 @@ def main() -> int:
         args.saturation_warning = "enable" if args.target_mode == "fixed" else "disable"
     if args.preview_at is None:
         args.preview_at = "none" if args.target_mode == "fixed" else "UL"
+    try:
+        args.output_region_mode, args.output_region_cover_count, args.output_region_cover_ratio = parse_output_region(
+            args.output_region
+        )
+    except ValueError as error:
+        parser.error(str(error))
     if args.target_mode == "moving" and args.ephemeris_csv is None:
         parser.error("--ephemeris-csv is required in moving-target mode")
     if args.target_mode == "fixed" and args.preview_sun_pa_left:
@@ -5274,7 +5280,7 @@ def main() -> int:
         raise RuntimeError(
             "Expanded output regions are not yet available for the SharpCap StackLog path because its "
             "registered temporary images have already been cropped to the reference footprint. "
-            "Use --output-region-mode reference."
+            "Use --output-region reference."
         )
 
     output_region_started = time.perf_counter()

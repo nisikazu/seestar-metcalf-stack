@@ -1724,16 +1724,14 @@ class CrossPlatformCliTests(unittest.TestCase):
 
         self.assertEqual(args.median_tile_rows, 48)
 
-    def test_pipeline_accepts_output_region_cover_count(self):
+    def test_pipeline_accepts_output_region_frame_count(self):
         with patch.object(
             sys,
             "argv",
             [
                 "seestar-metcalf-stack",
                 "frames",
-                "--output-region-mode",
-                "cover-count",
-                "--output-region-cover-count",
+                "--output-region",
                 "12",
             ],
         ):
@@ -1741,17 +1739,16 @@ class CrossPlatformCliTests(unittest.TestCase):
 
         self.assertEqual(args.output_region_mode, "cover-count")
         self.assertEqual(args.output_region_cover_count, 12)
+        self.assertEqual(args.output_region_cover_ratio, None)
 
-    def test_pipeline_accepts_output_region_cover_ratio_with_percent_sign(self):
+    def test_pipeline_accepts_output_region_ratio_with_percent_sign(self):
         with patch.object(
             sys,
             "argv",
             [
                 "seestar-metcalf-stack",
                 "frames",
-                "--output-region-mode",
-                "cover-ratio",
-                "--cover-ratio",
+                "--output-region",
                 "62.5%",
             ],
         ):
@@ -1759,15 +1756,35 @@ class CrossPlatformCliTests(unittest.TestCase):
 
         self.assertEqual(args.output_region_mode, "cover-ratio")
         self.assertEqual(args.output_region_cover_ratio, 62.5)
+        self.assertEqual(args.output_region_cover_count, None)
 
-    def test_pipeline_rejects_cover_count_without_count(self):
-        with patch.object(
-            sys,
-            "argv",
-            ["seestar-metcalf-stack", "frames", "--output-region-mode", "cover-count"],
-        ):
-            with self.assertRaises(SystemExit):
-                pipeline.parse_args()
+    def test_pipeline_accepts_output_region_named_modes(self):
+        for value in ("reference", "union"):
+            with self.subTest(value=value), patch.object(
+                sys,
+                "argv",
+                ["seestar-metcalf-stack", "frames", "--output-region", value],
+            ):
+                args = pipeline.parse_args()
+            self.assertEqual(args.output_region_mode, value)
+            self.assertIsNone(args.output_region_cover_count)
+            self.assertIsNone(args.output_region_cover_ratio)
+
+    def test_pipeline_rejects_old_output_region_syntax(self):
+        old_arguments = (
+            ["--output-region", "cover-count"],
+            ["--output-region-mode", "union"],
+            ["--cover-count", "20"],
+            ["--cover-ratio", "75%"],
+        )
+        for extra_arguments in old_arguments:
+            with self.subTest(arguments=extra_arguments), patch.object(
+                sys,
+                "argv",
+                ["seestar-metcalf-stack", "frames", *extra_arguments],
+            ):
+                with self.assertRaises(SystemExit):
+                    pipeline.parse_args()
 
     def test_pipeline_accepts_legacy_padding_and_zero_inclusion(self):
         with patch.object(

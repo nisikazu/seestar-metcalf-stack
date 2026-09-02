@@ -631,29 +631,30 @@ comparison, or fixed-stack products.
 
 ### Output beyond the reference-frame footprint
 
-The default `--output-region-mode reference` preserves the existing behavior:
-the output has the same footprint and dimensions as the selected reference
-frame. Use `union` to retain the complete registered footprint of every
-accepted frame:
+Use `--output-region` to select the output footprint. It accepts `reference`,
+`union`, an integer frame count, or a percentage ending in `%`. The default
+`reference` preserves the existing behavior: the output has the same footprint
+and dimensions as the selected reference frame. Use `union` to retain the
+complete registered footprint of every accepted frame:
 
 ```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region-mode union
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region union
 ```
 
-Use `cover-count` to output the bounding rectangle of pixels covered by at
-least a specified number of accepted frames. Frames rejected by registration,
-for example during cloud passage, are not included in this count:
+Use an integer to output the bounding rectangle of pixels covered by at least
+that many accepted frames. Frames rejected by registration, for example during
+cloud passage, are not included in this count:
 
 ```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region-mode cover-count --cover-count 20
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region 20
 ```
 
-Use `cover-ratio` for a percentage of accepted frames. `75` and `75%` are
-equivalent, decimal percentages are accepted, and the required frame count is
-rounded up. For example, 75 percent of 53 accepted frames requires 40 frames:
+Use a percentage ending in `%` for a fraction of accepted frames. Decimal
+percentages are accepted, and the required frame count is rounded up. For
+example, 75.0 percent of 53 accepted frames requires 40 frames:
 
 ```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region-mode cover-ratio --cover-ratio 75%
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region 75.0%
 ```
 
 In moving-target mode, the star-aligned and Metcalf-aligned products retain the
@@ -665,8 +666,8 @@ write `OUTCOV`; a ratio request additionally writes `OUTRAT`.
 
 An expanded region increases image dimensions, RAM use, processing time, and
 output size. Existing row tiling also applies to expanded median and rank-fit
-products. `union`, `cover-count`, and `cover-ratio` require the default
-`--padding-policy valid`. The SharpCap StackLog registration path currently
+products. `union` and integer/percentage `--output-region` values require the
+default `--padding-policy valid`. The SharpCap StackLog registration path currently
 supports `reference` only because its temporary registered images have already
 been cropped to the reference footprint.
 

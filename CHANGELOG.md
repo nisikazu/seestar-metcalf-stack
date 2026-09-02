@@ -8,7 +8,7 @@
 
 ### 追加
 
-- `--output-region-mode reference|union|cover-count|cover-ratio`を追加しました。既定の`reference`は従来の基準フレーム範囲、`union`は採用フレームの全範囲、coverageモードは`--cover-count N`または`--cover-ratio M%`を満たす領域の外接矩形を出力します。
+- `--output-region reference|union|N|M%`を追加しました。既定の`reference`は従来の基準フレーム範囲、`union`は採用フレームの全範囲、整数`N`は`N`枚以上、`M%`は採用フレームの`M%`以上が重なる領域の外接矩形を出力します。
 - 登録座標系と出力canvasの原点・shapeを分離したまま、平均、メジアン、ランクフィット、valid mask、飽和警告、WCS再基準化へ拡張領域を適用します。選択内容はFITSヘッダーとsummary JSONへ記録します。
 
 ### 既知の制限

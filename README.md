@@ -384,27 +384,27 @@ Siril解にSIP歪み補正が含まれる場合は、次数を3次に限定せ�
 
 ### 基準フレーム外まで出力する
 
-既定の`--output-region-mode reference`は、従来どおり基準フレームと同じ範囲・大きさを出力します。位置合わせ後の採用フレームがその外側まで持っている画素も残すには、`union`を指定します。
+出力範囲は`--output-region`で指定します。指定値は`reference`、`union`、整数の枚数、または`%`付きの割合です。`reference`は既定値で、従来どおり基準フレームと同じ範囲・大きさを出力します。位置合わせ後の採用フレームがその外側まで持っている画素も残すには、`union`を指定します。
 
 ```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region-mode union
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region union
 ```
 
-重なりの少ない周辺を除き、指定枚数以上が重なる範囲の外接矩形を出力するには`cover-count`を使います。ここで数えるのは、雲などで登録に失敗して除外された画像を除く、実際の採用フレームです。
+重なりの少ない周辺を除き、指定枚数以上が重なる範囲の外接矩形を出力するには整数を指定します。ここで数えるのは、雲などで登録に失敗して除外された画像を除く、実際の採用フレームです。
 
 ```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region-mode cover-count --cover-count 20
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region 20
 ```
 
-採用フレームの指定割合以上が重なる範囲には`cover-ratio`を使います。`75`と`75%`は同じ意味で、小数も指定できます。必要枚数は切り上げます。例えば採用53枚の75%は40枚です。
+採用フレームの指定割合以上が重なる範囲には`%`付きの値を指定します。小数も指定できます。必要枚数は切り上げます。例えば採用53枚の75.0%は40枚です。
 
 ```bat
-.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region-mode cover-ratio --cover-ratio 75%
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --output-region 75.0%
 ```
 
 移動天体モードでは、星固定像とMetcalf固定像を同じ大きさで比較できるよう、両方の座標系で条件を満たす領域を合わせた共通の外接矩形を使います。FITSのWCSは出力原点に合わせて`CRPIX1/2`を再基準化し、`OUTREG`、`OUTORGX`、`OUTORGY`、採用枚数`OUTFRMS`を記録します。実効的な最小coverage枚数があるモードは`OUTCOV`、割合指定はさらに`OUTRAT`を記録します。
 
-拡張領域は画像サイズ、RAM、処理時間、出力容量を増やします。メジアンとランクフィットでは既存の行タイル処理が拡張領域にも適用されます。`union`、`cover-count`、`cover-ratio`は実画素だけを数える`--padding-policy valid`専用です。SharpCap StackLogの位置合わせ経路は前処理中に基準範囲へ切り出した一時画像を使うため、現時点では`reference`だけを使用できます。
+拡張領域は画像サイズ、RAM、処理時間、出力容量を増やします。メジアンとランクフィットでは既存の行タイル処理が拡張領域にも適用されます。`union`または整数・割合指定の`--output-region`は、実画素だけを数える`--padding-policy valid`専用です。SharpCap StackLogの位置合わせ経路は前処理中に基準範囲へ切り出した一時画像を使うため、現時点では`reference`だけを使用できます。
 
 ### サブフレームの飽和警告
 
