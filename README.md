@@ -338,7 +338,7 @@ Pythonコードを改造した場合は、古いEXEが優先実行されない�
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median
 ```
 
-メジアンとランクフィットは、最初に各フレームの背景近似と飽和評価を済ませ、その後に出力画像を全幅の行タイルへ分けて処理します。各タイルに必要なフレームだけをRAM上の`float32`キューブへ読み、結合が完了するとそのキューブを破棄するため、サブフレームが多くても全画像キューブを一度にメモリへ置きません。production処理では、このcubeをディスクへ書き出す一時ファイルは作成しません。
+メジアン、ランクフィット、sigma clipping、MAD clipping、Winsorized Sigmaは、最初に各フレームの背景近似と飽和評価を済ませ、その後に出力画像を全幅の行タイルへ分けて処理します。各タイルに必要なフレームだけをRAM上の`float32`キューブへ読み、結合が完了するとそのキューブを破棄するため、サブフレームが多くても全画像キューブを一度にメモリへ置きません。production処理では、このcubeをディスクへ書き出す一時ファイルは作成しません。
 
 `--median-tile-rows auto`が既定です。処理開始時のavailable RAMを調べ、星固定とメトカーフ固定の両キューブ、RGB、採用フレーム数、画像幅を含めた作業キューブ合計が、available RAMのおよそ半分以下になる最大行数を選びます。判断結果、実際の行数、推定キューブ容量、メモリ確保失敗時の再試行は画面とsummary JSONへ記録します。確保に失敗した未確定タイルは破棄し、行数を半分にして同じ範囲を最初から再実行します。
 
@@ -362,7 +362,19 @@ Pythonコードを改造した場合は、古いEXEが優先実行されない�
 
 `--rankfit-fraction` は1〜100の整数です。出力名と実行フォルダには `rankfit5_p50` のように採用率を記録します。中央候補が7点未満の画素は非0メジアンへフォールバックします。
 
-出力名には `_mean_`、`_median_`、または `_rankfit5_pNN_` が入り、FITSヘッダーの `STKMODE` に方式を記録します。ランクフィットでは `RFFRAC` と `RFDEG` に採用率と次数も記録します。
+外れ値を抑えながら平均に近い結果を得る方式として、`sigma-clip`、`mad-clip`、`winsorized-sigma`を選べます。`--clip-low`と`--clip-high`で下側・上側の閾値をsigma単位で個別に指定します。既定値はどれも3です。まず試す方式としては、通常の平均と標本標準偏差で判定する軽量な`sigma-clip`が適しています。`mad-clip`は1回の判定で、`winsorized-sigma`は内部推定を収束させ、外側の除外を新しいサンプル集合で安定するまで繰り返します。
+
+`sigma-clip`は各画素の現在のサンプル集合について、平均と標本標準偏差（`ddof=1`）を求め、`clip-low/high×sigma`の範囲外を除外します。除外がなくなるまで外側の判定を繰り返し、最後は元サンプルの算術平均を返します。計算が単純でWinsorizedの内部反復を行わないため、人工衛星や宇宙線の除去を手軽に試せます。ただし平均と標準偏差自身が外れ値の影響を受けるため、強い外れ値には`mad-clip`または`winsorized-sigma`の方が頑健です。`mad-clip`は各画素の中央値と`1.4826×MAD`を基準に範囲外のサンプルを除外し、残った値を平均します。`winsorized-sigma`は各画素の中央値を中心に、内部で`±1.5σ`のWinsorizationと`1.134`の補正を行い、sigmaの相対変化が1%以下になるまで反復します。その後、元のサンプルを`clip-low/high×sigma`で除外して残った値を平均します。内部のWinsorized値そのものは最終画像へ使いません。除外の結果が3点未満になる画素は安全のため追加除外しません。
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mad-clip --clip-low 3 --clip-high 3
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method winsorized-sigma --clip-low 2 --clip-high 4
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method sigma-clip --clip-low 3 --clip-high 3
+```
+
+いずれもmedian/rankfitと同じ行タイル方式で処理し、正確な0の扱いは`--zero-sample-policy`に従います。結果のFITSには`CLIPLOW`、`CLIPHIGH`、`CLIPITR`、`CLIPBASE`、`CLIPACT`、summary JSONには方式・閾値・推定方法を記録します。出力名には指定した方式の `_sigma-clip_`、`_mad-clip_`、または`_winsorized-sigma_`が入ります。
+
+出力名には `_mean_`、`_median_`、`_rankfit5_pNN_`、`_sigma-clip_`、`_mad-clip_`、または`_winsorized-sigma_`が入り、FITSヘッダーの `STKMODE` に方式を記録します。ランクフィットでは `RFFRAC` と `RFDEG` に採用率と次数も記録します。
 
 ### 先頭または時刻中間の基準フレーム
 

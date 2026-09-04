@@ -2,6 +2,21 @@
 
 利用者に影響する変更は[変更履歴](CHANGELOG.md)と[改訂内容とトラブルシュート](TROUBLESHOOTING.md)にまとめています。この文書は実装判断、検証、引き継ぎを目的とした開発者向け資料です。
 
+## 2026-09-04: Simple Sigma / MAD / Winsorized Sigma clipping
+
+- `--stack-method sigma-clip`、`--stack-method mad-clip`、`--stack-method winsorized-sigma`を既存のorder-statistic row-tile経路へ追加した。どれも全画面cubeをディスクへ書き出さず、既存のvalid mask、0サンプル方針、RGB別処理、星固定/Metcalf固定の2経路を共有する。
+- `sigma-clip`は現在のサンプル集合の算術平均と標本標準偏差（`ddof=1`）で上下の範囲を作り、範囲外の元サンプルを除外する。除外がなくなるまで外側ループを繰り返し、残った元サンプルの算術平均を出力する。内部WinsorizationやMAD計算を行わないため、3方式の中で最も手軽で軽量だが、平均と標準偏差が強い外れ値の影響を受ける。
+- `mad-clip`は画素ごとに中央値`m`、`MAD=median(|x-m|)`、`robust_sigma=1.4826*MAD`を求め、`m-clip_low*robust_sigma`未満または`m+clip_high*robust_sigma`超の元サンプルを一回だけ除外し、残りを算術平均する。上下の閾値は独立で、既定は3 sigmaである。
+- `winsorized-sigma`はSirilのrejectionモデルに合わせ、現在のサンプル集合の中央値を中心とする。内部作業配列だけを`median +/- 1.5 sigma`へclampし、Sirilのsample standard deviation（`ddof=1`）による`1.134*SD(W)`を相対変化1%以下まで反復する。そのsigmaで元のサンプルを`clip_low/high`判定し、除外後の集合で安定するまで外側ループを繰り返す。Winsorized作業値は最終画像へ使わず、元サンプルの平均を返す。サンプル数1以下はsigmaを計算せず、その値を保持する。
+- 外側の除外で画素のサンプル数が3未満になる場合は、その画素の現在集合を維持する。内部配列は16 MiBを目安に画素方向へ分割し、元の行タイルcubeとは別に全画面の一時配列を作らない。
+- Winsorized経路は初回ソート済みの値列が昇順であることと、reject範囲が単一の`[lower, upper]`区間であることを利用する。外側reject後は各画素列の`[lo, hi)`だけを更新し、再ソート・全列のcandidate配列を作らない。内部・外側ループとも、収束または安定した画素列を次の反復から除外する。
+- `--clip-low`と`--clip-high`は有限の0以上の実数として両CLIで検証し、子プロセスへ引き継ぐ。3方式で共通の閾値を使う。FITSには`CLIPLOW`、`CLIPHIGH`、`CLIPITR`、`CLIPBASE`、`CLIPACT`とWinsor定数、summary JSONには推定方法と処理方針を記録する。`sigma-clip`は`CLIPBASE=mean-SD`、`CLIPITR=stable`として記録する。
+- 220P/McNaughtの247枚で同条件を実測した。`sigma-clip`はスタック525.93秒、全工程583.79秒、`winsorized-sigma`はスタック817.18秒、全工程867.65秒だった。スタック部35.6%、全工程32.7%の短縮で、主な差はWinsorized内部反復349.32秒の有無である。詳細は[RESULTS-20260904-SIGMA-CLIP.md](developer-tools/stack-performance-analysis/RESULTS-20260904-SIGMA-CLIP.md)を参照する。
+- robust stackの計測を追加した。通常の`[timing]`行には`order_statistic_sort`、`order_statistic_inner_winsorization`、`order_statistic_outer_rejection`、`order_statistic_final_mean`を記録し、Winsorized/MADの`[timing:star]`と`[timing:metcalf]`行には内部反復、外側reject、処理対象画素列数を記録する。対応する`order_statistic_combine_metrics`はsummary JSONにも保存する。時間は画素列を16 MiB程度のベクトルチャンクに分けた処理の累積であり、`inner_passes`/`outer_passes`はPythonの1画素ループ回数ではない。`inner_maxed_chunks`は上限未収束列を含むチャンク数、`inner_maxed_columns`はその画素列数である。
+- 修正後の合成ベンチマークでは、列ごとに外れ値と収束回数が異なる30,000列・247サンプルで、旧チャンク一括反復の6.612秒に対して2.154秒（3.07倍）となった。全列が同じ値のケースでは列単位管理のオーバーヘッドがあるため旧方式が速い場合もある。旧方式との差は最大0.0441 ADUだったが、これはチャンク内の収束済み列まで反復していた旧判定との差であり、新方式は列単位スカラー基準実装と1e-6 ADU以内で一致する。
+- リリース前の実通信検証では、WCSを除去した220P/McNaughtの実FITSを同梱SirilとAstrometry.netへ渡した。Sirilは1.54秒、Astrometry.netは37.47秒で完了し、両方の出力について実WCS FITSの存在とFITSヘッダを確認した。結果は`developer-tools/plate-solve-benchmark/results/release-smoke-20260904-122826/`に保存した。
+- 単体テストではMADによる上下外れ値除外、Winsorized内部推定と元サンプル除外、CLIの方式・上下閾値、既存median/rankfit回帰を確認する。実データでの速度・外れ値除去効果は別途ベンチマークへ追記する。
+
 ## 2026-09-02: registration座標に基づくexpanded output canvas
 
 - `--output-region`に`reference`、`union`、整数の枚数、`%`付きの割合を受け付ける。`reference`は完全互換の既定、`union`は全採用footprintの外接矩形、整数は指定枚数、割合は採用枚数に対する指定割合（切り上げ）を満たす画素群の外接矩形である。

@@ -6,14 +6,23 @@
 
 ## Unreleased
 
+## v0.9.7 - 2026-09-04
+
 ### 追加
 
 - `--output-region reference|union|N|M%`を追加しました。既定の`reference`は従来の基準フレーム範囲、`union`は採用フレームの全範囲、整数`N`は`N`枚以上、`M%`は採用フレームの`M%`以上が重なる領域の外接矩形を出力します。
 - 登録座標系と出力canvasの原点・shapeを分離したまま、平均、メジアン、ランクフィット、valid mask、飽和警告、WCS再基準化へ拡張領域を適用します。選択内容はFITSヘッダーとsummary JSONへ記録します。
+- `--stack-method sigma-clip`を追加しました。`--clip-low`/`--clip-high`はMAD-clipとWinsorized Sigmaを含む3方式で共通です。単純σクリップは通常の平均と標本標準偏差で範囲外を除外し、安定するまで繰り返して残りを平均する、手軽な外れ値除去方式です。
+- `--stack-method mad-clip`と`--stack-method winsorized-sigma`を追加しました。`--clip-low`/`--clip-high`は上下を個別指定でき、既定値はともに3です。前者はmedian/MADで1回範囲外を除外し、後者はSiril互換の内部Winsorizationでsigmaを収束させた後、元サンプルを安定するまで除外して平均します。
+- Winsorized Sigmaの内部sigma収束判定を相対変化1%（`0.01`）へ変更しました。多数フレームの処理時間を抑えつつ、最終判定は元サンプルに対するrejectと平均を維持します。
 
 ### 既知の制限
 
 - SharpCap StackLogの位置合わせ経路は、前処理済み画像が既に基準範囲へ切り出されているため、拡張出力はまだ利用できません。
+
+### 検証
+
+- WCSを除去した220P/McNaughtの実FITSで、同梱SirilとAstrometry.netの実通信プレートソルブを検証しました。Sirilは1.54秒、Astrometry.netは37.47秒で完了し、双方が実WCS FITSを生成しました。
 
 ## v0.9.6 - 2026-09-02
 

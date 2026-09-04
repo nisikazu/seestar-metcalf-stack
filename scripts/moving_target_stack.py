@@ -7,7 +7,7 @@ Pipeline:
 3. Use a reference-frame WCS and a target ephemeris CSV to compute the target
    pixel in the selected reference coordinate system for every frame.
 4. Combine each star-registration matrix with the Metcalf translation, resample
-   the source once, then mean-, median-, or rank-fit-stack the shifted frames.
+   the source once, then mean-, median-, rank-fit-, or robust-clip-stack the shifted frames.
 
 SharpCap Live Stack offsets can replace Siril registration when complete.
 """
@@ -29,7 +29,7 @@ import time
 import warnings
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -59,7 +59,7 @@ DEFAULT_PYTHON = (
 )
 
 SOFTWARE_NAME = "Seestar Metcalf Stack"
-SOFTWARE_VERSION = "0.9.6"
+SOFTWARE_VERSION = "0.9.7"
 SIP_KEY_PATTERN = re.compile(r"^(?:A|B|AP|BP)_(?:ORDER|DMAX|\d+_\d+)$")
 SOURCE_METADATA_KEYS = (
     "OBJECT",
@@ -96,6 +96,14 @@ STACK_HEADER_COMMENTS = {
     "TOTEXP": "s; sum of accepted subframe exposures",
     "NCOMBINE": "number of accepted subframes",
     "PLTSOLVR": "reference-frame plate solver",
+    "CLIPLOW": "lower robust clipping threshold in sigma",
+    "CLIPHIGH": "upper robust clipping threshold in sigma",
+    "CLIPITR": "outer robust clipping pass policy",
+    "CLIPBASE": "robust clipping center and scale estimator",
+    "CLIPACT": "robust clipping action",
+    "WINSLIM": "internal Winsorization sigma limit",
+    "WINSCOR": "internal Winsorized sigma correction",
+    "WINSCVG": "internal sigma convergence ratio",
 }
 
 
@@ -1041,6 +1049,14 @@ AUTO_WORKER_FIXED_OVERHEAD_BYTES = 64 * MEBIBYTE
 MEDIAN_TILE_RAM_FRACTION = 0.50
 MEDIAN_TILE_UNKNOWN_RAM_ROWS = 16
 RANKFIT_WORKSPACE_BYTES = 16 * MEBIBYTE
+ROBUST_CLIP_WORKSPACE_BYTES = 16 * MEBIBYTE
+MAD_TO_SIGMA = 1.4826
+ROBUST_CLIP_METHODS = frozenset(("sigma-clip", "mad-clip", "winsorized-sigma"))
+WINSOR_LIMIT_SIGMA = 1.5
+WINSOR_SIGMA_CORRECTION = 1.134
+WINSOR_CONVERGENCE_RATIO = 0.01
+WINSOR_MAX_ITERATIONS = 100
+ROBUST_MIN_SAMPLES = 3
 
 
 @dataclass
@@ -1186,6 +1202,62 @@ class OrderStatisticTileResult:
     star_saturation_mask: np.ndarray | None
     metcalf_saturation_mask: np.ndarray | None
     timings: dict[str, float]
+    star_combine_metrics: "OrderStatisticCombineMetrics" = field(default_factory=lambda: OrderStatisticCombineMetrics())
+    metcalf_combine_metrics: "OrderStatisticCombineMetrics | None" = None
+
+
+@dataclass
+class OrderStatisticCombineMetrics:
+    """Detailed timings and counters for one order-statistic output product."""
+
+    sort_seconds: float = 0.0
+    inner_winsorization_seconds: float = 0.0
+    outer_rejection_seconds: float = 0.0
+    final_mean_seconds: float = 0.0
+    inner_iteration_passes: int = 0
+    inner_iteration_max: int = 0
+    inner_chunks: int = 0
+    inner_maxed_chunks: int = 0
+    inner_maxed_columns: int = 0
+    outer_passes_total: int = 0
+    outer_passes_max: int = 0
+    outer_rejected_samples: int = 0
+    outer_rejected_pixel_columns: int = 0
+    pixel_columns: int = 0
+
+    def add(self, other: "OrderStatisticCombineMetrics") -> None:
+        self.sort_seconds += other.sort_seconds
+        self.inner_winsorization_seconds += other.inner_winsorization_seconds
+        self.outer_rejection_seconds += other.outer_rejection_seconds
+        self.final_mean_seconds += other.final_mean_seconds
+        self.inner_iteration_passes += other.inner_iteration_passes
+        self.inner_iteration_max = max(self.inner_iteration_max, other.inner_iteration_max)
+        self.inner_chunks += other.inner_chunks
+        self.inner_maxed_chunks += other.inner_maxed_chunks
+        self.inner_maxed_columns += other.inner_maxed_columns
+        self.outer_passes_total += other.outer_passes_total
+        self.outer_passes_max = max(self.outer_passes_max, other.outer_passes_max)
+        self.outer_rejected_samples += other.outer_rejected_samples
+        self.outer_rejected_pixel_columns += other.outer_rejected_pixel_columns
+        self.pixel_columns += other.pixel_columns
+
+    def to_dict(self) -> dict[str, int | float]:
+        return {
+            "sort_seconds": self.sort_seconds,
+            "inner_winsorization_seconds": self.inner_winsorization_seconds,
+            "outer_rejection_seconds": self.outer_rejection_seconds,
+            "final_mean_seconds": self.final_mean_seconds,
+            "inner_iteration_passes": self.inner_iteration_passes,
+            "inner_iteration_max": self.inner_iteration_max,
+            "inner_chunks": self.inner_chunks,
+            "inner_maxed_chunks": self.inner_maxed_chunks,
+            "inner_maxed_columns": self.inner_maxed_columns,
+            "outer_passes_total": self.outer_passes_total,
+            "outer_passes_max": self.outer_passes_max,
+            "outer_rejected_samples": self.outer_rejected_samples,
+            "outer_rejected_pixel_columns": self.outer_rejected_pixel_columns,
+            "pixel_columns": self.pixel_columns,
+        }
 
 
 @dataclass
@@ -1199,6 +1271,8 @@ class OrderStatisticStackResult:
     star_saturation_mask: np.ndarray | None
     metcalf_saturation_mask: np.ndarray | None
     timings: dict[str, float]
+    star_combine_metrics: OrderStatisticCombineMetrics = field(default_factory=OrderStatisticCombineMetrics)
+    metcalf_combine_metrics: OrderStatisticCombineMetrics | None = None
 
 
 def parse_stack_workers(value: str) -> str | int:
@@ -1225,6 +1299,14 @@ def parse_median_tile_rows(value: str) -> str | int:
     if rows < 1:
         raise argparse.ArgumentTypeError("--median-tile-rows must be auto or a positive integer")
     return rows
+
+
+def validate_clip_bounds(clip_low: float, clip_high: float) -> None:
+    """Validate asymmetric robust clipping thresholds shared by both CLIs."""
+    if not math.isfinite(clip_low) or clip_low < 0.0:
+        raise ValueError("--clip-low must be a finite non-negative number")
+    if not math.isfinite(clip_high) or clip_high < 0.0:
+        raise ValueError("--clip-high must be a finite non-negative number")
 
 
 def parse_output_region(value: str) -> tuple[str, int | None, float | None]:
@@ -3076,11 +3158,18 @@ def add_order_statistic_sample(
         np.add(sample_counts, valid, out=sample_counts, casting="unsafe")
 
 
-def finalize_median_cube(cube: np.ndarray, sample_counts: np.ndarray) -> np.ndarray:
+def finalize_median_cube(
+    cube: np.ndarray,
+    sample_counts: np.ndarray,
+    metrics: OrderStatisticCombineMetrics | None = None,
+) -> np.ndarray:
     """Sort a tile cube in place and select its per-pixel finite median."""
     if sample_counts.shape != cube.shape[1:]:
         raise ValueError(f"Median sample-count shape changed: {sample_counts.shape} != {cube.shape[1:]}")
+    started = time.perf_counter()
     cube.sort(axis=0)
+    if metrics is not None:
+        metrics.sort_seconds += time.perf_counter() - started
     ordered = cube.reshape(cube.shape[0], -1)
     valid_counts = sample_counts.reshape(-1)
     median = np.zeros(ordered.shape[1], dtype=np.float64)
@@ -3102,13 +3191,17 @@ def finalize_rankfit_cube(
     sample_counts: np.ndarray,
     fraction_percent: int,
     degree: int = 5,
+    metrics: OrderStatisticCombineMetrics | None = None,
 ) -> np.ndarray:
     """Sort an in-memory tile cube in place and evaluate its central rank fit."""
     if not 1 <= fraction_percent <= 100:
         raise ValueError("rank-fit fraction must be an integer from 1 to 100")
     if sample_counts.shape != cube.shape[1:]:
         raise ValueError(f"Rank-fit sample-count shape changed: {sample_counts.shape} != {cube.shape[1:]}")
+    started = time.perf_counter()
     cube.sort(axis=0)
+    if metrics is not None:
+        metrics.sort_seconds += time.perf_counter() - started
     ordered = cube.reshape(cube.shape[0], -1)
     valid_counts = sample_counts.reshape(-1)
     fitted = np.zeros(ordered.shape[1], dtype=np.float64)
@@ -3149,17 +3242,289 @@ def finalize_rankfit_cube(
     return fitted.reshape(cube.shape[1:])
 
 
+def _median_columns(ordered: np.ndarray, sample_count: int, pixel_indices: np.ndarray) -> np.ndarray:
+    """Return the per-pixel median for one group of equal sample counts."""
+    middle = sample_count // 2
+    if sample_count % 2:
+        return ordered[middle, pixel_indices].astype(np.float64, copy=False)
+    return (
+        ordered[middle - 1, pixel_indices].astype(np.float64, copy=False)
+        + ordered[middle, pixel_indices].astype(np.float64, copy=False)
+    ) / 2.0
+
+
+def _mad_columns(
+    ordered: np.ndarray,
+    sample_count: int,
+    pixel_indices: np.ndarray,
+    centres: np.ndarray,
+) -> np.ndarray:
+    """Calculate MAD in bounded pixel chunks without allocating a second cube."""
+    if pixel_indices.size == 0:
+        return np.empty(0, dtype=np.float64)
+    bytes_per_pixel = sample_count * np.dtype(np.float64).itemsize
+    pixel_chunk = max(1, ROBUST_CLIP_WORKSPACE_BYTES // max(bytes_per_pixel, 1))
+    result = np.empty(pixel_indices.size, dtype=np.float64)
+    middle = sample_count // 2
+    kth = middle if sample_count % 2 else (middle - 1, middle)
+    for pixel_start in range(0, pixel_indices.size, pixel_chunk):
+        chunk_end = min(pixel_start + pixel_chunk, pixel_indices.size)
+        chunk_indices = pixel_indices[pixel_start:chunk_end]
+        deviations = np.abs(
+            ordered[:sample_count, chunk_indices].astype(np.float64, copy=False)
+            - centres[pixel_start:chunk_end][np.newaxis, :]
+        )
+        deviations.partition(kth, axis=0)
+        if sample_count % 2:
+            result[pixel_start:chunk_end] = deviations[middle]
+        else:
+            result[pixel_start:chunk_end] = (deviations[middle - 1] + deviations[middle]) / 2.0
+    return result
+
+
+def _finalize_robust_clip_cube(
+    cube: np.ndarray,
+    sample_counts: np.ndarray,
+    method: str,
+    clip_low: float,
+    clip_high: float,
+    metrics: OrderStatisticCombineMetrics | None = None,
+) -> np.ndarray:
+    """Finalize robust sigma-clipping for each pixel column.
+
+    Simple sigma clipping uses the arithmetic mean and sample standard
+    deviation of the current samples, then repeats rejection until stable.
+    MAD clipping uses a median/MAD-derived scale and rejects values outside
+    the bounds. Winsorized Sigma follows Siril's rejection model: the median
+    is the rejection center, an inner symmetric Winsorization loop estimates
+    sigma, and the outer rejection loop repeats until stable.
+    """
+    if method not in ROBUST_CLIP_METHODS:
+        raise ValueError(f"Unsupported robust clip method: {method}")
+    if not math.isfinite(clip_low) or clip_low < 0.0:
+        raise ValueError("clip-low must be a finite non-negative number")
+    if not math.isfinite(clip_high) or clip_high < 0.0:
+        raise ValueError("clip-high must be a finite non-negative number")
+    if sample_counts.shape != cube.shape[1:]:
+        raise ValueError(f"Robust clip sample-count shape changed: {sample_counts.shape} != {cube.shape[1:]}")
+    started = time.perf_counter()
+    cube.sort(axis=0)
+    if metrics is not None:
+        metrics.sort_seconds += time.perf_counter() - started
+    ordered = cube.reshape(cube.shape[0], -1)
+    valid_counts = sample_counts.reshape(-1)
+    result = np.zeros(ordered.shape[1], dtype=np.float64)
+    for sample_count_value in np.unique(valid_counts):
+        sample_count = int(sample_count_value)
+        if sample_count == 0:
+            continue
+        pixel_indices = np.flatnonzero(valid_counts == sample_count)
+        # Robust clipping uses bounded float64 work arrays in addition to the
+        # original values. Keep the existing conservative workspace factor.
+        bytes_per_pixel = sample_count * np.dtype(np.float64).itemsize * 6
+        pixel_chunk = max(1, ROBUST_CLIP_WORKSPACE_BYTES // max(bytes_per_pixel, 1))
+        for pixel_start in range(0, pixel_indices.size, pixel_chunk):
+            chunk_end = min(pixel_start + pixel_chunk, pixel_indices.size)
+            chunk_indices = pixel_indices[pixel_start:chunk_end]
+            if metrics is not None:
+                metrics.pixel_columns += int(chunk_indices.size)
+            values = ordered[:sample_count, chunk_indices].astype(np.float64, copy=False)
+            if method == "mad-clip":
+                centres = _median_columns(ordered, sample_count, chunk_indices)
+                mad = _mad_columns(ordered, sample_count, chunk_indices, centres)
+                scale = MAD_TO_SIGMA * mad
+                lower = centres - clip_low * scale
+                upper = centres + clip_high * scale
+                rejection_started = time.perf_counter()
+                keep = (
+                    (values >= lower[np.newaxis, :])
+                    & (values <= upper[np.newaxis, :])
+                )
+                kept = np.count_nonzero(keep, axis=0)
+                if metrics is not None:
+                    metrics.outer_rejection_seconds += time.perf_counter() - rejection_started
+                    metrics.outer_passes_total += int(chunk_indices.size)
+                    metrics.outer_passes_max = max(metrics.outer_passes_max, 1)
+                    metrics.outer_rejected_pixel_columns += int(np.count_nonzero(kept < sample_count))
+                    metrics.outer_rejected_samples += int(
+                        np.sum(sample_count - kept, dtype=np.int64)
+                    )
+                started = time.perf_counter()
+                totals = np.sum(values, axis=0, dtype=np.float64, where=keep)
+                output = centres.copy()
+                np.divide(totals, kept, out=output, where=kept > 0)
+                result[chunk_indices] = output
+                if metrics is not None:
+                    metrics.final_mean_seconds += time.perf_counter() - started
+                continue
+
+            # All clip methods keep the original samples for the final mean.
+            # The cube is already sorted, so each column's surviving samples
+            # remain one contiguous [lo, hi) interval.
+            if sample_count <= 1:
+                result[chunk_indices] = values[0]
+                continue
+            rows = np.arange(sample_count)[:, np.newaxis]
+            lo = np.zeros(chunk_indices.size, dtype=np.int32)
+            hi = np.full(chunk_indices.size, sample_count, dtype=np.int32)
+            outer_active = np.ones(chunk_indices.size, dtype=bool)
+            outer_passes = np.zeros(chunk_indices.size, dtype=np.int32)
+            while np.any(outer_active):
+                outer_indices = np.flatnonzero(outer_active)
+                outer_passes[outer_indices] += 1
+                current_lo = lo[outer_indices]
+                current_hi = hi[outer_indices]
+                current_counts = current_hi - current_lo
+                current_values = values[:, outer_indices]
+                active = (
+                    (rows >= current_lo[np.newaxis, :])
+                    & (rows < current_hi[np.newaxis, :])
+                )
+                if method == "sigma-clip":
+                    # Simple sigma clipping uses the ordinary mean as its
+                    # centre. The sample standard deviation matches the
+                    # existing Winsorized estimator's ddof=1 convention.
+                    centres = np.mean(
+                        current_values,
+                        axis=0,
+                        dtype=np.float64,
+                        where=active,
+                    )
+                    sigma = np.std(
+                        current_values,
+                        axis=0,
+                        dtype=np.float64,
+                        where=active,
+                        ddof=1,
+                    )
+                else:
+                    middle = current_lo + current_counts // 2
+                    inner_started = time.perf_counter()
+                    centres = ordered[middle, chunk_indices[outer_indices]].astype(np.float64, copy=False)
+                    even = (current_counts % 2) == 0
+                    even_indices = np.flatnonzero(even)
+                    if even_indices.size:
+                        centres[even_indices] = (
+                            ordered[middle[even_indices] - 1, chunk_indices[outer_indices[even_indices]]]
+                            + ordered[middle[even_indices], chunk_indices[outer_indices[even_indices]]]
+                        ) / 2.0
+                    sigma = np.std(
+                        current_values,
+                        axis=0,
+                        dtype=np.float64,
+                        where=active,
+                        ddof=1,
+                    )
+                    winsor = current_values.copy()
+                    inner_active = np.ones(outer_indices.size, dtype=bool)
+                    inner_passes = np.zeros(outer_indices.size, dtype=np.int32)
+                    for _ in range(WINSOR_MAX_ITERATIONS):
+                        pending = np.flatnonzero(inner_active)
+                        if pending.size == 0:
+                            break
+                        inner_passes[pending] += 1
+                        pending_centres = centres[pending]
+                        pending_winsor = winsor[:, pending]
+                        np.clip(
+                            pending_winsor,
+                            pending_centres - WINSOR_LIMIT_SIGMA * sigma[pending],
+                            pending_centres + WINSOR_LIMIT_SIGMA * sigma[pending],
+                            out=pending_winsor,
+                        )
+                        winsor[:, pending] = pending_winsor
+                        new_sigma = WINSOR_SIGMA_CORRECTION * np.std(
+                            winsor[:, pending],
+                            axis=0,
+                            dtype=np.float64,
+                            where=active[:, pending],
+                            ddof=1,
+                        )
+                        old_sigma = sigma[pending]
+                        converged = np.abs(new_sigma - old_sigma) <= (
+                            WINSOR_CONVERGENCE_RATIO * np.abs(old_sigma)
+                        )
+                        zero_converged = (old_sigma == 0.0) & (new_sigma == 0.0)
+                        sigma[pending] = new_sigma
+                        converged_now = converged | zero_converged
+                        inner_active[pending[converged_now]] = False
+                    if metrics is not None:
+                        metrics.inner_winsorization_seconds += time.perf_counter() - inner_started
+                        metrics.inner_iteration_passes += int(np.sum(inner_passes, dtype=np.int64))
+                        metrics.inner_iteration_max = max(
+                            metrics.inner_iteration_max,
+                            int(np.max(inner_passes)) if inner_passes.size else 0,
+                        )
+                        metrics.inner_chunks += 1
+                        maxed_columns = int(np.count_nonzero(inner_active))
+                        metrics.inner_maxed_chunks += int(maxed_columns > 0)
+                        metrics.inner_maxed_columns += maxed_columns
+                lower = centres - clip_low * sigma
+                upper = centres + clip_high * sigma
+                rejection_started = time.perf_counter()
+                keep = (
+                    active
+                    & (current_values >= lower[np.newaxis, :])
+                    & (current_values <= upper[np.newaxis, :])
+                )
+                new_counts = np.count_nonzero(keep, axis=0).astype(np.int32)
+                adopt = (
+                    (current_counts >= ROBUST_MIN_SAMPLES)
+                    & (new_counts >= ROBUST_MIN_SAMPLES)
+                    & (new_counts < current_counts)
+                )
+                rejected_samples = int(
+                    np.sum(current_counts[adopt] - new_counts[adopt], dtype=np.int64)
+                )
+                # keep is a contiguous interval because current_values is
+                # sorted and the rejection bounds are a single [lower, upper]
+                # interval. Update bounds only; no candidate array or resort.
+                new_lo = np.argmax(keep, axis=0).astype(np.int32)
+                new_hi = (
+                    sample_count - np.argmax(keep[::-1], axis=0)
+                ).astype(np.int32)
+                if np.any(adopt):
+                    accepted_indices = outer_indices[adopt]
+                    lo[accepted_indices] = new_lo[adopt]
+                    hi[accepted_indices] = new_hi[adopt]
+                outer_active.fill(False)
+                if np.any(adopt):
+                    outer_active[outer_indices[adopt]] = True
+                if metrics is not None:
+                    metrics.outer_rejection_seconds += time.perf_counter() - rejection_started
+                    metrics.outer_passes_total += int(outer_indices.size)
+                    metrics.outer_passes_max = max(
+                        metrics.outer_passes_max,
+                        int(np.max(outer_passes[outer_indices])),
+                    )
+                    metrics.outer_rejected_pixel_columns += int(np.count_nonzero(adopt))
+                    metrics.outer_rejected_samples += rejected_samples
+            started = time.perf_counter()
+            active = (rows >= lo[np.newaxis, :]) & (rows < hi[np.newaxis, :])
+            totals = np.sum(values, axis=0, dtype=np.float64, where=active)
+            output = np.zeros(chunk_indices.size, dtype=np.float64)
+            np.divide(totals, hi - lo, out=output, where=(hi - lo) > 0)
+            result[chunk_indices] = output
+            if metrics is not None:
+                metrics.final_mean_seconds += time.perf_counter() - started
+    return result.reshape(cube.shape[1:])
+
+
 def finalize_order_statistic_cube(
     cube: np.ndarray,
     sample_counts: np.ndarray,
     method: str,
     rankfit_fraction: int,
+    clip_low: float = 3.0,
+    clip_high: float = 3.0,
+    metrics: OrderStatisticCombineMetrics | None = None,
 ) -> np.ndarray:
     """Finalize one bounded cube, mutating it to avoid a second cube-sized allocation."""
     if method == "median":
-        return finalize_median_cube(cube, sample_counts)
+        return finalize_median_cube(cube, sample_counts, metrics)
     if method == "rankfit":
-        return finalize_rankfit_cube(cube, sample_counts, rankfit_fraction)
+        return finalize_rankfit_cube(cube, sample_counts, rankfit_fraction, metrics=metrics)
+    if method in ROBUST_CLIP_METHODS:
+        return _finalize_robust_clip_cube(cube, sample_counts, method, clip_low, clip_high, metrics)
     raise ValueError(f"Unsupported order-statistic stack method: {method}")
 
 
@@ -3178,6 +3543,8 @@ def build_order_statistic_tile(
     worker_plan: StackWorkerPlan,
     on_worker_fallback=None,
     on_frame=None,
+    clip_low: float = 3.0,
+    clip_high: float = 3.0,
 ) -> OrderStatisticTileResult:
     """Build and combine one row tile without exposing partial results to the full stack."""
     timings = {
@@ -3189,6 +3556,10 @@ def build_order_statistic_tile(
         "metcalf_accumulation": 0.0,
         "saturation": 0.0,
         "order_statistic_combine": 0.0,
+        "order_statistic_sort": 0.0,
+        "order_statistic_inner_winsorization": 0.0,
+        "order_statistic_outer_rejection": 0.0,
+        "order_statistic_final_mean": 0.0,
     }
     tile_image_shape = order_statistic_image_shape(source_shape, canvas)
     star_cube = np.empty((len(tasks), *tile_image_shape), dtype=np.float32)
@@ -3210,6 +3581,10 @@ def build_order_statistic_tile(
         np.zeros(canvas.shape, dtype=bool)
         if saturation_enabled and target_mode == "moving"
         else None
+    )
+    star_combine_metrics = OrderStatisticCombineMetrics()
+    metcalf_combine_metrics = (
+        OrderStatisticCombineMetrics() if target_mode == "moving" else None
     )
 
     worker = lambda task: process_stack_tile_frame(
@@ -3261,13 +3636,36 @@ def build_order_statistic_tile(
             metcalf_saturation_mask |= result.metcalf_saturation_mask
 
     started = time.perf_counter()
-    star_data = finalize_order_statistic_cube(star_cube, star_sample_counts, method, rankfit_fraction)
+    star_data = finalize_order_statistic_cube(
+        star_cube,
+        star_sample_counts,
+        method,
+        rankfit_fraction,
+        clip_low,
+        clip_high,
+        star_combine_metrics,
+    )
     metcalf_data = (
-        finalize_order_statistic_cube(metcalf_cube, metcalf_sample_counts, method, rankfit_fraction)
+        finalize_order_statistic_cube(
+            metcalf_cube,
+            metcalf_sample_counts,
+            method,
+            rankfit_fraction,
+            clip_low,
+            clip_high,
+            metcalf_combine_metrics,
+        )
         if metcalf_cube is not None and metcalf_sample_counts is not None
         else None
     )
     timings["order_statistic_combine"] += time.perf_counter() - started
+    for metrics in (star_combine_metrics, metcalf_combine_metrics):
+        if metrics is None:
+            continue
+        timings["order_statistic_sort"] += metrics.sort_seconds
+        timings["order_statistic_inner_winsorization"] += metrics.inner_winsorization_seconds
+        timings["order_statistic_outer_rejection"] += metrics.outer_rejection_seconds
+        timings["order_statistic_final_mean"] += metrics.final_mean_seconds
     return OrderStatisticTileResult(
         star_data=star_data,
         star_coverage=star_coverage,
@@ -3276,6 +3674,8 @@ def build_order_statistic_tile(
         star_saturation_mask=star_saturation_mask,
         metcalf_saturation_mask=metcalf_saturation_mask,
         timings=timings,
+        star_combine_metrics=star_combine_metrics,
+        metcalf_combine_metrics=metcalf_combine_metrics,
     )
 
 
@@ -3297,6 +3697,8 @@ def stack_order_statistic_rows(
     on_tile_fallback=None,
     on_tile_started=None,
     on_frame=None,
+    clip_low: float = 3.0,
+    clip_high: float = 3.0,
 ) -> OrderStatisticStackResult:
     """Assemble a full median/rank-fit product from bounded full-width row cubes."""
     image_shape = order_statistic_image_shape(source_shape, canvas)
@@ -3319,7 +3721,15 @@ def stack_order_statistic_rows(
         "metcalf_accumulation": 0.0,
         "saturation": 0.0,
         "order_statistic_combine": 0.0,
+        "order_statistic_sort": 0.0,
+        "order_statistic_inner_winsorization": 0.0,
+        "order_statistic_outer_rejection": 0.0,
+        "order_statistic_final_mean": 0.0,
     }
+    star_combine_metrics = OrderStatisticCombineMetrics()
+    metcalf_combine_metrics = (
+        OrderStatisticCombineMetrics() if target_mode == "moving" else None
+    )
     row_start = 0
     tile_index = 0
     while row_start < canvas.shape[0]:
@@ -3348,7 +3758,7 @@ def stack_order_statistic_rows(
                     target_mode,
                     worker_plan,
                     on_worker_fallback,
-                    (
+                        (
                         None
                         if on_frame is None
                         else lambda frame_number, task: on_frame(
@@ -3360,6 +3770,8 @@ def stack_order_statistic_rows(
                             task,
                         )
                     ),
+                    clip_low=clip_low,
+                    clip_high=clip_high,
                 )
                 break
             except MemoryError as error:
@@ -3405,6 +3817,9 @@ def stack_order_statistic_rows(
             metcalf_saturation_mask[row_start:row_end] = tile.metcalf_saturation_mask
         for operation, elapsed in tile.timings.items():
             timings[operation] += elapsed
+        star_combine_metrics.add(tile.star_combine_metrics)
+        if metcalf_combine_metrics is not None and tile.metcalf_combine_metrics is not None:
+            metcalf_combine_metrics.add(tile.metcalf_combine_metrics)
         row_start = row_end
         tile_index += 1
 
@@ -3416,6 +3831,8 @@ def stack_order_statistic_rows(
         star_saturation_mask=star_saturation_mask,
         metcalf_saturation_mask=metcalf_saturation_mask,
         timings=timings,
+        star_combine_metrics=star_combine_metrics,
+        metcalf_combine_metrics=metcalf_combine_metrics,
     )
 
 
@@ -4588,9 +5005,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--stack-method",
-        choices=("mean", "median", "rankfit"),
+        choices=("mean", "median", "rankfit", "sigma-clip", "mad-clip", "winsorized-sigma"),
         default="mean",
-        help="Per-pixel combination method. median and rankfit exclude exact-zero samples. Defaults to mean.",
+        help=(
+            "Per-pixel combination method: mean, median, rankfit, sigma-clip, mad-clip, or winsorized-sigma. "
+            "median, rankfit, and clip methods exclude exact-zero samples. Defaults to mean."
+        ),
     )
     parser.add_argument(
         "--stack-workers",
@@ -4608,7 +5028,7 @@ def main() -> int:
         default="auto",
         metavar="auto|N",
         help=(
-            "Full-width output rows held in each median/rank-fit working cube. "
+            "Full-width output rows held in each median/rank-fit/robust-clip working cube. "
             "auto uses at most about half of currently available RAM (default)."
         ),
     )
@@ -4626,6 +5046,18 @@ def main() -> int:
         type=int,
         default=50,
         help="Central ranked-sample percentage used by rankfit (1-100). Defaults to 50.",
+    )
+    parser.add_argument(
+        "--clip-low",
+        type=float,
+        default=3.0,
+        help="Lower clipping threshold in sigma units for sigma-clip, mad-clip, and winsorized-sigma. Defaults to 3.",
+    )
+    parser.add_argument(
+        "--clip-high",
+        type=float,
+        default=3.0,
+        help="Upper clipping threshold in sigma units for sigma-clip, mad-clip, and winsorized-sigma. Defaults to 3.",
     )
     parser.add_argument(
         "--reference-frame",
@@ -4657,7 +5089,7 @@ def main() -> int:
         choices=("exclude", "include"),
         default="exclude",
         help=(
-            "Exclude or include exact-zero samples in median and rank-fit stacks. "
+            "Exclude or include exact-zero samples in median, rank-fit, and robust-clip stacks. "
             "Defaults to exclude."
         ),
     )
@@ -4736,6 +5168,10 @@ def main() -> int:
 
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
+    try:
+        validate_clip_bounds(args.clip_low, args.clip_high)
+    except ValueError as error:
+        parser.error(str(error))
     if args.background_normalization is None:
         args.background_normalization = "none" if args.padding_policy == "legacy" else "quadratic"
     if args.saturation_warning is None:
@@ -5194,8 +5630,13 @@ def main() -> int:
         "output_region": 0.0,
         "order_statistic_analysis": 0.0,
         "order_statistic_combine": 0.0,
+        "order_statistic_sort": 0.0,
+        "order_statistic_inner_winsorization": 0.0,
+        "order_statistic_outer_rejection": 0.0,
+        "order_statistic_final_mean": 0.0,
         "total_stacking_wall": 0.0,
     }
+    order_statistic_combine_metrics: dict[str, object] | None = None
     stack_tasks: list[StackFrameTask] = []
     registration_metrics_by_index: dict[int, dict[str, object]] = {}
     for i, source in enumerate(copied, start=1):
@@ -5580,6 +6021,8 @@ def main() -> int:
             report_median_tile_fallback,
             report_tile_started,
             report_tile_frame,
+            clip_low=args.clip_low,
+            clip_high=args.clip_high,
         )
         star_stack = tiled.star_data
         star_coverage = tiled.star_coverage
@@ -5595,6 +6038,14 @@ def main() -> int:
             metcalf_coverage = star_coverage
         for operation, elapsed in tiled.timings.items():
             stack_timing_seconds[operation] += elapsed
+        order_statistic_combine_metrics = {
+            "star": tiled.star_combine_metrics.to_dict(),
+            "metcalf": (
+                tiled.metcalf_combine_metrics.to_dict()
+                if tiled.metcalf_combine_metrics is not None
+                else None
+            ),
+        }
         if not args.no_cleanup:
             removed_intermediate_images.extend(remove_intermediate_paths([task.prepared for task in stack_tasks]))
 
@@ -5654,6 +6105,27 @@ def main() -> int:
         f"total_stacking_wall={stack_timing_seconds['total_stacking_wall']:.3f}s",
         flush=True,
     )
+    if order_statistic_combine_metrics is not None:
+        for product, metrics in order_statistic_combine_metrics.items():
+            if metrics is None:
+                continue
+            print(
+                f"[timing:{product}] sort={metrics['sort_seconds']:.3f}s; "
+                f"inner_winsorization={metrics['inner_winsorization_seconds']:.3f}s; "
+                f"inner_passes={metrics['inner_iteration_passes']}; "
+                f"inner_max={metrics['inner_iteration_max']}; "
+                f"inner_chunks={metrics['inner_chunks']}; "
+                f"inner_maxed_chunks={metrics['inner_maxed_chunks']}; "
+                f"inner_maxed_columns={metrics['inner_maxed_columns']}; "
+                f"outer_rejection={metrics['outer_rejection_seconds']:.3f}s; "
+                f"outer_passes={metrics['outer_passes_total']}; "
+                f"outer_max={metrics['outer_passes_max']}; "
+                f"rejected_samples={metrics['outer_rejected_samples']}; "
+                f"rejected_pixel_columns={metrics['outer_rejected_pixel_columns']}; "
+                f"final_mean={metrics['final_mean_seconds']:.3f}s; "
+                f"pixel_columns={metrics['pixel_columns']}",
+                flush=True,
+            )
     output_started = time.perf_counter()
     moving_mode = args.target_mode == "moving"
     comparison_stack = concatenate_side_by_side(star_stack, stack) if moving_mode else None
@@ -5788,6 +6260,25 @@ def main() -> int:
     effective_zero_sample_policy = (
         "mask-only" if args.background_normalization != "none" and args.stack_method != "mean" else args.zero_sample_policy
     )
+    robust_clip_header = {
+        "CLIPLOW": float(args.clip_low) if args.stack_method in ROBUST_CLIP_METHODS else 0.0,
+        "CLIPHIGH": float(args.clip_high) if args.stack_method in ROBUST_CLIP_METHODS else 0.0,
+        "CLIPITR": (
+            1 if args.stack_method == "mad-clip" else "stable"
+            if args.stack_method in {"sigma-clip", "winsorized-sigma"} else 0
+        ),
+        "CLIPBASE": (
+            "mean-SD" if args.stack_method == "sigma-clip" else "median-MAD"
+            if args.stack_method == "mad-clip" else "median-Winsor"
+            if args.stack_method == "winsorized-sigma" else "n/a"
+        ),
+        "WINSLIM": WINSOR_LIMIT_SIGMA if args.stack_method == "winsorized-sigma" else 0.0,
+        "WINSCOR": WINSOR_SIGMA_CORRECTION if args.stack_method == "winsorized-sigma" else 0.0,
+        "WINSCVG": WINSOR_CONVERGENCE_RATIO if args.stack_method == "winsorized-sigma" else 0.0,
+        "CLIPACT": (
+            "reject" if args.stack_method in ROBUST_CLIP_METHODS else "n/a"
+        ),
+    }
     extra_header = {
         **star_wcs_header,
         **session_header,
@@ -5800,6 +6291,7 @@ def main() -> int:
         "MTREFRA": reference_target.ra_deg,
         "MTREFDEC": reference_target.dec_deg,
         "STKMODE": args.stack_method,
+        **robust_clip_header,
         "PADPOL": args.padding_policy,
         "ZEROPOL": effective_zero_sample_policy if args.stack_method != "mean" else "n/a",
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
@@ -5820,6 +6312,7 @@ def main() -> int:
         "MTFRAMES": used,
         "MTUNITS": "ADU",
         "STKMODE": args.stack_method,
+        **robust_clip_header,
         "PADPOL": args.padding_policy,
         "ZEROPOL": effective_zero_sample_policy if args.stack_method != "mean" else "n/a",
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
@@ -5842,6 +6335,7 @@ def main() -> int:
         "MTFRAMES": used,
         "MTUNITS": "ADU",
         "STKMODE": args.stack_method,
+        **robust_clip_header,
         "PADPOL": args.padding_policy,
         "ZEROPOL": effective_zero_sample_policy if args.stack_method != "mean" else "n/a",
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
@@ -5860,6 +6354,7 @@ def main() -> int:
         "MTSTACK": False,
         "STKUNITS": "ADU",
         "STKMODE": args.stack_method,
+        **robust_clip_header,
         "PADPOL": args.padding_policy,
         "ZEROPOL": effective_zero_sample_policy if args.stack_method != "mean" else "n/a",
         "RFFRAC": args.rankfit_fraction if args.stack_method == "rankfit" else 0,
@@ -6276,9 +6771,14 @@ def main() -> int:
             "footprint_products": list(output_region_plan.footprint_products),
         },
         "stack_timing_seconds": stack_timing_seconds,
+        "order_statistic_combine_metrics": order_statistic_combine_metrics,
         "stack_timing_note": (
-            "per-operation worker CPU sums; order_statistic_analysis and total_stacking_wall are elapsed wall time; "
-            "median/rank-fit FITS reads and background application include repeated row-tile passes"
+            "fits/background/resampling/accumulation entries are worker CPU sums; order_statistic_combine and its "
+            "detail timings are elapsed wall time for row-tile finalization; order_statistic_analysis and "
+            "total_stacking_wall are elapsed wall time; "
+            "median/rank-fit FITS reads and background application include repeated row-tile passes; "
+            "order-statistic detail timings are accumulated per output product and inner/outer pass counters "
+            "count vectorized pixel-column passes, not one Python loop per pixel"
         ),
         "pipeline_timing_seconds": pipeline_timing_seconds,
         "temporary_storage": {
@@ -6308,6 +6808,31 @@ def main() -> int:
         },
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,
         "rankfit_polynomial_degree": 5 if args.stack_method == "rankfit" else None,
+        "clip_low_sigma": args.clip_low if args.stack_method in ROBUST_CLIP_METHODS else None,
+        "clip_high_sigma": args.clip_high if args.stack_method in ROBUST_CLIP_METHODS else None,
+        "clip_iterations": (
+            1 if args.stack_method == "mad-clip" else "until stable"
+            if args.stack_method in {"sigma-clip", "winsorized-sigma"} else None
+        ),
+        "clip_center_scale": (
+            "mean + sample SD" if args.stack_method == "sigma-clip" else "median + 1.4826*MAD"
+            if args.stack_method == "mad-clip" else "median + Winsorized std"
+            if args.stack_method == "winsorized-sigma" else None
+        ),
+        "clip_action": (
+            "reject" if args.stack_method in ROBUST_CLIP_METHODS else None
+        ),
+        "winsorized_sigma_parameters": (
+            {
+                "limit_sigma": WINSOR_LIMIT_SIGMA,
+                "sigma_correction": WINSOR_SIGMA_CORRECTION,
+                "convergence_ratio": WINSOR_CONVERGENCE_RATIO,
+                "max_inner_iterations": WINSOR_MAX_ITERATIONS,
+                "outer_rejection": "until stable",
+            }
+            if args.stack_method == "winsorized-sigma"
+            else None
+        ),
         "reference_frame_mode": reference_mode,
         "reference_frame_index": reference_index,
         "reference_frame": reference_source.name,

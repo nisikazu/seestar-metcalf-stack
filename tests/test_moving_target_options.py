@@ -698,6 +698,9 @@ class MedianAccumulatorTests(unittest.TestCase):
         self.assertEqual(stacker.processing_method_token("mean", 50), "mean")
         self.assertEqual(stacker.processing_method_token("median", 50), "median")
         self.assertEqual(stacker.processing_method_token("rankfit", 37), "rankfit5_p37")
+        self.assertEqual(stacker.processing_method_token("sigma-clip", 50), "sigma-clip")
+        self.assertEqual(stacker.processing_method_token("mad-clip", 50), "mad-clip")
+        self.assertEqual(stacker.processing_method_token("winsorized-sigma", 50), "winsorized-sigma")
 
 
 class ValidPixelMeanTests(unittest.TestCase):
@@ -1665,6 +1668,8 @@ class CrossPlatformCliTests(unittest.TestCase):
         self.assertEqual(args.preview_sigma_high, 3.0)
         self.assertEqual(args.stack_workers, "auto")
         self.assertEqual(args.median_tile_rows, "auto")
+        self.assertEqual(args.clip_low, 3.0)
+        self.assertEqual(args.clip_high, 3.0)
         self.assertEqual(args.output_region_mode, "reference")
         self.assertIsNone(args.output_region_cover_count)
         self.assertIsNone(args.output_region_cover_ratio)
@@ -1713,6 +1718,27 @@ class CrossPlatformCliTests(unittest.TestCase):
             args = pipeline.parse_args()
 
         self.assertEqual(args.stack_workers, 4)
+
+    def test_pipeline_accepts_clip_stack_methods_and_asymmetric_clips(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "seestar-metcalf-stack",
+                "frames",
+                "--stack-method",
+                "sigma-clip",
+                "--clip-low",
+                "2.5",
+                "--clip-high",
+                "4",
+            ],
+        ):
+            args = pipeline.parse_args()
+
+        self.assertEqual(args.stack_method, "sigma-clip")
+        self.assertEqual(args.clip_low, 2.5)
+        self.assertEqual(args.clip_high, 4.0)
 
     def test_pipeline_accepts_explicit_median_tile_rows(self):
         with patch.object(

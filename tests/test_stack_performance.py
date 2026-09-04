@@ -63,6 +63,40 @@ def legacy_shift_image(data, dx, dy, source_valid=None):
     return np.stack(planes), common
 
 
+def scalar_winsorized_sigma_reference(values, clip_low=3.0, clip_high=3.0):
+    """Small scalar oracle for the sorted-interval Winsorized implementation."""
+    current = np.sort(np.asarray(values, dtype=np.float64))
+    if current.size <= 1:
+        return float(current[0]) if current.size else 0.0
+    while True:
+        centre = float(np.median(current))
+        winsor = current.copy()
+        sigma = float(np.std(winsor, ddof=1))
+        for _ in range(stacker.WINSOR_MAX_ITERATIONS):
+            np.clip(
+                winsor,
+                centre - stacker.WINSOR_LIMIT_SIGMA * sigma,
+                centre + stacker.WINSOR_LIMIT_SIGMA * sigma,
+                out=winsor,
+            )
+            new_sigma = stacker.WINSOR_SIGMA_CORRECTION * float(np.std(winsor, ddof=1))
+            converged = abs(new_sigma - sigma) <= stacker.WINSOR_CONVERGENCE_RATIO * abs(sigma)
+            zero_converged = sigma == 0.0 and new_sigma == 0.0
+            sigma = new_sigma
+            if converged or zero_converged:
+                break
+        keep = (
+            (current >= centre - clip_low * sigma)
+            & (current <= centre + clip_high * sigma)
+        )
+        if current.size < stacker.ROBUST_MIN_SAMPLES or np.count_nonzero(keep) < stacker.ROBUST_MIN_SAMPLES:
+            break
+        if np.all(keep):
+            break
+        current = current[keep]
+    return float(np.mean(current))
+
+
 def brute_canvas_shift(data, dx, dy, source_valid, canvas):
     source_height, source_width = data.shape
     output_height, output_width = canvas.shape
@@ -722,6 +756,148 @@ class BoundedFrameProcessingTests(unittest.TestCase):
 
 
 class MedianRowTilingTests(unittest.TestCase):
+    def test_mad_clip_uses_median_mad_and_asymmetric_bounds(self):
+        values = np.array(
+            [
+                [[8.0, 0.0]],
+                [[9.0, 9.0]],
+                [[10.0, 10.0]],
+                [[10.0, 10.0]],
+                [[10.0, 10.0]],
+                [[11.0, 11.0]],
+                [[12.0, 12.0]],
+                [[100.0, 100.0]],
+            ],
+            dtype=np.float32,
+        )
+        counts = np.full((1, 2), 8, dtype=np.uint32)
+
+        result = stacker.finalize_order_statistic_cube(
+            values.copy(), counts, "mad-clip", 50, clip_low=3.0, clip_high=1.0
+        )
+
+        # The 100 ADU outlier and the upper-side 12 ADU samples are rejected by
+        # the tighter high bound. The 0 ADU sample is rejected by the low bound.
+        np.testing.assert_allclose(result, np.array([[58.0 / 6.0, 10.0]]), rtol=0.0, atol=1.0e-5)
+
+    def test_winsorized_sigma_clamps_outliers_before_mean(self):
+        values = np.concatenate((np.full(19, 10.0), np.array([100.0]))).astype(np.float32).reshape(20, 1, 1)
+        counts = np.full((1, 1), 20, dtype=np.uint32)
+        metrics = stacker.OrderStatisticCombineMetrics()
+
+        result = stacker.finalize_order_statistic_cube(
+            values,
+            counts,
+            "winsorized-sigma",
+            50,
+            clip_low=3.0,
+            clip_high=3.0,
+            metrics=metrics,
+        )
+
+        # The inner +/-1.5 sigma Winsorization converges to a robust scale;
+        # the original 100 ADU sample is then rejected by the outer 3 sigma test.
+        np.testing.assert_allclose(result, np.array([[10.0]]), rtol=0.0, atol=1.0e-5)
+        self.assertEqual(stacker.WINSOR_CONVERGENCE_RATIO, 0.01)
+        self.assertEqual(metrics.pixel_columns, 1)
+        self.assertGreaterEqual(metrics.inner_chunks, 1)
+        self.assertGreaterEqual(metrics.inner_iteration_passes, 1)
+        self.assertGreaterEqual(metrics.inner_iteration_max, 1)
+        self.assertLessEqual(metrics.inner_maxed_chunks, 1)
+        self.assertGreaterEqual(metrics.outer_passes_total, 1)
+        self.assertGreaterEqual(metrics.outer_passes_max, 1)
+        self.assertGreaterEqual(metrics.outer_rejected_samples, 1)
+        self.assertGreaterEqual(metrics.outer_rejected_pixel_columns, 1)
+        self.assertGreaterEqual(metrics.sort_seconds, 0.0)
+        self.assertGreaterEqual(metrics.inner_winsorization_seconds, 0.0)
+        self.assertGreaterEqual(metrics.outer_rejection_seconds, 0.0)
+        self.assertGreaterEqual(metrics.final_mean_seconds, 0.0)
+
+    def test_sigma_clip_rejects_outliers_with_mean_and_sample_std(self):
+        values = np.concatenate(
+            (
+                np.full((19, 1, 2), 100.0, dtype=np.float32),
+                np.array([[[200.0, 0.0]]], dtype=np.float32),
+            ),
+            axis=0,
+        )
+        counts = np.full((1, 2), 20, dtype=np.uint32)
+        metrics = stacker.OrderStatisticCombineMetrics()
+
+        result = stacker.finalize_order_statistic_cube(
+            values,
+            counts,
+            "sigma-clip",
+            50,
+            clip_low=3.0,
+            clip_high=3.0,
+            metrics=metrics,
+        )
+
+        # The first pass uses the ordinary mean and sample standard deviation;
+        # the second pass averages the 19 surviving 100 ADU samples.
+        np.testing.assert_allclose(result, np.array([[100.0, 100.0]]), rtol=0.0, atol=1.0e-5)
+        self.assertEqual(metrics.inner_iteration_passes, 0)
+        self.assertEqual(metrics.inner_chunks, 0)
+        self.assertEqual(metrics.outer_rejected_samples, 2)
+        self.assertEqual(metrics.outer_rejected_pixel_columns, 2)
+        self.assertGreaterEqual(metrics.outer_passes_max, 2)
+
+    def test_order_statistic_metrics_break_down_median_sort(self):
+        values = np.arange(12.0, dtype=np.float32).reshape(3, 2, 2)
+        counts = np.full((2, 2), 3, dtype=np.uint32)
+        metrics = stacker.OrderStatisticCombineMetrics()
+
+        result = stacker.finalize_order_statistic_cube(
+            values,
+            counts,
+            "median",
+            50,
+            metrics=metrics,
+        )
+
+        np.testing.assert_allclose(result, values[1], rtol=0.0, atol=0.0)
+        self.assertEqual(metrics.pixel_columns, 0)
+        self.assertGreaterEqual(metrics.sort_seconds, 0.0)
+        self.assertEqual(metrics.inner_iteration_passes, 0)
+        self.assertEqual(metrics.outer_passes_total, 0)
+
+    def test_winsorized_sorted_intervals_match_scalar_reference(self):
+        rng = np.random.default_rng(20260904)
+        values = rng.normal(100.0, 2.0, size=(17, 1, 9)).astype(np.float32)
+        values[:, 0, 0] = np.concatenate((np.full(15, 100.0), np.array([75.0, 500.0])))
+        values[:, 0, 1] = np.concatenate((np.full(14, 100.0), np.array([94.0, 95.0, 106.0])))
+        values[:, 0, 2] = np.concatenate((np.full(16, 100.0), np.array([500.0])))
+        counts = np.full((1, 9), values.shape[0], dtype=np.uint32)
+        actual = stacker.finalize_order_statistic_cube(
+            values.copy(),
+            counts,
+            "winsorized-sigma",
+            50,
+            clip_low=2.0,
+            clip_high=3.0,
+        )
+        expected = np.array(
+            [
+                scalar_winsorized_sigma_reference(values[:, 0, column], 2.0, 3.0)
+                for column in range(values.shape[2])
+            ],
+            dtype=np.float64,
+        ).reshape(1, 9)
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1.0e-6)
+
+    def test_mad_clip_preserves_a_pixel_when_rejection_would_leave_too_few_samples(self):
+        values = np.array([0.0, 10.0, 20.0], dtype=np.float32).reshape(3, 1, 1)
+        counts = np.full((1, 1), 3, dtype=np.uint32)
+
+        result = stacker.finalize_order_statistic_cube(
+            values, counts, "mad-clip", 50, clip_low=0.0, clip_high=0.0
+        )
+
+        # The strict bounds would keep only the median, but the safety rule
+        # prevents the current set from being reduced below three samples.
+        np.testing.assert_allclose(result, np.array([[10.0]]), rtol=0.0, atol=1.0e-5)
+
     def test_in_memory_median_and_rankfit_match_disk_backed_accumulator(self):
         rng = np.random.default_rng(20260901)
         images = rng.normal(100.0, 8.0, size=(13, 3, 4, 5)).astype(np.float32)
@@ -1018,6 +1194,77 @@ class MedianRowTilingTests(unittest.TestCase):
             )
             np.testing.assert_array_equal(rankfit_actual.star_coverage, expected_star_coverage)
             np.testing.assert_array_equal(rankfit_actual.metcalf_coverage, expected_metcalf_coverage)
+
+            for method, clip_low, clip_high in (
+                ("sigma-clip", 3.0, 2.0),
+                ("mad-clip", 3.0, 2.0),
+                ("winsorized-sigma", 2.0, 3.0),
+            ):
+                with self.subTest(method=method):
+                    star_cube = np.empty((len(tasks), 3, 120, 160), dtype=np.float32)
+                    metcalf_cube = np.empty_like(star_cube)
+                    star_counts = np.zeros((3, 120, 160), dtype=np.uint32)
+                    metcalf_counts = np.zeros((3, 120, 160), dtype=np.uint32)
+                    for index, result in enumerate(full_results):
+                        stacker.add_order_statistic_sample(
+                            star_cube, index, result.star_data, result.star_mask, False, star_counts
+                        )
+                        stacker.add_order_statistic_sample(
+                            metcalf_cube, index, result.metcalf_data, result.metcalf_mask, False, metcalf_counts
+                        )
+                    expected_robust_star = stacker.finalize_order_statistic_cube(
+                        star_cube,
+                        star_counts,
+                        method,
+                        50,
+                        clip_low,
+                        clip_high,
+                    )
+                    expected_robust_metcalf = stacker.finalize_order_statistic_cube(
+                        metcalf_cube,
+                        metcalf_counts,
+                        method,
+                        50,
+                        clip_low,
+                        clip_high,
+                    )
+                    robust_actual = stacker.stack_order_statistic_rows(
+                        tasks,
+                        analyses,
+                        (3, 120, 160),
+                        canvas,
+                        method,
+                        50,
+                        False,
+                        "valid",
+                        "offset",
+                        True,
+                        "moving",
+                        worker_plan,
+                        tile_plan,
+                        clip_low=clip_low,
+                        clip_high=clip_high,
+                    )
+                    np.testing.assert_allclose(
+                        robust_actual.star_data, expected_robust_star, rtol=0.0, atol=1.0e-6
+                    )
+                    np.testing.assert_allclose(
+                        robust_actual.metcalf_data, expected_robust_metcalf, rtol=0.0, atol=1.0e-6
+                    )
+                    np.testing.assert_array_equal(robust_actual.star_coverage, expected_star_coverage)
+                    np.testing.assert_array_equal(robust_actual.metcalf_coverage, expected_metcalf_coverage)
+                    self.assertGreater(robust_actual.star_combine_metrics.pixel_columns, 0)
+                    self.assertIsNotNone(robust_actual.metcalf_combine_metrics)
+                    self.assertGreater(robust_actual.metcalf_combine_metrics.pixel_columns, 0)
+                    if method == "winsorized-sigma":
+                        self.assertGreater(
+                            robust_actual.star_combine_metrics.inner_winsorization_seconds,
+                            0.0,
+                        )
+                        self.assertGreater(
+                            robust_actual.metcalf_combine_metrics.inner_winsorization_seconds,
+                            0.0,
+                        )
 
             fixed_actual = stacker.stack_order_statistic_rows(
                 tasks,

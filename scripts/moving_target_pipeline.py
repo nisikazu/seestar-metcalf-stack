@@ -39,6 +39,7 @@ from moving_target_stack import (
     run_siril,
     select_reference_index,
     validate_output_region_options,
+    validate_clip_bounds,
     wcs_cd_matrix,
     write_registered_float,
 )
@@ -239,9 +240,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cold-pixel-sigma", type=float, default=3.0, help="Siril cold-pixel sigma threshold. Defaults to 3.")
     parser.add_argument(
         "--stack-method",
-        choices=("mean", "median", "rankfit"),
+        choices=("mean", "median", "rankfit", "sigma-clip", "mad-clip", "winsorized-sigma"),
         default="mean",
-        help="Per-pixel combination method. median and rankfit exclude exact-zero samples. Defaults to mean.",
+        help=(
+            "Per-pixel combination method: mean, median, rankfit, sigma-clip, mad-clip, or winsorized-sigma. "
+            "median, rankfit, and clip methods exclude exact-zero samples. Defaults to mean."
+        ),
     )
     parser.add_argument(
         "--stack-workers",
@@ -259,7 +263,7 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         metavar="auto|N",
         help=(
-            "Full-width output rows held in each median/rank-fit working cube. "
+            "Full-width output rows held in each median/rank-fit/robust-clip working cube. "
             "auto uses at most about half of currently available RAM (default)."
         ),
     )
@@ -277,6 +281,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=50,
         help="Central ranked-sample percentage used by rankfit (1-100). Defaults to 50.",
+    )
+    parser.add_argument(
+        "--clip-low",
+        type=float,
+        default=3.0,
+        help="Lower clipping threshold in sigma units for sigma-clip, mad-clip, and winsorized-sigma. Defaults to 3.",
+    )
+    parser.add_argument(
+        "--clip-high",
+        type=float,
+        default=3.0,
+        help="Upper clipping threshold in sigma units for sigma-clip, mad-clip, and winsorized-sigma. Defaults to 3.",
     )
     parser.add_argument(
         "--reference-frame",
@@ -306,7 +322,7 @@ def parse_args() -> argparse.Namespace:
         "--zero-sample-policy",
         choices=("exclude", "include"),
         default="exclude",
-        help="Exclude or include exact-zero samples in median and rank-fit stacks. Defaults to exclude.",
+        help="Exclude or include exact-zero samples in median, rank-fit, and robust-clip stacks. Defaults to exclude.",
     )
     parser.add_argument(
         "--reference-frame-file",
@@ -392,6 +408,10 @@ def parse_args() -> argparse.Namespace:
     delattr(args, "source_dir_option")
     if not 1 <= args.rankfit_fraction <= 100:
         parser.error("--rankfit-fraction must be an integer from 1 to 100")
+    try:
+        validate_clip_bounds(args.clip_low, args.clip_high)
+    except ValueError as error:
+        parser.error(str(error))
     if args.background_normalization is None:
         args.background_normalization = "none" if args.padding_policy == "legacy" else "quadratic"
     if args.output_bitpix is None:
@@ -1434,6 +1454,10 @@ def run_stack(
             args.zero_sample_policy,
             "--rankfit-fraction",
             str(args.rankfit_fraction),
+            "--clip-low",
+            str(args.clip_low),
+            "--clip-high",
+            str(args.clip_high),
             "--reference-frame",
             args.reference_frame,
             "--output-bitpix",
@@ -1640,6 +1664,12 @@ def main(args: argparse.Namespace) -> Path | None:
         "output_region_cover_ratio_percent": args.output_region_cover_ratio,
         "zero_sample_policy": args.zero_sample_policy if args.stack_method != "mean" else None,
         "rankfit_fraction_percent": args.rankfit_fraction if args.stack_method == "rankfit" else None,
+        "clip_low_sigma": args.clip_low if args.stack_method in {"sigma-clip", "mad-clip", "winsorized-sigma"} else None,
+        "clip_high_sigma": args.clip_high if args.stack_method in {"sigma-clip", "mad-clip", "winsorized-sigma"} else None,
+        "clip_iterations": (
+            1 if args.stack_method == "mad-clip" else "until stable"
+            if args.stack_method in {"sigma-clip", "winsorized-sigma"} else None
+        ),
         "saturation_warning": args.saturation_warning,
         "saturation_threshold_percent": args.saturation_threshold_percent,
         "saturation_color": args.saturation_color,

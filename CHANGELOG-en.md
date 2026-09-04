@@ -6,14 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## v0.9.7 - 2026-09-04
+
 ### Added
 
 - Add the compact `--output-region reference|union|N|M%` option. The default preserves the reference footprint, `union` encloses all accepted footprints, an integer outputs the bounding rectangle covered by at least N accepted frames, and a percentage outputs the bounding rectangle covered by at least that fraction of accepted frames.
 - Apply an independent output-canvas shape and origin to mean, median, rank-fit, valid and saturation masks, and WCS rebasing. FITS headers and summary JSON record the selected region.
+- Add `--stack-method sigma-clip`. `--clip-low` and `--clip-high` are shared by simple sigma clipping, MAD clipping, and Winsorized Sigma. Simple sigma clipping uses the ordinary mean and sample standard deviation, rejects samples outside the bounds until stable, and averages the survivors as a convenient low-overhead option.
+- Add `--stack-method mad-clip` and `--stack-method winsorized-sigma`. `--clip-low` and `--clip-high` set independent lower and upper thresholds, both defaulting to 3. MAD clipping rejects once using median/MAD; Winsorized Sigma follows Siril's internal Winsorization and repeats rejection until stable before averaging the original surviving samples.
+- Change the Winsorized Sigma inner scale convergence threshold to a 1% relative change (`0.01`) to reduce processing time on long sequences while retaining rejection and mean combination of the original samples.
 
 ### Known limitation
 
 - Expanded output is not yet available on the SharpCap StackLog registration path because its pre-aligned temporary images are already cropped to the reference footprint.
+
+### Validation
+
+- Ran live plate-solving against a WCS-stripped 220P/McNaught FITS using bundled Siril and Astrometry.net. Siril completed in 1.54 seconds and Astrometry.net in 37.47 seconds; both produced valid WCS FITS files.
 
 ## v0.9.6 - 2026-09-02
 

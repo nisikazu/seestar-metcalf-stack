@@ -541,8 +541,9 @@ from the median samples by default:
 .\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method median
 ```
 
-Median and rank-fit first analyze every accepted frame for its background model
-and saturation scalar. The final output is then processed as full-width row
+Median, rank-fit, sigma clipping, MAD clipping, and Winsorized Sigma first analyze every
+accepted frame for its background model and saturation scalar. The final output
+is then processed as full-width row
 tiles. Only the samples needed for one tile are loaded into bounded in-memory
 `float32` cubes; those cubes are discarded after the tile is committed. A long
 sequence therefore does not require a full-image cube containing every frame,
@@ -589,9 +590,44 @@ the fitted value at the median rank. The default central percentage is 50:
 folders record it as `rankfit5_p50`. If fewer than seven central samples are
 available, that pixel falls back to the nonzero median.
 
-Output names always contain `_mean_`, `_median_`, or `_rankfit5_pNN_`. FITS
-headers record the method in `STKMODE`, and rank-fit products also record
-`RFFRAC` and `RFDEG`.
+For outlier rejection while retaining a mean-like result, use `sigma-clip`,
+`mad-clip`, or `winsorized-sigma`. `sigma-clip` is the simple, low-overhead
+choice: it uses the ordinary mean and sample standard deviation, then repeats
+the outer rejection until stable. `mad-clip` makes one rejection pass, while
+`winsorized-sigma` also iterates its internal scale estimate. All three accept
+independent lower and upper thresholds in sigma units through `--clip-low` and
+`--clip-high`, each defaulting to 3:
+
+```bat
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method mad-clip --clip-low 3 --clip-high 3
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method winsorized-sigma --clip-low 2 --clip-high 4
+.\seestar-metcalf-stack.cmd "C:\path\to\frames" --stack-method sigma-clip --clip-low 3 --clip-high 3
+```
+
+`sigma-clip` uses each pixel's ordinary mean and sample standard deviation
+(`ddof=1`) as the centre and scale, rejects original samples outside the
+asymmetric bounds, and averages the survivors. It is convenient for a quick
+trial, but the mean and standard deviation are themselves affected by strong
+outliers. In that case, `mad-clip` or `winsorized-sigma` is more robust.
+`mad-clip` uses each pixel's median and `1.4826*MAD` as the robust scale,
+rejects samples outside the asymmetric bounds, and averages the survivors. It
+is especially resistant to bright one-frame outliers such as satellites,
+cosmic rays, and hot pixels. `winsorized-sigma` uses the pixel median as its
+center, repeatedly Winsorizes at `+/-1.5 sigma` with the fixed `1.134` correction
+until the scale changes by no more than 1% relatively, then rejects the
+original samples outside the requested bounds and averages the survivors. The
+temporary Winsorized values are never used as the final image. A pixel is not
+reduced below three samples by rejection as a safety rule.
+
+All three methods use the same row-tiled path as median/rank-fit, and exact-zero
+handling follows `--zero-sample-policy`. FITS outputs record `CLIPLOW`,
+`CLIPHIGH`, `CLIPITR`, `CLIPBASE`, and `CLIPACT`; the summary JSON records the
+method, thresholds, and estimator. Output names contain `_sigma-clip_`,
+`_mad-clip_`, or `_winsorized-sigma_`.
+
+Output names always contain `_mean_`, `_median_`, `_rankfit5_pNN_`,
+`_sigma-clip_`, `_mad-clip_`, or `_winsorized-sigma_`. FITS headers record the method in
+`STKMODE`, and rank-fit products also record `RFFRAC` and `RFDEG`.
 
 ### First or midpoint reference frame
 
