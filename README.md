@@ -1,6 +1,6 @@
 # Seestar Metcalf Stack
 
-[改訂内容とトラブルシュート](TROUBLESHOOTING.md) | [変更履歴](CHANGELOG.md)
+[改訂内容とトラブルシュート](TROUBLESHOOTING.md) | [変更履歴](CHANGELOG.md) | [スタック方式の選び方](STACK-METHOD-GUIDE.md)
 
 [English](README-en.md) | [macOSセットアップ](README-macOS.md)
 
@@ -298,6 +298,8 @@ Pythonコードを改造した場合は、古いEXEが優先実行されない�
 次回以降はSiril WCS、Astrometry.net WCS、JSON calibrationの順に検証して再利用します。Sirilで解決できれば画像をAstrometry.netへ送信しません。Astrometry.netへのアップロード後に処理が中断した場合も、保存されたsubmission IDから既存ジョブを再開します。`--reference-frame`によって別の基準FITSが選ばれれば、そのFITS専用の別キャッシュになります。ソースフォルダ以外へ永続キャッシュを置きたい場合だけ `--solve-dir` を指定します。
 
 ### 平均、メジアン、ランクフィット
+
+方式ごとの向き不向き、処理時間、星トラック除去、彗星S/Nの実測比較は、[スタック方式の選び方](STACK-METHOD-GUIDE.md)にまとめています。
 
 デフォルトの平均は、入力が良好なら一般に最も高いS/Nを得やすい方式です。背景星位置合わせ行列とメトカーフ移動量を合成した1回のbilinear補間によって画像外になった画素は加算せず、画素ごとの整数の寄与枚数で割ります。補間に必要な4近傍がすべて実画像内にある場合だけ採用するため、外挿を行わず、重なり枚数が少ない周辺部でも平均輝度が暗くなりません。
 

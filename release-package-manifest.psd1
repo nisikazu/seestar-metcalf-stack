@@ -17,6 +17,7 @@
         "README-en.md"
         "README-macOS.md"
         "README.md"
+        "STACK-METHOD-GUIDE.md"
         "requirements.txt"
         "scripts\astrometry_solve.py"
         "scripts\fits_preview.py"

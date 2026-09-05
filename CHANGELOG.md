@@ -6,6 +6,10 @@
 
 ## Unreleased
 
+### ドキュメント
+
+- `STACK-METHOD-GUIDE.md`を追加しました。`mean`、`median`、`sigma-clip`、`mad-clip`、`winsorized-sigma`の用途、速度、星トラック除去効果、彗星S/Nの実測比較を、利用者が方式を選ぶための資料としてまとめています。
+
 ## v0.9.7 - 2026-09-04
 
 ### 追加

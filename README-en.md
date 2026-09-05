@@ -1,6 +1,6 @@
 # Seestar Metcalf Stack
 
-[Changes and troubleshooting](TROUBLESHOOTING-en.md) | [Changelog](CHANGELOG-en.md)
+[Changes and troubleshooting](TROUBLESHOOTING-en.md) | [Changelog](CHANGELOG-en.md) | [Stack method guide (Japanese)](STACK-METHOD-GUIDE.md)
 
 [日本語](README.md) | [macOS setup (Japanese)](README-macOS.md)
 
